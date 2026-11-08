@@ -49,8 +49,15 @@ services:
     name: annoying-reminder-web
     runtime: static
     rootDir: web
-    buildCommand: ""
+    buildCommand: sh build-config.sh
     staticPublishPath: .
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: API_URL
+        sync: false
     headers:
       - path: /sw.js
         name: Cache-Control

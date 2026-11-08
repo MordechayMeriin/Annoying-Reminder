@@ -66,7 +66,10 @@ e.g. a cheap paid model first, then a `:free` fallback.
 2. Fill in the env vars it asks for. `WEB_ORIGIN` / `API_URL` are the two `.onrender.com` URLs
    (if you don't know them yet, put placeholders, then fix them after the first deploy).
    `VAPID_SUBJECT` = `mailto:your-email`.
-3. Edit [`web/config.js`](web/config.js) with `SUPABASE_URL`, `SUPABASE_ANON_KEY` and the API URL, commit, push.
+3. The **web** service also asks for `SUPABASE_URL`, `SUPABASE_ANON_KEY` and `API_URL`. Its build
+   ([`web/build-config.sh`](web/build-config.sh)) writes them into `config.js`, so nothing
+   project-specific is committed. These values are public by design; secrets go only on the API service.
+   After changing them, use **Manual Deploy** on the web service to rebuild.
 4. Check `https://<api>.onrender.com/health` returns `{"ok":true}`.
 
 ### 4. cron-job.org
@@ -99,6 +102,11 @@ pip install -r requirements.txt pytest
 cp .env.example .env   # fill in, then export the variables
 python -m pytest -q
 uvicorn app.main:app --reload
+
+# web app (another terminal)
+cd web
+SUPABASE_URL=... SUPABASE_ANON_KEY=... API_URL=http://localhost:8000 sh build-config.sh
+python -m http.server 5173   # set WEB_ORIGIN=http://localhost:5173 for the backend
 ```
 
 ## Project layout
