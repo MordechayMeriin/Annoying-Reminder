@@ -1,0 +1,97 @@
+:root {
+  --bg: #111827;
+  --card: #1f2937;
+  --line: #374151;
+  --text: #f3f4f6;
+  --muted: #9ca3af;
+  --accent: #f59e0b;
+  --danger: #ef4444;
+  --ok: #22c55e;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+}
+
+[hidden] { display: none !important; }
+
+.screen { max-width: 640px; margin: 0 auto; min-height: 100vh; }
+#main { display: flex; flex-direction: column; padding-bottom: 76px; }
+
+h1 { font-size: 1.25rem; margin: 0; }
+h2 { font-size: .85rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 20px 16px 8px; }
+
+.card { background: var(--card); border-radius: 14px; padding: 16px; }
+.muted { color: var(--muted); font-size: .9rem; }
+
+button {
+  background: var(--accent); color: #111; border: 0; border-radius: 10px;
+  padding: 12px 16px; font-weight: 600; font-size: 1rem; cursor: pointer;
+}
+button.small { padding: 6px 10px; font-size: .85rem; }
+button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); }
+button:disabled { opacity: .5; }
+
+input {
+  width: 100%; padding: 12px; border-radius: 10px; border: 1px solid var(--line);
+  background: var(--bg); color: var(--text); font-size: 1rem;
+}
+
+/* Login */
+.login-card { margin: 18vh 16px 0; display: grid; gap: 14px; }
+.login-card form { display: grid; gap: 10px; }
+
+/* Header + tabs */
+header { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; }
+.header-actions { display: flex; gap: 6px; }
+.tabs { display: flex; gap: 6px; padding: 0 16px; border-bottom: 1px solid var(--line); }
+.tabs button {
+  background: transparent; color: var(--muted); border-radius: 0; padding: 10px 12px;
+  border-bottom: 2px solid transparent;
+}
+.tabs button.active { color: var(--text); border-bottom-color: var(--accent); }
+
+/* Plan */
+.plan { margin: 16px; white-space: pre-wrap; border-left: 4px solid var(--accent); }
+.plan .plan-title { font-weight: 700; margin-bottom: 6px; }
+
+/* Tasks */
+.tasks { list-style: none; margin: 0; padding: 0 16px; display: grid; gap: 8px; }
+.task {
+  background: var(--card); border-radius: 12px; padding: 12px; display: flex; gap: 10px; align-items: center;
+}
+.task.highlight { outline: 2px solid var(--accent); }
+.task .info { flex: 1; min-width: 0; }
+.task .title { font-weight: 600; overflow-wrap: anywhere; }
+.task .meta { color: var(--muted); font-size: .85rem; }
+.task .meta.overdue { color: var(--danger); }
+.task .btns { display: flex; gap: 6px; }
+.task .btns button { padding: 8px 10px; font-size: .9rem; }
+.task .done-btn { background: var(--ok); }
+.task .snooze-btn { background: transparent; color: var(--muted); border: 1px solid var(--line); }
+.empty { color: var(--muted); padding: 4px 16px; font-size: .9rem; }
+
+/* Chat */
+.messages { padding: 12px 16px; display: flex; flex-direction: column; gap: 8px; }
+.msg { max-width: 85%; padding: 10px 12px; border-radius: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.msg.user { align-self: flex-end; background: var(--accent); color: #111; border-bottom-right-radius: 4px; }
+.msg.assistant { align-self: flex-start; background: var(--card); border-bottom-left-radius: 4px; }
+.msg .kind { display: block; font-size: .75rem; color: var(--muted); margin-bottom: 4px; }
+.msg.pending { opacity: .6; }
+
+.chat-form {
+  position: fixed; bottom: 0; left: 0; right: 0; max-width: 640px; margin: 0 auto;
+  display: flex; gap: 8px; padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+  background: var(--bg); border-top: 1px solid var(--line);
+}
+.chat-form button { width: 52px; }
+
+.toast {
+  position: fixed; bottom: 90px; left: 50%; transform: translateX(-50%);
+  background: #000; color: #fff; padding: 10px 16px; border-radius: 10px; font-size: .9rem; max-width: 90%;
+}

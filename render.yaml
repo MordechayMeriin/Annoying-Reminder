@@ -1,0 +1,60 @@
+# Render Blueprint: New → Blueprint → pick this repo. Creates both services on the free plan.
+# Values marked sync: false are asked for during setup (paste them from the checklist in README.md).
+services:
+  - type: web
+    name: annoying-reminder-api
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.8"
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: OWNER_USER_ID
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: OPENROUTER_MODELS
+        sync: false
+      - key: CRON_SECRET
+        sync: false
+      - key: ACTION_SECRET
+        sync: false
+      - key: VAPID_PRIVATE_KEY
+        sync: false
+      - key: VAPID_PUBLIC_KEY
+        sync: false
+      - key: VAPID_SUBJECT
+        sync: false
+      - key: WEB_ORIGIN
+        sync: false
+      - key: API_URL
+        sync: false
+      - key: PUSHOVER_TOKEN
+        sync: false
+      - key: PUSHOVER_USER
+        sync: false
+      - key: TIMEZONE
+        value: Asia/Jerusalem
+
+  - type: web
+    name: annoying-reminder-web
+    runtime: static
+    rootDir: web
+    buildCommand: ""
+    staticPublishPath: .
+    headers:
+      - path: /sw.js
+        name: Cache-Control
+        value: no-cache
+      - path: /config.js
+        name: Cache-Control
+        value: no-cache
