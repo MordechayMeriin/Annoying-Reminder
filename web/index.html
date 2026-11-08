@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#111827">
+  <title>Annoying Reminder</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/config.js"></script>
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <!-- Login -->
+  <section id="login" class="screen" hidden>
+    <div class="card login-card">
+      <h1>🔔 Annoying Reminder</h1>
+      <form id="email-form">
+        <label for="email">Email</label>
+        <input id="email" type="email" autocomplete="email" required>
+        <button type="submit">Send login code</button>
+      </form>
+      <form id="code-form" hidden>
+        <label for="code">Code from the email</label>
+        <input id="code" inputmode="numeric" autocomplete="one-time-code" required>
+        <button type="submit">Log in</button>
+      </form>
+      <p id="login-msg" class="muted"></p>
+    </div>
+  </section>
+
+  <!-- Main -->
+  <section id="main" class="screen" hidden>
+    <header>
+      <h1>🔔 Reminder</h1>
+      <div class="header-actions">
+        <button id="enable-push" class="small" hidden>Enable notifications</button>
+        <button id="refresh" class="small ghost" title="Refresh">↻</button>
+        <button id="logout" class="small ghost" title="Log out">⎋</button>
+      </div>
+    </header>
+
+    <nav class="tabs">
+      <button data-tab="today" class="active">Today</button>
+      <button data-tab="tasks">All tasks</button>
+      <button data-tab="chat">Chat</button>
+    </nav>
+
+    <div id="tab-today" class="tab">
+      <div id="plan" class="card plan" hidden></div>
+      <h2>Overdue & today</h2>
+      <ul id="today-list" class="tasks"></ul>
+      <h2>Coming up</h2>
+      <ul id="upcoming-list" class="tasks"></ul>
+    </div>
+
+    <div id="tab-tasks" class="tab" hidden>
+      <ul id="all-list" class="tasks"></ul>
+    </div>
+
+    <div id="tab-chat" class="tab chat-tab" hidden>
+      <div id="messages" class="messages"></div>
+    </div>
+
+    <form id="chat-form" class="chat-form">
+      <input id="chat-input" dir="auto" autocomplete="off"
+             placeholder="e.g. Dentist Thursday 10:00 / לשלם ארנונה עד ראשון">
+      <button type="submit" id="chat-send">➤</button>
+    </form>
+  </section>
+
+  <div id="toast" class="toast" hidden></div>
+</body>
+</html>
