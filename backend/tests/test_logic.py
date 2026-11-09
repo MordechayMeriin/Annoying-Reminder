@@ -34,14 +34,12 @@ def test_job_window():
     assert not job_is_due(local(2026, 11, 9, 11, 0), time(7, 30))
 
 
-def test_nagging_and_escalation():
+def test_nagging():
     now = datetime(2026, 11, 9, 10, tzinfo=timezone.utc)
-    nxt, esc = next_reminder_after_nag(now, 1, 1, 30, 4)
-    assert nxt == now + timedelta(minutes=30) and not esc
-    nxt, _ = next_reminder_after_nag(now, 1, 3, 30, 4)
-    assert nxt == now + timedelta(minutes=15)
-    assert next_reminder_after_nag(now, 4, 1, 30, 4) == (None, False)
-    assert next_reminder_after_nag(now, 4, 3, 30, 4) == (None, True)
+    assert next_reminder_after_nag(now, 1, 1, 30, 4) == now + timedelta(minutes=30)
+    assert next_reminder_after_nag(now, 1, 3, 30, 4) == now + timedelta(minutes=15)
+    assert next_reminder_after_nag(now, 4, 1, 30, 4) is None
+    assert next_reminder_after_nag(now, 4, 3, 30, 4) is None
 
 
 def test_recurrence():

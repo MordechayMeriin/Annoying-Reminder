@@ -77,7 +77,7 @@ def _zone(value: str) -> ZoneInfo:
 @dataclass(frozen=True)
 class Spec:
     key: str             # API / database key; the env var is KEY.upper()
-    kind: str            # time | times | time_off | int | float | bool | weekday | timezone
+    kind: str            # time | times | time_off | int | float | bool | weekday | timezone | choice
     default: str         # built-in default, as text
     label: str
     group: str
@@ -85,6 +85,7 @@ class Spec:
     min: float | None = None
     max: float | None = None
     attr: str = ""       # Settings attribute when it differs from key
+    options: tuple[tuple[str, str], ...] = ()   # choice: (value, label)
 
     @property
     def env(self) -> str:
@@ -108,6 +109,11 @@ class Spec:
             return _bool(raw)
         if self.kind == "timezone":
             return _zone(raw)
+        if self.kind == "choice":
+            value = raw.lower()
+            if value not in {v for v, _ in self.options}:
+                raise ValueError("choose one of: " + ", ".join(v for v, _ in self.options))
+            return value
         try:
             value = int(raw) if self.kind == "int" else float(raw)
         except ValueError:
@@ -133,11 +139,38 @@ class Spec:
             return "true" if v else "false"
         if self.kind == "timezone":
             return v.key
+        if self.kind == "choice":
+            return v
         return f"{v:g}" if self.kind == "float" else str(v)
 
 
-_G_DAY, _G_QUIET, _G_SHABBAT, _G_MEET, _G_NAG = (
-    "Daily messages", "Quiet hours", "Shabbat & holidays", "Meetings", "Check-ins & limits")
+_G_DAY, _G_QUIET, _G_SHABBAT, _G_MEET, _G_NAG, _G_PUSHOVER = (
+    "Daily messages", "Quiet hours", "Shabbat & holidays", "Meetings", "Check-ins & limits", "Pushover")
+
+PUSHOVER_MODES = (
+    ("always", "Every message"),
+    ("only", "Instead of browser"),
+    ("backup", "As a backup"),
+    ("off", "Never"),
+)
+PUSHOVER_ALARM_FOR = (
+    ("critical", "Critical tasks"),
+    ("important", "Important + critical"),
+    ("all", "Every task"),
+    ("off", "Nothing"),
+)
+# Pushover's built-in sounds (https://pushover.net/api#sounds). "default" = what the Pushover app uses.
+PUSHOVER_SOUNDS = (
+    ("default", "Pushover app default"),
+    ("pushover", "Pushover"), ("bike", "Bike"), ("bugle", "Bugle"), ("cashregister", "Cash register"),
+    ("classical", "Classical"), ("cosmic", "Cosmic"), ("falling", "Falling"), ("gamelan", "Gamelan"),
+    ("incoming", "Incoming"), ("intermission", "Intermission"), ("magic", "Magic"),
+    ("mechanical", "Mechanical"), ("pianobar", "Piano bar"), ("siren", "Siren"),
+    ("spacealarm", "Space alarm"), ("tugboat", "Tug boat"),
+    ("alien", "Alien alarm (long)"), ("climb", "Climb (long)"), ("persistent", "Persistent (long)"),
+    ("echo", "Pushover echo (long)"), ("updown", "Up down (long)"),
+    ("vibrate", "Vibrate only"), ("none", "Silent"),
+)
 
 SPECS: dict[str, Spec] = {s.key: s for s in [
     Spec("timezone", "timezone", "Asia/Jerusalem", "Time zone", _G_DAY, attr="tz"),
@@ -189,6 +222,24 @@ SPECS: dict[str, Spec] = {s.key: s for s in [
          min=1, max=60),
     Spec("reply_link_hours", "float", "3", "A reply refers to the last check-in for (hours)", _G_NAG,
          min=0, max=48),
+
+    Spec("pushover_mode", "choice", "always", "Send to Pushover", _G_PUSHOVER,
+         "Every message: Pushover and browser push. Instead of browser: browser push only if Pushover "
+         "fails. As a backup: only when no browser got it, and alarms.", options=PUSHOVER_MODES),
+    Spec("pushover_sound", "choice", "default", "Sound: normal", _G_PUSHOVER,
+         "Daily messages and first check-ins.", options=PUSHOVER_SOUNDS),
+    Spec("pushover_sound_urgent", "choice", "persistent", "Sound: urgent", _G_PUSHOVER,
+         "Meetings, reminders you asked for, important tasks, ignored check-ins, alarms.",
+         options=PUSHOVER_SOUNDS),
+    Spec("pushover_urgent_after", "int", "1", "Urgent after this many ignored check-ins", _G_PUSHOVER,
+         "Check-ins about a task you keep ignoring get louder.", 0, 20),
+    Spec("pushover_alarm_for", "choice", "important", "Alarm for", _G_PUSHOVER,
+         "An alarm repeats until you acknowledge it in Pushover, write in the chat or act on a task.",
+         options=PUSHOVER_ALARM_FOR),
+    Spec("pushover_alarm_after", "int", "2", "Alarm after this many ignored check-ins", _G_PUSHOVER,
+         "If check-ins stop sooner (see above), the last one is the alarm.", 0, 50),
+    Spec("pushover_alarm_retry_min", "int", "2", "Alarm repeats every (min)", _G_PUSHOVER,
+         "For up to an hour, and never into quiet hours or Shabbat.", 1, 30),
 ]}
 
 
@@ -238,7 +289,7 @@ class Settings:
     vapid_public_key: str = field(default_factory=lambda: _req("VAPID_PUBLIC_KEY"))
     vapid_subject: str = field(default_factory=lambda: _req("VAPID_SUBJECT"))  # mailto:you@example.com
 
-    # --- Pushover (optional backup channel for critical reminders) ---
+    # --- Pushover (optional; strongly recommended: priorities, loud sounds, repeating alarms) ---
     pushover_token: str = field(default_factory=lambda: _opt("PUSHOVER_TOKEN", ""))
     pushover_user: str = field(default_factory=lambda: _opt("PUSHOVER_USER", ""))
 
@@ -285,6 +336,15 @@ class Settings:
     day_reset_time: time = field(default_factory=lambda: _env("day_reset_time"))
     # A reply this soon after a check-in treats that check-in's tasks as the likely topic.
     reply_link_hours: float = field(default_factory=lambda: _env("reply_link_hours"))
+
+    # Pushover (only used when PUSHOVER_TOKEN and PUSHOVER_USER are set)
+    pushover_mode: str = field(default_factory=lambda: _env("pushover_mode"))
+    pushover_sound: str = field(default_factory=lambda: _env("pushover_sound"))
+    pushover_sound_urgent: str = field(default_factory=lambda: _env("pushover_sound_urgent"))
+    pushover_urgent_after: int = field(default_factory=lambda: _env("pushover_urgent_after"))
+    pushover_alarm_for: str = field(default_factory=lambda: _env("pushover_alarm_for"))
+    pushover_alarm_after: int = field(default_factory=lambda: _env("pushover_alarm_after"))
+    pushover_alarm_retry_min: int = field(default_factory=lambda: _env("pushover_alarm_retry_min"))
 
     # --- Spend guards (env only: they cap OpenRouter spend even if the login were compromised) ---
     chat_per_minute: int = field(default_factory=lambda: int(_opt("CHAT_PER_MINUTE", "15")))

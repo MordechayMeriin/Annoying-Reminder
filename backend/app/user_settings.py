@@ -52,7 +52,10 @@ def save(values: dict[str, str | None]) -> dict[str, str]:
 
 
 def describe(now: datetime) -> dict[str, Any]:
-    """Everything the settings screen needs: fields with current values and the next quiet time."""
+    """
+    Everything the settings screen needs: fields with current values, the next quiet time and
+    whether Pushover is set up (its keys are env-only).
+    """
     current = config.overrides()
     out = []
     for spec in config.SPECS.values():
@@ -60,6 +63,7 @@ def describe(now: datetime) -> dict[str, Any]:
         out.append({
             "key": spec.key, "kind": spec.kind, "label": spec.label, "group": spec.group,
             "help": spec.help, "min": spec.min, "max": spec.max,
+            "options": [{"value": v, "label": label} for v, label in spec.options] or None,
             "value": current.get(spec.key, default), "default": default,
             "overridden": spec.key in current,
         })
@@ -73,4 +77,4 @@ def describe(now: datetime) -> dict[str, Any]:
             rest = {"name": p.name, "start": p.start.astimezone(tz).isoformat(timespec="minutes"),
                     "end": p.end.astimezone(tz).isoformat(timespec="minutes"),
                     "active": current_period(now, cfg) is not None}
-    return {"fields": out, "rest": rest}
+    return {"fields": out, "rest": rest, "pushover": {"configured": config.get_settings().pushover_enabled}}

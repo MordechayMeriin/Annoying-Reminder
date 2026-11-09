@@ -32,20 +32,77 @@ def job_is_due(now_local: datetime, scheduled: time, window_hours: float = 3.0) 
 
 def next_reminder_after_nag(
     now: datetime, nag_count: int, priority: int, interval_min: int, max_nags: int
-) -> tuple[datetime | None, bool]:
+) -> datetime | None:
     """
-    Decide what happens after a reminder was just sent (nag_count already incremented).
-    Returns (next remind_at or None to stop nagging, escalate_to_pushover).
-    Higher priority nags more often.
+    When to check in next after a reminder was just sent (nag_count already incremented).
+    None = stop nagging. Higher priority nags more often.
     """
     if nag_count >= max_nags:
-        return None, priority >= 3
+        return None
     interval = interval_min
     if priority == 2:
         interval = max(10, interval_min * 2 // 3)
     elif priority >= 3:
         interval = max(5, interval_min // 2)
-    return now + timedelta(minutes=interval), False
+    return now + timedelta(minutes=interval)
+
+
+# ================================================================ how loud (Pushover priority)
+#
+# NORMAL  → Pushover priority 0, the normal sound
+# URGENT  → priority 1: the urgent sound, highlighted, ignores the Pushover app's own quiet hours
+# ALARM   → priority 2: repeats every few minutes until acknowledged (or cancelled by the app)
+# The guardrails (quiet hours, Shabbat, gaps, caps) decide WHETHER to send; this only decides how loud.
+
+NORMAL, URGENT, ALARM = 0, 1, 2
+
+_ALARM_MIN_PRIORITY = {"critical": 3, "important": 2, "all": 1}
+
+
+@dataclass(frozen=True)
+class AlertPolicy:
+    urgent_after: int = 1          # ignored check-ins before they turn urgent
+    alarm_for: str = "important"   # critical | important | all | off  (by task priority)
+    alarm_after: int = 2           # ignored check-ins before the next one is an alarm
+    max_nags: int = 4              # check-ins per task before nagging stops
+
+
+def alert_level(task: dict[str, Any], ignored: int, p: AlertPolicy) -> int:
+    """
+    How loud a contact about one task should be.
+    ignored: check-ins about it in a row that got no reply.
+      ALARM  — a task of an alarm-worthy priority, ignored `alarm_after` times; if nagging would stop
+               before that, the last check-in is the alarm (only when all the earlier ones were ignored)
+      URGENT — meetings, reminders the user asked for, important/critical tasks, or ignored
+               `urgent_after` times
+      NORMAL — everything else (first check-ins about ordinary tasks)
+    """
+    min_prio = _ALARM_MIN_PRIORITY.get(p.alarm_for)
+    if (task["kind"] != "meeting" and min_prio is not None and task["priority"] >= min_prio
+            and ignored >= min(p.alarm_after, max(p.max_nags - 1, 0))):
+        return ALARM
+    if (task["kind"] == "meeting" or task.get("remind_requested") or task["priority"] >= 2
+            or ignored >= p.urgent_after):
+        return URGENT
+    return NORMAL
+
+
+def next_time_at(now_local: datetime, t: time) -> datetime:
+    """Next occurrence of a wall-clock time, strictly after now."""
+    candidate = now_local.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
+    if candidate <= now_local:
+        candidate += timedelta(days=1)
+    return candidate
+
+
+def alarm_window_s(now_local: datetime, quiet_start: time, next_rest_start: datetime | None,
+                   max_s: int = 3600) -> int:
+    """Seconds an alarm may keep repeating: up to max_s, but never into quiet hours or Shabbat."""
+    end = now_local + timedelta(seconds=max_s)
+    end = min(end, next_time_at(now_local, quiet_start))
+    if next_rest_start is not None and next_rest_start > now_local:
+        end = min(end, next_rest_start)
+    return max(0, int((end - now_local).total_seconds()))
 
 
 def _add_month(d: date) -> date:

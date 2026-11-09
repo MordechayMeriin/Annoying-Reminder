@@ -531,7 +531,7 @@ function restPreview(rest) {
 
 function settingControl(f) {
   const id = `set-${f.key}`;
-  const input = el(f.kind === "weekday" ? "select" : "input");
+  const input = el(f.kind === "weekday" || f.kind === "choice" ? "select" : "input");
   input.id = id;
   if (f.kind === "bool") {
     input.type = "checkbox";
@@ -572,6 +572,14 @@ function settingControl(f) {
     });
     return { node: input, get: () => input.value, set: (v) => (input.value = v) };
   }
+  if (f.kind === "choice") {
+    (f.options || []).forEach(({ value, label }) => {
+      const o = el("option", "", label);
+      o.value = value;
+      input.appendChild(o);
+    });
+    return { node: input, get: () => input.value, set: (v) => (input.value = v) };
+  }
   if (f.kind === "int" || f.kind === "float") {
     input.type = "number";
     input.inputMode = f.kind === "int" ? "numeric" : "decimal";
@@ -590,6 +598,7 @@ function settingControl(f) {
 function defaultText(f) {
   if (f.kind === "bool") return f.default === "true" ? "on" : "off";
   if (f.kind === "weekday") return WEEKDAYS.find(([v]) => v === f.default)?.[1] || f.default;
+  if (f.kind === "choice") return f.options?.find((o) => o.value === f.default)?.label || f.default;
   return f.default === "" ? "none" : f.default;
 }
 
@@ -611,7 +620,36 @@ function onSettingEdited(f) {
   $("settings-save").disabled = $("settings-discard").disabled = !pendingSettings.size;
 }
 
-function renderSettings(rest) {
+function pushoverBox(pushover) {
+  const box = el("div", "rest-preview");
+  if (!pushover?.configured) {
+    box.textContent = "Not set up — add PUSHOVER_TOKEN and PUSHOVER_USER on Render to get loud, " +
+      "repeating alerts. Until then everything goes to browser push.";
+    return box;
+  }
+  box.appendChild(el("div", "", "Send a test to hear each level:"));
+  const row = el("div", "inline");
+  for (const [level, label] of [["normal", "Normal"], ["urgent", "Urgent"], ["alarm", "Alarm"]]) {
+    const b = el("button", "small ghost", label);
+    b.type = "button";
+    b.onclick = async () => {
+      b.disabled = true;
+      try {
+        await api("/pushover/test", { method: "POST", body: JSON.stringify({ level }) });
+        toast(level === "alarm" ? "Alarm sent — acknowledge it in Pushover" : "Sent to Pushover");
+      } catch (e) {
+        toast(e.message);
+      } finally {
+        b.disabled = false;
+      }
+    };
+    row.appendChild(b);
+  }
+  box.appendChild(row);
+  return box;
+}
+
+function renderSettings(rest, pushover) {
   const form = $("settings-form");
   form.textContent = "";
   settingControls.clear();
@@ -627,6 +665,7 @@ function renderSettings(rest) {
     const section = el("section", "settings-group");
     section.appendChild(el("h2", "", group));
     if (list.some((f) => f.key === "shabbat_mode")) section.appendChild(restPreview(rest));
+    if (list.some((f) => f.key === "pushover_mode")) section.appendChild(pushoverBox(pushover));
     for (const f of list) {
       const c = settingControl(f);
       const row = el("div", `setting kind-${f.kind}`);
@@ -669,7 +708,7 @@ async function openSettings() {
   $("settings-form").textContent = "Loading…";
   try {
     const data = applySettings(await api("/settings"));
-    renderSettings(data.rest);
+    renderSettings(data.rest, data.pushover);
   } catch (e) {
     $("settings-form").textContent = e.message;
   }
@@ -689,7 +728,7 @@ $("settings-save").onclick = async () => {
       method: "PATCH",
       body: JSON.stringify({ values: Object.fromEntries(pendingSettings) }),
     }));
-    renderSettings(data.rest);
+    renderSettings(data.rest, data.pushover);
     toast("Settings saved");
   } catch (e) {
     for (const [key, msg] of Object.entries(e.errors || {})) {
