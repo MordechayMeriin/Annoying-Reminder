@@ -1,88 +1,126 @@
 """
 The /tick logic, called every 5 minutes by cron-job.org.
 
-1. Due reminders: plain SQL + push, no LLM (cheap, runs every tick).
-2. Daily jobs: morning plan, check-ins, evening review — these use the LLM, once per day each.
+1. plan_tick()  (synchronous, fast, no LLM)
+   due tasks → guardrails (logic.plan_contacts) → postpone what may not be sent now
+   → lease the rest for one delivery.
+2. deliver()    (background task)
+   one combined message (LLM or template) → saved in the chat → one push → next check-in times.
+3. Daily jobs: morning plan, mid-day check-ins, evening review (background, once per day each).
 """
 
-import json
 import logging
+import time
 from datetime import datetime, timedelta
 
-from . import db, notify, tasks
+from . import coach, db, notify, tasks, thread
 from .config import get_settings
-from .llm import chat_completion
-from .logic import in_quiet_hours, job_is_due, next_reminder_after_nag, quiet_end_after
+from .logic import (ContactState, Guardrails, day_start, job_is_due, next_reminder_after_nag,
+                    plan_contacts)
 
 log = logging.getLogger("scheduler")
 
-PRIORITY_PREFIX = {1: "", 2: "❗ ", 3: "🚨 "}
+LEASE_MIN = 15
+_delivering_since: float | None = None  # one delivery at a time (single Render instance)
 
 
-# ---------------------------------------------------------------- reminders
-
-def _reminder_text(task: dict, now: datetime) -> tuple[str, str]:
-    tz = get_settings().tz
-    title = PRIORITY_PREFIX.get(task["priority"], "") + task["title"]
-    if task["kind"] == "meeting" and task["due_at"]:
-        mins = max(0, int((task["due_at"] - now).total_seconds() // 60))
-        return title, f"Meeting at {task['due_at'].astimezone(tz):%H:%M} (in {mins} min)"
-    if task["due_at"] and task["due_at"] < now:
-        return title, f"Overdue since {task['due_at'].astimezone(tz):%a %H:%M}. Do it or snooze it."
-    if task["nag_count"] > 0:
-        return title, f"Reminder #{task['nag_count'] + 1} — still not done."
-    if task["due_at"]:
-        return title, f"Due {task['due_at'].astimezone(tz):%a %H:%M}"
-    return title, "Time to do this."
+def guardrails() -> Guardrails:
+    s = get_settings()
+    return Guardrails(
+        quiet_start=s.quiet_start, quiet_end=s.quiet_end, day_reset=s.day_reset_time,
+        min_gap_min=s.min_gap_min, max_per_day=s.max_proactive_per_day,
+        max_per_task_per_day=s.max_per_task_per_day,
+        followup_min_min=s.followup_min_min, followup_max_days=s.followup_max_days,
+    )
 
 
-def process_due_reminders() -> int:
+def _delivery_running() -> bool:
+    return _delivering_since is not None and time.monotonic() - _delivering_since < 3 * 60
+
+
+# ---------------------------------------------------------------- 1. plan (sync)
+
+def plan_tick() -> list[int]:
+    """Returns the ids of the tasks to contact about now, in message order (leased)."""
+    global _delivering_since
+    if _delivery_running():
+        return []  # the previous message isn't out yet; the gap rule needs its timestamp
+    tasks.close_finished_meetings()
+    due = tasks.due_for_contact()
+    if not due:
+        return []
+    s = get_settings()
+    now_local = tasks.now_utc().astimezone(s.tz)
+    state = thread.contact_state(day_start(now_local, s.day_reset_time))
+    plan = plan_contacts(due, state, now_local, guardrails())
+    for task_id, until in plan.defer.items():
+        tasks.defer(task_id, until)
+    order = [t["id"] for t in plan.send]
+    leased = set(tasks.lease(order, LEASE_MIN))
+    ids = [i for i in order if i in leased]
+    if ids:
+        _delivering_since = time.monotonic()
+    return ids
+
+
+# ---------------------------------------------------------------- 2. deliver (background)
+
+async def deliver(task_ids: list[int]) -> None:
+    global _delivering_since
+    try:
+        await _deliver(task_ids)
+    except Exception:
+        log.exception("Delivery failed for tasks %s (the lease expires and they'll be retried)", task_ids)
+    finally:
+        _delivering_since = None
+
+
+async def _deliver(task_ids: list[int]) -> None:
     s = get_settings()
     now = tasks.now_utc()
-    now_local = now.astimezone(s.tz)
-    quiet = in_quiet_hours(now_local, s.quiet_start, s.quiet_end)
+    by_id = {t["id"]: t for t in tasks.get_many(task_ids) if t["status"] == "open"}
+    group = [by_id[i] for i in task_ids if i in by_id]
+    if not group:
+        return
+    state: ContactState = thread.contact_state(day_start(now.astimezone(s.tz), s.day_reset_time))
 
-    # Meetings that ended long ago don't need to stay open.
-    db.execute(
-        """update tasks set status = 'done', completed_at = now(), remind_at = null
-           where status = 'open' and kind = 'meeting' and recurrence is null
-             and due_at < now() - interval '2 hours'"""
+    composed = await coach.compose(group, now, state.sent_today_by_task)
+    msg = thread.add("assistant", composed.text, composed.kind, [t["id"] for t in group])
+    single = group[0] if len(group) == 1 else None
+    notify.notify(
+        composed.title, composed.text,
+        task_id=single["id"] if single else None,            # ✓ / ⏰ only for exactly one task
+        message_id=msg["id"],
+        priority=max(t["priority"] for t in group),
     )
+    log.info("Sent message %s about tasks %s (llm=%s)", msg["id"], [t["id"] for t in group], composed.used_llm)
 
-    due = db.fetch_all(
-        f"select {tasks.COLUMNS} from tasks where status = 'open' and remind_at <= now() order by remind_at limit 20"
-    )
-    sent = 0
-    for task in due:
-        if quiet and task["priority"] < 3:
-            db.execute("update tasks set remind_at = %s where id = %s",
-                       (quiet_end_after(now_local, s.quiet_end), task["id"]))
-            continue
-
-        title, body = _reminder_text(task, now)
-        notify.notify(title, body, task_id=task["id"], priority=task["priority"], url=f"/?task={task['id']}")
-        sent += 1
-
-        nag_count = task["nag_count"] + 1
-        if task["kind"] == "meeting" and task["due_at"]:
-            # Meetings: one reminder before, one at start time, then stop.
-            next_at = task["due_at"] if now < task["due_at"] - timedelta(minutes=2) else None
-            escalate = False
-        else:
-            next_at, escalate = next_reminder_after_nag(
-                now, nag_count, task["priority"], s.nag_interval_min, s.max_nags)
-        if escalate and not task["escalated"]:
-            notify.send_pushover(title, f"Ignored {nag_count} times. Do it now.", emergency=True,
-                                 url=f"{s.web_origin}/?task={task['id']}")
-        db.execute(
-            """update tasks set nag_count = %s, last_notified_at = now(), remind_at = %s,
-               escalated = escalated or %s where id = %s""",
-            (nag_count, next_at, escalate, task["id"]),
-        )
-    return sent
+    for task in group:
+        _after_contact(task, now, composed.followups.get(task["id"]))
 
 
-# ---------------------------------------------------------------- daily jobs
+def _after_contact(task: dict, now: datetime, followup: datetime | None) -> None:
+    s = get_settings()
+    if task["last_notified_at"] and not thread.user_replied_since(task["last_notified_at"]):
+        tasks.add_event(task["id"], "ignored")
+
+    nag_count = task["nag_count"] + 1
+    if task["kind"] == "meeting" and task["due_at"]:
+        # Meetings: one reminder before, one at start time, then stop.
+        next_at = task["due_at"] if now < task["due_at"] - timedelta(minutes=2) else None
+        escalate = False
+    else:
+        next_at, escalate = next_reminder_after_nag(now, nag_count, task["priority"], s.nag_interval_min, s.max_nags)
+        if followup is not None:
+            next_at = followup  # the coach chose a time (already clamped by code)
+
+    if escalate and not task["escalated"]:
+        notify.send_pushover(task["title"], f"Ignored {nag_count} times. Do it now.", emergency=True,
+                             url=f"{s.web_origin}/?task={task['id']}")
+    tasks.finish_contact(task["id"], nag_count, next_at, requested=task["kind"] == "meeting", escalate=escalate)
+
+
+# ---------------------------------------------------------------- 3. daily jobs
 
 def claim_job(job: str, run_date) -> bool:
     """Insert-or-skip, so a job runs at most once per day even if ticks overlap."""
@@ -91,58 +129,6 @@ def claim_job(job: str, run_date) -> bool:
         (job, run_date),
     )
     return row is not None
-
-
-def _snapshot() -> dict:
-    pub = lambda rows: [  # noqa: E731
-        {k: t[k] for k in ("id", "title", "kind", "priority", "due_at", "nag_count")}
-        for t in map(tasks.to_public, rows)
-    ]
-    return {
-        "today_and_overdue": pub(tasks.list_tasks("today")),
-        "done_today": pub(tasks.list_tasks("done_today")),
-        "upcoming_7_days": pub(tasks.list_tasks("upcoming", 7)),
-        "open_without_date": pub([t for t in tasks.list_tasks("open") if t["due_at"] is None]),
-    }
-
-
-JOB_PROMPTS = {
-    "morning": (
-        "Write the user's morning plan for today. Order: meetings with times, then the 1–3 most important "
-        "tasks, then quick wins. Call out anything overdue firmly. Suggest rough time slots around the meetings. "
-        "Max ~120 words, plain text with short lines. Language: match the language of most task titles."
-    ),
-    "checkin": (
-        "Write a short mid-day check-in (max 50 words). Mention what's still open for today, most important first. "
-        "If everything for today is done, say so in one line. Language: match the task titles."
-    ),
-    "evening": (
-        "Write a short evening review (max 80 words): what got done today, what's still open and will carry over "
-        "to tomorrow, and anything that keeps getting pushed off (high nag_count). Language: match the task titles."
-    ),
-}
-
-JOB_TITLES = {"morning": "☀️ Morning plan", "checkin": "⏰ Check-in", "evening": "🌙 Evening review"}
-
-
-async def run_daily_job(job: str) -> None:
-    s = get_settings()
-    snap = _snapshot()
-    if job == "checkin" and not snap["today_and_overdue"]:
-        return  # nothing to nag about
-    now = datetime.now(s.tz)
-    messages = [
-        {"role": "system", "content": f"You are 'Annoying Reminder', a concise, slightly firm personal assistant. "
-                                      f"Now: {now:%Y-%m-%d %H:%M %A} ({s.tz.key})."},
-        {"role": "user", "content": JOB_PROMPTS[job] + "\n\nTasks (JSON):\n" + json.dumps(snap, ensure_ascii=False)},
-    ]
-    try:
-        text = ((await chat_completion(messages, temperature=0.5)).get("content") or "").strip()
-    except Exception as e:
-        log.error("Daily job %s failed: %s", job, e)
-        text = f"{len(snap['today_and_overdue'])} open item(s) for today. Open the app to see them."
-    db.execute("insert into messages (role, content, kind) values ('assistant', %s, %s)", (text, job))
-    notify.notify(JOB_TITLES[job], text, priority=1, url="/")
 
 
 def due_daily_jobs() -> list[str]:
@@ -159,3 +145,14 @@ def due_daily_jobs() -> list[str]:
     if job_is_due(now_local, s.evening_time, window_hours=2) and claim_job("evening", today):
         jobs.append("evening")
     return jobs
+
+
+async def run_daily_job(job: str) -> None:
+    try:
+        text = await coach.compose_daily(job, tasks.now_utc())
+        if text is None:
+            return
+        msg = thread.add("assistant", text, job)
+        notify.notify(coach.JOB_TITLES[job], text, message_id=msg["id"], priority=1)
+    except Exception:
+        log.exception("Daily job %s failed", job)
