@@ -80,15 +80,26 @@ def format_open_items(items: list[dict[str, Any]], now_local: datetime, exclude:
     )
 
 
+def task_contexts(items: list[dict[str, Any]], now_local: datetime,
+                  contacts_today: dict[int, int] | None = None) -> list[str]:
+    """Each task with its subtasks, recent history and 7-day counts (three queries in all)."""
+    if not items:
+        return []
+    ids = [t["id"] for t in items]
+    subs = tasks.subtasks_many(ids)
+    events = tasks.recent_events_many(ids, 8)
+    counts = tasks.event_counts_many(ids, 7)
+    contacts_today = contacts_today or {}
+    return [
+        format_task(t, now_local, subtasks=subs.get(t["id"], []), events=events.get(t["id"], []),
+                    counts=counts.get(t["id"], {}), contacts_today=contacts_today.get(t["id"], 0))
+        for t in items
+    ]
+
+
 def task_context(task: dict[str, Any], now_local: datetime, contacts_today: int = 0) -> str:
     """One task with its subtasks, recent history and 7-day counts."""
-    return format_task(
-        task, now_local,
-        subtasks=tasks.subtasks(task["id"]),
-        events=tasks.recent_events(task["id"], 8),
-        counts=tasks.event_counts(task["id"], 7),
-        contacts_today=contacts_today,
-    )
+    return task_contexts([task], now_local, {task["id"]: contacts_today})[0]
 
 
 def linked_history(task_ids: list[int], now_local: datetime, limit: int = 8) -> str:

@@ -338,3 +338,20 @@ def link_task_ids(acted_on: list[int], checkin_candidates: list[int]) -> list[in
     if len(checkin_candidates) == 1:
         return list(checkin_candidates)
     return []
+
+
+# ================================================================ text
+
+def clip(text: str, limit: int) -> str:
+    """
+    At most `limit` characters. Longer text is cut at the last space or line break (unless that would
+    drop more than a third of it, e.g. one very long word) and ends with "…".
+    """
+    if len(text) <= limit:
+        return text
+    cut = text[: limit - 1]
+    if not text[limit - 1].isspace():  # the cut falls inside a word: drop that word
+        space = max(cut.rfind(" "), cut.rfind("\n"))
+        if space >= (limit * 2) // 3:
+            cut = cut[:space]
+    return cut.rstrip() + "…"

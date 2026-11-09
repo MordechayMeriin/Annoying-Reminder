@@ -7,6 +7,10 @@ alarms that repeat until acknowledged. PUSHOVER_MODE (⚙ Settings) decides how 
   only   — Pushover instead of browser push (browser push if Pushover fails)
   backup — browser push; Pushover only when no browser got it, and for alarms
   off    — browser push only
+
+Browser push can be switched off (BROWSER_PUSH, ⚙ Settings). Then every message goes to Pushover,
+whatever the mode says, with no browser fallback. While Pushover isn't set up, browser push is used
+anyway: a reminder app with no channel at all would be pointless.
 """
 
 import json
@@ -14,6 +18,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 import httpx
+import requests
 from pywebpush import WebPushException, webpush
 
 from . import db
@@ -25,6 +30,9 @@ log = logging.getLogger("notify")
 
 
 PUSH_BODY_MAX = 300
+PUSH_TIMEOUT_S = 10
+# A browser push that's over an hour late is noise (Pushover covers "must arrive"), so it expires.
+PUSH_TTL_S = 3600
 
 
 def push_body(text: str) -> str:
@@ -32,14 +40,27 @@ def push_body(text: str) -> str:
     return text if len(text) <= PUSH_BODY_MAX else text[: PUSH_BODY_MAX - 1] + "…"
 
 
+def browser_push_on() -> bool:
+    """Browser push may be used: switched on and the VAPID keys are set."""
+    s = get_settings()
+    return s.browser_push and s.browser_push_available
+
+
+def pushover_configured() -> bool:
+    return get_settings().pushover_enabled
+
+
 def send_push(title: str, body: str, *, task_id: int | None = None, message_id: int | None = None,
-              priority: int = 1, url: str | None = None) -> int:
+              priority: int = 1, url: str | None = None, force: bool = False) -> int:
     """
-    Send to every subscribed browser. Returns how many deliveries succeeded.
+    Send to every subscribed browser. Returns how many deliveries succeeded (0 when browser push is off,
+    unless force: the fallback when Pushover isn't set up).
     message_id: the chat message this notification shows; tapping it opens the chat there.
     task_id: adds the ✓ Done / ⏰ Snooze buttons (with a signed token).
     """
     s = get_settings()
+    if not s.browser_push_available or not (force or s.browser_push):
+        return 0
     if url is None:
         url = f"/?m={message_id}" if message_id is not None else "/"
     payload: dict = {"title": title, "body": push_body(body), "url": url, "priority": priority, "api": s.api_url}
@@ -57,7 +78,11 @@ def send_push(title: str, body: str, *, task_id: int | None = None, message_id: 
                 data=json.dumps(payload),
                 vapid_private_key=s.vapid_private_key,
                 vapid_claims={"sub": s.vapid_subject},
-                ttl=3600,
+                ttl=PUSH_TTL_S,
+                # Without a timeout, one push service that never answers would stall the delivery for good.
+                timeout=PUSH_TIMEOUT_S,
+                # Normal priority can be held back by Android's battery saving (Doze); reminders can't wait.
+                headers={"Urgency": "high"},
             )
             sent += 1
         except WebPushException as e:
@@ -67,6 +92,8 @@ def send_push(title: str, body: str, *, task_id: int | None = None, message_id: 
                 log.info("Removed expired push subscription %s", sub["id"])
             else:
                 log.warning("Push failed (%s): %s", status, e)
+        except requests.RequestException as e:  # timeouts and network errors: try the next browser
+            log.warning("Push failed (%s): %s", type(e).__name__, e)
     return sent
 
 
@@ -148,12 +175,18 @@ def notify(title: str, body: str, *, level: int = NORMAL, expire_s: int = 3600,
     # Urgent messages also stay on screen in the browser until dismissed (sw.js: priority ≥ 2).
     web_priority = max(priority, 2 if level >= URGENT else 1)
 
-    def browser() -> int:
-        return send_push(title, body, task_id=task_id, message_id=message_id, priority=web_priority)
+    def browser(force: bool = False) -> int:
+        return send_push(title, body, task_id=task_id, message_id=message_id, priority=web_priority, force=force)
 
     def pushover() -> bool:
         return send_pushover(title, body, level=level, url=link, expire_s=expire_s)
 
+    if not browser_push_on():
+        if pushover_configured():
+            pushover()  # whatever the mode says: it's the only channel left
+        elif browser(force=True) == 0:
+            log.error("Message not delivered: browser push is off and Pushover isn't set up")
+        return
     if mode == "only":
         if not pushover():
             browser()

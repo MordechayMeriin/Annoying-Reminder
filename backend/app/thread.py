@@ -78,11 +78,21 @@ def user_replied_since(t: datetime) -> bool:
     return row is not None
 
 
+def last_user_reply_at() -> datetime | None:
+    """When the user last wrote in the chat (one query, for checking several tasks at once)."""
+    row = db.fetch_one(
+        "select created_at from messages where role = 'user' and kind = 'chat' order by created_at desc limit 1")
+    return row["created_at"] if row else None
+
+
 def contact_state(day_start: datetime) -> ContactState:
+    # Both halves walk the created_at index from the newest end, so the cost doesn't grow with history.
     last = db.fetch_one(
-        "select max(created_at) as t, count(*) filter (where created_at >= %s) as n "
-        "from messages where kind = any(%s)",
-        (day_start, list(PROACTIVE_KINDS)),
+        """select (select created_at from messages where kind = any(%(kinds)s)
+                   order by created_at desc limit 1) as t,
+                  (select count(*) from messages where kind = any(%(kinds)s)
+                   and created_at >= %(start)s) as n""",
+        {"kinds": list(PROACTIVE_KINDS), "start": day_start},
     ) or {}
     per_task = db.fetch_all(
         """select t.id as task_id, count(*) as n
@@ -97,14 +107,28 @@ def contact_state(day_start: datetime) -> ContactState:
     )
 
 
-def page(before_id: int | None = None, limit: int = 50) -> list[dict[str, Any]]:
-    """For the UI: newest `limit` messages (older than before_id), with the main task's title."""
+# For the UI: each message with its main task's title and status, and the titles of every linked task.
+_PUBLIC = """select m.id, m.role, m.content, m.kind, m.task_id, m.task_ids, m.created_at,
+                    t.title as task_title, t.status as task_status,
+                    (select coalesce(jsonb_object_agg(x.id::text, x.title), '{}'::jsonb)
+                     from tasks x where x.id = any(m.task_ids)) as task_titles
+             from messages m left join tasks t on t.id = m.task_id"""
+
+
+def page(before_id: int | None = None, limit: int = 50, after_id: int | None = None) -> list[dict[str, Any]]:
+    """For the UI: the newest `limit` messages older than before_id / newer than after_id, oldest first."""
     rows = db.fetch_all(
-        """select m.id, m.role, m.content, m.kind, m.task_id, m.task_ids, m.created_at,
-                  t.title as task_title, t.status as task_status
-           from messages m left join tasks t on t.id = m.task_id
-           where (%(before)s::bigint is null or m.id < %(before)s)
-           order by m.created_at desc, m.id desc limit %(limit)s""",
-        {"before": before_id, "limit": limit},
+        f"""{_PUBLIC}
+            where (%(before)s::bigint is null or m.id < %(before)s)
+              and (%(after)s::bigint is null or m.id > %(after)s)
+            order by m.created_at desc, m.id desc limit %(limit)s""",
+        {"before": before_id, "after": after_id, "limit": limit},
     )
     return rows[::-1]
+
+
+def by_ids(ids: list[int]) -> list[dict[str, Any]]:
+    """Messages in the same shape as page(), oldest first."""
+    if not ids:
+        return []
+    return db.fetch_all(f"{_PUBLIC} where m.id = any(%s::bigint[]) order by m.id", (list(ids),))

@@ -73,6 +73,52 @@ def event_counts(task_id: int, days: int = 7) -> dict[str, int]:
     return {r["kind"]: r["n"] for r in rows}
 
 
+# Batch versions for several tasks at once (one query each instead of one per task).
+
+def subtasks_many(ids: list[int]) -> dict[int, list[dict[str, Any]]]:
+    out: dict[int, list[dict[str, Any]]] = {i: [] for i in ids}
+    if not ids:
+        return out
+    for row in db.fetch_all(
+        f"""select {COLUMNS} from tasks where parent_id = any(%s::bigint[]) and status <> 'cancelled'
+            order by created_at""",
+        (list(ids),),
+    ):
+        out.setdefault(row["parent_id"], []).append(row)
+    return out
+
+
+def recent_events_many(ids: list[int], limit: int = 8) -> dict[int, list[dict[str, Any]]]:
+    out: dict[int, list[dict[str, Any]]] = {i: [] for i in ids}
+    if not ids:
+        return out
+    for row in db.fetch_all(
+        """select task_id, kind, note, created_at from (
+             select task_id, kind, note, created_at,
+                    row_number() over (partition by task_id order by created_at desc) as rn
+             from task_events where task_id = any(%s::bigint[])
+           ) e where rn <= %s order by task_id, created_at desc""",
+        (list(ids), limit),
+    ):
+        task_id = row.pop("task_id")
+        out.setdefault(task_id, []).append(row)
+    return out
+
+
+def event_counts_many(ids: list[int], days: int = 7) -> dict[int, dict[str, int]]:
+    out: dict[int, dict[str, int]] = {i: {} for i in ids}
+    if not ids:
+        return out
+    for row in db.fetch_all(
+        """select task_id, kind, count(*) as n from task_events
+           where task_id = any(%s::bigint[]) and created_at > now() - make_interval(days => %s)
+           group by task_id, kind""",
+        (list(ids), days),
+    ):
+        out.setdefault(row["task_id"], {})[row["kind"]] = row["n"]
+    return out
+
+
 # ---------------------------------------------------------------- create / update
 
 def create(title: str, *, kind: str = "task", priority: int = 1, description: str | None = None,
