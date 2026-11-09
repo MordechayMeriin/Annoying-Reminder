@@ -17,6 +17,7 @@ create table if not exists tasks (
     status           text        not null default 'open'   check (status in ('open', 'done', 'cancelled')),
     due_at           timestamptz,           -- deadline, or meeting start time
     remind_at        timestamptz,           -- next time to contact the user about it (null = none pending)
+    remind_requested boolean     not null default false,  -- remind_at was chosen by the user
     recurrence       text                   check (recurrence in ('daily', 'weekdays', 'weekly', 'monthly')),
     nag_count        integer     not null default 0,
     escalated        boolean     not null default false,  -- Pushover emergency already sent
@@ -53,7 +54,8 @@ create table if not exists messages (
     content    text        not null,
     kind       text        not null default 'chat' check (kind in (
                    'chat', 'morning', 'checkin', 'evening',  -- conversation and daily jobs
-                   'nudge',                                  -- task check-in
+                   'nudge',                                  -- assistant's own task check-in
+                   'reminder',                               -- a reminder the user asked for
                    'meeting',                                -- meeting reminder
                    'event'                                   -- "[Marked done: …]" (role = user)
                )),

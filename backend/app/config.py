@@ -71,9 +71,24 @@ class Settings:
     max_nags: int = field(default_factory=lambda: int(_opt("MAX_NAGS", "4")))
     meeting_lead_min: int = field(default_factory=lambda: int(_opt("MEETING_LEAD_MIN", "15")))
 
+    # --- Proactive-contact guardrails (enforced in code, before any LLM call) ---
+    min_gap_min: int = field(default_factory=lambda: int(_opt("MIN_GAP_MIN", "20")))
+    max_proactive_per_day: int = field(default_factory=lambda: int(_opt("MAX_PROACTIVE_PER_DAY", "20")))
+    max_per_task_per_day: int = field(default_factory=lambda: int(_opt("MAX_PER_TASK_PER_DAY", "4")))
+    followup_min_min: int = field(default_factory=lambda: int(_opt("FOLLOWUP_MIN_MIN", "10")))
+    followup_max_days: int = field(default_factory=lambda: int(_opt("FOLLOWUP_MAX_DAYS", "7")))
+
+    # --- Conversation ---
+    # The chat "day" starts here: the LLM only sees messages since the last reset.
+    day_reset_time: time = field(default_factory=lambda: _time(_opt("DAY_RESET_TIME", "04:00")))
+    # A reply this soon after a check-in treats that check-in's tasks as the likely topic.
+    reply_link_hours: float = field(default_factory=lambda: float(_opt("REPLY_LINK_HOURS", "3")))
+
     # --- Spend guards ---
     chat_per_minute: int = field(default_factory=lambda: int(_opt("CHAT_PER_MINUTE", "15")))
     llm_calls_per_day: int = field(default_factory=lambda: int(_opt("LLM_CALLS_PER_DAY", "300")))
+    llm_timeout_s: float = field(default_factory=lambda: float(_opt("LLM_TIMEOUT_S", "25")))
+    llm_max_tokens: int = field(default_factory=lambda: int(_opt("LLM_MAX_TOKENS", "500")))
 
     @property
     def pushover_enabled(self) -> bool:

@@ -1,4 +1,4 @@
--- 003: drop tasks.notes (replaced by tasks.description in 001).
+-- 004: drop tasks.notes (replaced by tasks.description in 001).
 -- Run ONLY after the chat-coach backend is deployed: older code still selects `notes`.
 -- Idempotent.
 

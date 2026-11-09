@@ -1,7 +1,10 @@
 """Pure scheduling logic (no I/O) — easy to unit-test."""
 
 import calendar
+import re
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
+from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
 
@@ -80,3 +83,170 @@ def parse_local_datetime(value: str | None, tz: ZoneInfo) -> datetime | None:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=tz)
     return dt
+
+
+# ================================================================ conversation day
+
+def day_start(now_local: datetime, reset: time) -> datetime:
+    """Start of the current chat "day" (the LLM only sees messages after this)."""
+    start = now_local.replace(hour=reset.hour, minute=reset.minute, second=0, microsecond=0)
+    if start > now_local:
+        start -= timedelta(days=1)
+    return start
+
+
+# ================================================================ proactive-contact guardrails
+#
+# "Code decides WHEN, the LLM decides WHAT." Everything here runs before any LLM call.
+
+@dataclass(frozen=True)
+class Guardrails:
+    quiet_start: time
+    quiet_end: time
+    day_reset: time = time(4)
+    min_gap_min: int = 20
+    max_per_day: int = 20
+    max_per_task_per_day: int = 4
+    followup_min_min: int = 10
+    followup_max_days: int = 7
+
+
+@dataclass(frozen=True)
+class ContactState:
+    """
+    What has already been sent since the last day reset (derived from messages, never stored).
+      sent_today         — every proactive message, meetings and requested reminders included
+      sent_today_by_task — only unrequested check-ins (kind 'nudge') per task
+    """
+    last_proactive_at: datetime | None = None
+    sent_today: int = 0
+    sent_today_by_task: dict[int, int] = field(default_factory=dict)
+
+
+@dataclass
+class ContactPlan:
+    send: list[dict[str, Any]] = field(default_factory=list)   # tasks for ONE combined message
+    defer: dict[int, datetime] = field(default_factory=dict)   # task id → new remind_at
+
+
+def contact_decision(task: dict[str, Any], state: ContactState, now_local: datetime,
+                     g: Guardrails) -> datetime | None:
+    """
+    Decide whether a due task may be contacted about in this tick.
+    Returns None to contact now, or the (aware) datetime to postpone its remind_at to.
+
+    task has: id, kind ('task' | 'meeting'), blocked_until (aware datetime | None),
+              remind_requested (bool: the user asked for this reminder time).
+    Rules:
+      - quiet hours are never overruled, whatever the priority
+      - blocked tasks wait until blocked_until
+      - meetings skip the gap and the caps (they still count toward the daily cap)
+      - min gap between proactive messages
+      - max proactive messages per day
+      - max check-ins per task per day, not counting reminders the user asked for
+    When several rules apply, the latest postponement wins (saves re-deferring every tick).
+    """
+    later: list[datetime] = []
+    if in_quiet_hours(now_local, g.quiet_start, g.quiet_end):
+        later.append(quiet_end_after(now_local, g.quiet_end))
+    if task.get("blocked_until") and task["blocked_until"] > now_local:
+        later.append(task["blocked_until"])
+    if task["kind"] != "meeting":
+        if state.last_proactive_at:
+            gap_end = state.last_proactive_at + timedelta(minutes=g.min_gap_min)
+            if gap_end > now_local:
+                later.append(gap_end)
+        if state.sent_today >= g.max_per_day:
+            later.append(next_morning(now_local, g))
+        if (not task.get("remind_requested")
+                and state.sent_today_by_task.get(task["id"], 0) >= g.max_per_task_per_day):
+            later.append(next_morning(now_local, g))
+    return max(later) if later else None
+
+
+def next_morning(now_local: datetime, g: Guardrails) -> datetime:
+    """First moment the daily counters have reset AND quiet hours are over."""
+    t = day_start(now_local, g.day_reset) + timedelta(days=1)
+    if in_quiet_hours(t, g.quiet_start, g.quiet_end):
+        t = quiet_end_after(t, g.quiet_end)
+    return t
+
+
+def plan_contacts(due: Iterable[dict[str, Any]], state: ContactState, now_local: datetime,
+                  g: Guardrails) -> ContactPlan:
+    """Split due tasks into one combined message (send) and postponements (defer)."""
+    plan = ContactPlan()
+    for task in due:
+        later = contact_decision(task, state, now_local, g)
+        if later is None:
+            plan.send.append(task)
+        else:
+            plan.defer[task["id"]] = later
+    # Meetings first (soonest start), then most important, then longest waiting.
+    far = datetime.max.replace(tzinfo=now_local.tzinfo)
+    plan.send.sort(key=lambda t: (
+        t["kind"] != "meeting",
+        (t.get("due_at") or far) if t["kind"] == "meeting" else far,
+        -t["priority"],
+        t.get("remind_at") or far,
+    ))
+    return plan
+
+
+def clamp_followup(now: datetime, requested: datetime, g: Guardrails) -> datetime:
+    """Keep an LLM-chosen follow-up within [now + min, now + max days]."""
+    lo = now + timedelta(minutes=g.followup_min_min)
+    hi = now + timedelta(days=g.followup_max_days)
+    return min(max(requested, lo), hi)
+
+
+# ================================================================ replies → tasks
+
+_WORD = re.compile(r"\w{3,}", re.UNICODE)
+
+
+def _words(text: str) -> set[str]:
+    return {w.lower() for w in _WORD.findall(text or "")}
+
+
+def select_candidate_tasks(
+    reply: str,
+    now: datetime,
+    last_proactive: dict[str, Any] | None,
+    recent_task_ids: list[int],
+    open_tasks: list[dict[str, Any]],
+    link_hours: float,
+    limit: int = 3,
+) -> list[int]:
+    """
+    Up to `limit` task ids the reply is *probably* about, best first. Only a hint for the LLM.
+      1. tasks of the last proactive message, if it was sent within link_hours
+      2. tasks touched in the last few turns
+      3. open tasks whose title shares a word (3+ letters) with the reply
+    """
+    out: list[int] = []
+
+    def add(ids: Iterable[int]) -> None:
+        for i in ids:
+            if i not in out:
+                out.append(i)
+
+    if last_proactive and now - last_proactive["created_at"] <= timedelta(hours=link_hours):
+        add(last_proactive.get("task_ids") or [])
+    add(recent_task_ids)
+    words = _words(reply)
+    if words:
+        add(t["id"] for t in open_tasks if words & _words(t["title"]))
+    return out[:limit]
+
+
+def link_task_ids(acted_on: list[int], checkin_candidates: list[int]) -> list[int]:
+    """
+    Which tasks a user turn is linked to, decided after the agent ran:
+    the tasks the agent acted on; otherwise the check-in's task if it was unambiguous; else none.
+    """
+    if acted_on:
+        return list(dict.fromkeys(acted_on))
+    if len(checkin_candidates) == 1:
+        return list(checkin_candidates)
+    return []
