@@ -84,12 +84,21 @@ create table if not exists job_runs (
     primary key (job, run_date)
 );
 
+-- Behaviour settings edited in the app (⚙ Settings). No row = default (env var, else built-in).
+create table if not exists app_settings (
+    key        text        primary key,
+    value      text        not null,
+    updated_at timestamptz not null default now()
+);
+
 alter table tasks              enable row level security;
 alter table task_events        enable row level security;
 alter table messages           enable row level security;
 alter table push_subscriptions enable row level security;
 alter table job_runs           enable row level security;
+alter table app_settings       enable row level security;
 
 -- Hardening (same as migrations/002): RLS doesn't cover TRUNCATE, so drop the API roles' grants.
-revoke all on table tasks, task_events, messages, push_subscriptions, job_runs from anon, authenticated;
+revoke all on table tasks, task_events, messages, push_subscriptions, job_runs, app_settings
+    from anon, authenticated;
 revoke all on all sequences in schema public from anon, authenticated;

@@ -4,7 +4,7 @@ import calendar
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from zoneinfo import ZoneInfo
 
 
@@ -136,6 +136,8 @@ class Guardrails:
     max_per_task_per_day: int = 4
     followup_min_min: int = 10
     followup_max_days: int = 7
+    # Shabbat / holidays: local time → when the current rest period ends, or None (not one now)
+    rest_until: Callable[[datetime], datetime | None] | None = None
 
 
 @dataclass(frozen=True)
@@ -165,7 +167,7 @@ def contact_decision(task: dict[str, Any], state: ContactState, now_local: datet
     task has: id, kind ('task' | 'meeting'), blocked_until (aware datetime | None),
               remind_requested (bool: the user asked for this reminder time).
     Rules:
-      - quiet hours are never overruled, whatever the priority
+      - Shabbat / holidays (g.rest_until) and quiet hours are never overruled, meetings included
       - blocked tasks wait until blocked_until
       - meetings skip the gap and the caps (they still count toward the daily cap)
       - min gap between proactive messages
@@ -174,6 +176,8 @@ def contact_decision(task: dict[str, Any], state: ContactState, now_local: datet
     When several rules apply, the latest postponement wins (saves re-deferring every tick).
     """
     later: list[datetime] = []
+    if g.rest_until is not None and (rest_end := g.rest_until(now_local)) is not None:
+        later.append(rest_end)
     if in_quiet_hours(now_local, g.quiet_start, g.quiet_end):
         later.append(quiet_end_after(now_local, g.quiet_end))
     if task.get("blocked_until") and task["blocked_until"] > now_local:

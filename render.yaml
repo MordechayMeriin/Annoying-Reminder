@@ -42,8 +42,6 @@ services:
         sync: false
       - key: PUSHOVER_USER
         sync: false
-      - key: TIMEZONE
-        value: Asia/Jerusalem
 
   - type: web
     name: annoying-reminder-web

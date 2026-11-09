@@ -55,7 +55,10 @@ def meeting_line(task: dict[str, Any], now: datetime) -> str:
     tz = get_settings().tz
     start = task["due_at"]
     mins = int((start - now).total_seconds() // 60)
-    when = "starting now" if mins <= 1 else f"in {mins} min"
+    if mins < -2:  # e.g. held back by Shabbat / quiet hours
+        when = f"started {-mins} min ago"
+    else:
+        when = "starting now" if mins <= 1 else f"in {mins} min"
     return f"📅 {task['title']} — {start.astimezone(tz):%H:%M} ({when})"
 
 

@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 
 from . import coach, db, notify, tasks, thread
 from .config import get_settings
+from .jewish_calendar import rest_config, rest_until
 from .logic import (ContactState, Guardrails, day_start, job_is_due, next_reminder_after_nag,
                     plan_contacts)
 
@@ -27,11 +28,13 @@ _delivering_since: float | None = None  # one delivery at a time (single Render 
 
 def guardrails() -> Guardrails:
     s = get_settings()
+    cfg = rest_config(s)
     return Guardrails(
         quiet_start=s.quiet_start, quiet_end=s.quiet_end, day_reset=s.day_reset_time,
         min_gap_min=s.min_gap_min, max_per_day=s.max_proactive_per_day,
         max_per_task_per_day=s.max_per_task_per_day,
         followup_min_min=s.followup_min_min, followup_max_days=s.followup_max_days,
+        rest_until=(lambda now: rest_until(now, cfg)) if cfg else None,
     )
 
 
@@ -133,10 +136,17 @@ def claim_job(job: str, run_date) -> bool:
 
 
 def due_daily_jobs() -> list[str]:
-    """Which daily jobs should run now (and claim them)."""
+    """
+    Which daily jobs should run now (and claim them).
+    Nothing runs on Shabbat / holidays. A job isn't claimed then, so if its window reaches past the
+    end (e.g. Saturday's 20:00 "tomorrow's meetings" when quiet lasts until 20:30) it runs right after;
+    otherwise it's skipped that day (Saturday's morning plan).
+    """
     s = get_settings()
     now_local = datetime.now(s.tz)
     today = now_local.date()
+    if rest_until(now_local, rest_config(s)) is not None:
+        return []
     jobs: list[str] = []
     if job_is_due(now_local, s.morning_time) and claim_job("morning", today):
         jobs.append("morning")
