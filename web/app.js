@@ -13,7 +13,7 @@ const KIND_LABEL = {
   reminder: "⏰ Reminder",
   meeting: "📅 Meeting",
 };
-const DAY_RESET_HOUR = 4; // matches DAY_RESET_TIME on the server (plan card only)
+let dayReset = [4, 0]; // the server's "new chat day starts at" setting (plan card only)
 const PAGE = 50;
 
 // Opened from a notification? (?m=<message id>, or ?task=<id> from older links / Pushover)
@@ -28,6 +28,7 @@ let hasMore = false;        // older messages exist on the server
 let tasksById = new Map();  // open tasks we know about (for task chips)
 let drawerTab = "today";
 let detailTaskId = null;
+const pendingSettings = new Map(); // unsaved settings: key → new text value, or null = back to default
 
 // ------------------------------------------------------------------ helpers
 
@@ -57,7 +58,10 @@ async function api(path, options = {}) {
   }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.detail || `HTTP ${res.status}`);
+    const detail = body.detail;
+    const err = new Error((typeof detail === "string" ? detail : detail?.message) || `HTTP ${res.status}`);
+    if (detail?.errors) err.errors = detail.errors; // per-field errors (settings)
+    throw err;
   }
   return res.json();
 }
@@ -93,7 +97,7 @@ function fmtDay(d) {
 
 function chatDayStart(now = new Date()) {
   const s = new Date(now);
-  s.setHours(DAY_RESET_HOUR, 0, 0, 0);
+  s.setHours(dayReset[0], dayReset[1], 0, 0);
   if (s > now) s.setDate(s.getDate() - 1);
   return s;
 }
@@ -302,6 +306,10 @@ function openDrawer() {
 }
 
 function closeDrawer() {
+  if (!$("settings-panel").hidden && pendingSettings.size && !confirm("Discard unsaved settings?")) return;
+  pendingSettings.clear();
+  $("settings-panel").hidden = true;
+  $("drawer-title").hidden = true;
   $("drawer").hidden = true;
   $("drawer-backdrop").hidden = true;
   document.body.classList.remove("drawer-open");
@@ -312,6 +320,8 @@ function showDrawerTab(tab) {
   drawerTab = tab;
   detailTaskId = null;
   $("task-detail").hidden = true;
+  $("settings-panel").hidden = true;
+  $("drawer-title").hidden = true;
   $("drawer-back").hidden = true;
   $("drawer-tabs").hidden = false;
   document.querySelectorAll("#drawer-tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
@@ -405,6 +415,7 @@ async function openTask(id) {
   openDrawer();
   detailTaskId = id;
   $("tab-today").hidden = $("tab-all").hidden = true;
+  $("settings-panel").hidden = $("drawer-title").hidden = true;
   $("drawer-tabs").hidden = true;
   $("drawer-back").hidden = false;
   $("task-detail").hidden = false;
@@ -475,6 +486,224 @@ $("detail-done").onclick = () => taskAction(detailTaskId, "done");
 $("detail-snooze").onclick = () => taskAction(detailTaskId, "snooze");
 $("detail-cancel").onclick = () => {
   if (confirm("Cancel this task?")) taskAction(detailTaskId, "cancel");
+};
+
+// ------------------------------------------------------------------ settings
+//
+// Behaviour settings (times, delays, limits, Shabbat). The server validates and stores them;
+// anything left at its default is stored as "no override".
+
+const WEEKDAYS = [["sun", "Sunday"], ["mon", "Monday"], ["tue", "Tuesday"], ["wed", "Wednesday"],
+  ["thu", "Thursday"], ["fri", "Friday"], ["sat", "Saturday"]];
+let settingsFields = [];               // from GET /settings
+const settingControls = new Map();     // key → { get, set, row, error }
+
+function applySettings(data) {
+  settingsFields = data.fields;
+  const reset = settingsFields.find((f) => f.key === "day_reset_time")?.value;
+  if (reset) dayReset = reset.split(":").map(Number);
+  renderPlan();
+  return data;
+}
+
+function fmtShort(iso) {
+  // Fixed English format, so the line reads the same in any phone language
+  const d = new Date(iso);
+  return d.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "numeric" }) + ` ${hhmm(d)}`;
+}
+
+function restPreview(rest) {
+  const box = el("div", "rest-preview");
+  if (!rest) {
+    box.textContent = "Off — reminders are sent on Shabbat and holidays too.";
+    return box;
+  }
+  const head = el("div", "", rest.active ? "🕯 Quiet now: " : "🕯 Next quiet time: ");
+  const name = el("strong", "", rest.name);
+  name.dir = "rtl";
+  head.appendChild(name);
+  const when = el("div", "rest-when", `${fmtShort(rest.start)} → ${fmtShort(rest.end)}`);
+  when.dir = "ltr";
+  box.append(head, when);
+  if (rest.active) box.classList.add("active");
+  return box;
+}
+
+function settingControl(f) {
+  const id = `set-${f.key}`;
+  const input = el(f.kind === "weekday" ? "select" : "input");
+  input.id = id;
+  if (f.kind === "bool") {
+    input.type = "checkbox";
+    input.className = "switch";
+    return { node: input, get: () => (input.checked ? "true" : "false"), set: (v) => (input.checked = v === "true") };
+  }
+  if (f.kind === "time") {
+    input.type = "time";
+    return { node: input, get: () => input.value, set: (v) => (input.value = v) };
+  }
+  if (f.kind === "time_off") {
+    input.type = "time";
+    const on = el("input");
+    on.type = "checkbox";
+    on.className = "switch";
+    on.setAttribute("aria-label", `${f.label}: on`);
+    on.addEventListener("change", () => {
+      input.disabled = !on.checked;
+      if (on.checked && !input.value) input.value = f.default !== "off" ? f.default : "20:00";
+    });
+    const wrap = el("div", "inline");
+    wrap.append(on, input);
+    return {
+      node: wrap,
+      get: () => (on.checked && input.value ? input.value : "off"),
+      set: (v) => {
+        on.checked = v !== "off";
+        input.disabled = v === "off";
+        input.value = v === "off" ? "" : v;
+      },
+    };
+  }
+  if (f.kind === "weekday") {
+    WEEKDAYS.forEach(([v, label]) => {
+      const o = el("option", "", label);
+      o.value = v;
+      input.appendChild(o);
+    });
+    return { node: input, get: () => input.value, set: (v) => (input.value = v) };
+  }
+  if (f.kind === "int" || f.kind === "float") {
+    input.type = "number";
+    input.inputMode = f.kind === "int" ? "numeric" : "decimal";
+    input.step = f.kind === "int" ? "1" : "any";
+    if (f.min != null) input.min = f.min;
+    if (f.max != null) input.max = f.max;
+  } else {
+    input.type = "text";
+    input.spellcheck = false;
+    input.autocapitalize = "off";
+    if (f.kind === "times") input.placeholder = "13:00, 17:00";
+  }
+  return { node: input, get: () => input.value.trim(), set: (v) => (input.value = v) };
+}
+
+function defaultText(f) {
+  if (f.kind === "bool") return f.default === "true" ? "on" : "off";
+  if (f.kind === "weekday") return WEEKDAYS.find(([v]) => v === f.default)?.[1] || f.default;
+  return f.default === "" ? "none" : f.default;
+}
+
+function onSettingEdited(f) {
+  const c = settingControls.get(f.key);
+  const v = c.get();
+  if (v === f.default) {
+    if (f.overridden) pendingSettings.set(f.key, null); // back to the default
+    else pendingSettings.delete(f.key);
+  } else if (v === f.value) {
+    pendingSettings.delete(f.key);
+  } else {
+    pendingSettings.set(f.key, v);
+  }
+  c.row.classList.remove("invalid");
+  c.error.hidden = true;
+  c.reset.hidden = v === f.default;
+  c.row.classList.toggle("changed", pendingSettings.has(f.key));
+  $("settings-save").disabled = $("settings-discard").disabled = !pendingSettings.size;
+}
+
+function renderSettings(rest) {
+  const form = $("settings-form");
+  form.textContent = "";
+  settingControls.clear();
+  pendingSettings.clear();
+  $("settings-save").disabled = $("settings-discard").disabled = true;
+
+  const groups = new Map();
+  settingsFields.forEach((f) => {
+    if (!groups.has(f.group)) groups.set(f.group, []);
+    groups.get(f.group).push(f);
+  });
+  for (const [group, list] of groups) {
+    const section = el("section", "settings-group");
+    section.appendChild(el("h2", "", group));
+    if (list.some((f) => f.key === "shabbat_mode")) section.appendChild(restPreview(rest));
+    for (const f of list) {
+      const c = settingControl(f);
+      const row = el("div", `setting kind-${f.kind}`);
+      const label = el("label", "setting-label", f.label);
+      label.htmlFor = `set-${f.key}`;
+      const control = el("div", "setting-control");
+      const reset = el("button", "reset", "↺");
+      reset.type = "button";
+      reset.title = `Back to default (${defaultText(f)})`;
+      reset.setAttribute("aria-label", reset.title);
+      control.append(c.node, reset);
+      const help = el("div", "setting-help", [f.help, `Default: ${defaultText(f)}`].filter(Boolean).join(" · "));
+      const error = el("div", "setting-error");
+      error.hidden = true;
+      row.append(label, control, help, error);
+      section.appendChild(row);
+
+      Object.assign(c, { row, error, reset });
+      settingControls.set(f.key, c);
+      c.set(f.value);
+      reset.hidden = f.value === f.default;
+      reset.onclick = () => {
+        c.set(f.default);
+        onSettingEdited(f);
+      };
+      row.addEventListener("input", () => onSettingEdited(f));
+      row.addEventListener("change", () => onSettingEdited(f));
+    }
+    form.appendChild(section);
+  }
+}
+
+async function openSettings() {
+  openDrawer();
+  detailTaskId = null;
+  $("tab-today").hidden = $("tab-all").hidden = $("task-detail").hidden = true;
+  $("drawer-tabs").hidden = $("drawer-back").hidden = true;
+  $("drawer-title").hidden = false;
+  $("settings-panel").hidden = false;
+  $("settings-form").textContent = "Loading…";
+  try {
+    const data = applySettings(await api("/settings"));
+    renderSettings(data.rest);
+  } catch (e) {
+    $("settings-form").textContent = e.message;
+  }
+}
+
+$("open-settings").onclick = () => openSettings();
+$("settings-discard").onclick = () => {
+  pendingSettings.clear();
+  openSettings();
+};
+$("settings-save").onclick = async () => {
+  if (!pendingSettings.size) return;
+  const btn = $("settings-save");
+  btn.disabled = true;
+  try {
+    const data = applySettings(await api("/settings", {
+      method: "PATCH",
+      body: JSON.stringify({ values: Object.fromEntries(pendingSettings) }),
+    }));
+    renderSettings(data.rest);
+    toast("Settings saved");
+  } catch (e) {
+    for (const [key, msg] of Object.entries(e.errors || {})) {
+      const c = settingControls.get(key);
+      if (!c) continue;
+      c.row.classList.add("invalid");
+      c.error.textContent = msg;
+      c.error.hidden = false;
+    }
+    const first = Object.keys(e.errors || {}).map((k) => settingControls.get(k)).find(Boolean);
+    first?.row.scrollIntoView({ block: "center", behavior: "smooth" });
+    toast(e.errors ? "Some settings need fixing" : e.message);
+    btn.disabled = false;
+  }
 };
 
 // ------------------------------------------------------------------ push
@@ -557,6 +786,7 @@ async function startApp() {
     if (document.visibilityState === "visible") loadLatest().catch(() => {});
   }, 60_000);
 
+  api("/settings").then(applySettings).catch(() => {}); // day-reset time for the plan card
   try {
     await Promise.all([loadTasks(), loadLatest()]);
   } catch (e) {

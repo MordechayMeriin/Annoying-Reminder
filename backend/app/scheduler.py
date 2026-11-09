@@ -6,7 +6,8 @@ The /tick logic, called every 5 minutes by cron-job.org.
    → lease the rest for one delivery.
 2. deliver()    (background task)
    one combined message (LLM or template) → saved in the chat → one push → next check-in times.
-3. Daily jobs: morning plan, mid-day check-ins, evening review (background, once per day each).
+3. Daily jobs: morning plan, mid-day check-ins, evening review (background, once per day each),
+   plus the meeting digests: the week's meetings at the start of the week, tomorrow's in the evening.
 """
 
 import logging
@@ -15,6 +16,7 @@ from datetime import datetime, timedelta
 
 from . import coach, db, notify, tasks, thread
 from .config import get_settings
+from .jewish_calendar import rest_config, rest_until
 from .logic import (ContactState, Guardrails, day_start, job_is_due, next_reminder_after_nag,
                     plan_contacts)
 
@@ -26,11 +28,13 @@ _delivering_since: float | None = None  # one delivery at a time (single Render 
 
 def guardrails() -> Guardrails:
     s = get_settings()
+    cfg = rest_config(s)
     return Guardrails(
         quiet_start=s.quiet_start, quiet_end=s.quiet_end, day_reset=s.day_reset_time,
         min_gap_min=s.min_gap_min, max_per_day=s.max_proactive_per_day,
         max_per_task_per_day=s.max_per_task_per_day,
         followup_min_min=s.followup_min_min, followup_max_days=s.followup_max_days,
+        rest_until=(lambda now: rest_until(now, cfg)) if cfg else None,
     )
 
 
@@ -132,10 +136,17 @@ def claim_job(job: str, run_date) -> bool:
 
 
 def due_daily_jobs() -> list[str]:
-    """Which daily jobs should run now (and claim them)."""
+    """
+    Which daily jobs should run now (and claim them).
+    Nothing runs on Shabbat / holidays. A job isn't claimed then, so if its window reaches past the
+    end (e.g. Saturday's 20:00 "tomorrow's meetings" when quiet lasts until 20:30) it runs right after;
+    otherwise it's skipped that day (Saturday's morning plan).
+    """
     s = get_settings()
     now_local = datetime.now(s.tz)
     today = now_local.date()
+    if rest_until(now_local, rest_config(s)) is not None:
+        return []
     jobs: list[str] = []
     if job_is_due(now_local, s.morning_time) and claim_job("morning", today):
         jobs.append("morning")
@@ -144,10 +155,18 @@ def due_daily_jobs() -> list[str]:
             jobs.append("checkin")
     if job_is_due(now_local, s.evening_time, window_hours=2) and claim_job("evening", today):
         jobs.append("evening")
+    if (s.week_meetings_time and now_local.weekday() == s.week_start_day
+            and job_is_due(now_local, s.week_meetings_time) and claim_job("week_meetings", today)):
+        jobs.append("week_meetings")
+    if (s.meetings_eve_time and job_is_due(now_local, s.meetings_eve_time, window_hours=2)
+            and claim_job("meetings_eve", today)):
+        jobs.append("meetings_eve")
     return jobs
 
 
 async def run_daily_job(job: str) -> None:
+    if job in coach.MEETING_JOBS:
+        return run_meeting_digest(job)
     try:
         text = await coach.compose_daily(job, tasks.now_utc())
         if text is None:
@@ -156,3 +175,15 @@ async def run_daily_job(job: str) -> None:
         notify.notify(coach.JOB_TITLES[job], text, message_id=msg["id"], priority=1)
     except Exception:
         log.exception("Daily job %s failed", job)
+
+
+def run_meeting_digest(job: str) -> None:
+    """The week's / tomorrow's meetings: one chat message (linked to the meetings) and one push."""
+    try:
+        digest = coach.meeting_digest(job, tasks.now_utc())
+        if digest is None:
+            return  # no meetings, nothing to say
+        msg = thread.add("assistant", digest.text, "meeting", digest.task_ids)
+        notify.notify(digest.title, digest.text, message_id=msg["id"], priority=1)
+    except Exception:
+        log.exception("Meeting digest %s failed", job)

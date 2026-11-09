@@ -218,6 +218,16 @@ def due_for_contact(limit: int = 20) -> list[dict[str, Any]]:
     )
 
 
+def meetings_between(start: datetime, end: datetime) -> list[dict[str, Any]]:
+    """Open meetings that may start in [start, end): one-off ones in the window, and every recurring
+    one that started before its end (logic.meeting_occurrences expands those)."""
+    return db.fetch_all(
+        f"""select {COLUMNS} from tasks where status = 'open' and kind = 'meeting' and due_at < %s
+            and (due_at >= %s or recurrence is not null) order by due_at""",
+        (end, start),
+    )
+
+
 def defer(task_id: int, until: datetime) -> None:
     """Postpone because of a guardrail. Keeps remind_requested as it was."""
     db.execute("update tasks set remind_at = %s where id = %s and status = 'open' and remind_at <= now()",

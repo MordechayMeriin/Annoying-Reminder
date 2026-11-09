@@ -4,3 +4,4 @@ httpx>=0.27
 psycopg[binary]>=3.2
 pywebpush>=2.0
 tzdata>=2024.1
+hdate>=1.2,<2

@@ -38,6 +38,7 @@
         <button id="enable-push" class="small" hidden>Enable notifications</button>
         <button id="open-tasks" class="small ghost" title="Tasks">☑ Tasks <span id="task-count" class="badge" hidden></span></button>
         <button id="refresh" class="small ghost" title="Refresh">↻</button>
+        <button id="open-settings" class="small ghost" title="Settings" aria-label="Settings">⚙</button>
         <button id="logout" class="small ghost" title="Log out">⎋</button>
       </div>
     </header>
@@ -64,6 +65,7 @@
   <aside id="drawer" class="drawer" hidden aria-label="Tasks">
     <div class="drawer-head">
       <button id="drawer-back" class="small ghost" hidden>‹ Back</button>
+      <h2 id="drawer-title" class="drawer-title" hidden>⚙ Settings</h2>
       <nav class="tabs" id="drawer-tabs">
         <button data-tab="today" class="active">Today</button>
         <button data-tab="all">All open</button>
@@ -98,6 +100,14 @@
       <ul id="detail-subtasks" class="tasks"></ul>
       <h2>History</h2>
       <ul id="detail-events" class="events"></ul>
+    </div>
+    <div id="settings-panel" class="drawer-body settings" hidden>
+      <p class="muted settings-intro">Times, delays and limits. Secrets stay on the server.</p>
+      <form id="settings-form" novalidate></form>
+      <div class="settings-actions">
+        <button id="settings-discard" type="button" class="small ghost" disabled>Discard</button>
+        <button id="settings-save" type="button" class="small" disabled>Save</button>
+      </div>
     </div>
   </aside>
 
