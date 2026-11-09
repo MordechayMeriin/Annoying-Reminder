@@ -38,7 +38,7 @@ def get(task_id: int) -> dict[str, Any] | None:
 def get_many(ids: list[int]) -> list[dict[str, Any]]:
     if not ids:
         return []
-    return db.fetch_all(f"select {COLUMNS} from tasks where id = any(%s)", (list(ids),))
+    return db.fetch_all(f"select {COLUMNS} from tasks where id = any(%s::bigint[])", (list(ids),))
 
 
 def subtasks(task_id: int) -> list[dict[str, Any]]:
@@ -230,7 +230,7 @@ def lease(ids: list[int], minutes: int = 15) -> list[int]:
         return []
     rows = db.fetch_all(
         """update tasks set remind_at = now() + make_interval(mins => %s)
-           where id = any(%s) and status = 'open' and remind_at <= now() returning id""",
+           where id = any(%s::bigint[]) and status = 'open' and remind_at <= now() returning id""",
         (minutes, list(ids)),
     )
     return [r["id"] for r in rows]

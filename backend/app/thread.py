@@ -16,7 +16,7 @@ def add(role: str, content: str, kind: str = "chat", task_ids: list[int] | tuple
     ids = list(dict.fromkeys(task_ids))
     return db.fetch_one(
         f"""insert into messages (role, content, kind, task_id, task_ids)
-            values (%s, %s, %s, %s, %s) returning {_COLS}""",
+            values (%s, %s, %s, %s, %s::bigint[]) returning {_COLS}""",
         (role, content, kind, ids[0] if ids else None, ids),
     )
 
@@ -31,7 +31,7 @@ def link(message_ids: list[int], task_ids: list[int]) -> None:
     ids = list(dict.fromkeys(task_ids))
     if not message_ids:
         return
-    db.execute("update messages set task_ids = %s, task_id = %s where id = any(%s)",
+    db.execute("update messages set task_ids = %s::bigint[], task_id = %s where id = any(%s::bigint[])",
                (ids, ids[0] if ids else None, list(message_ids)))
 
 
@@ -49,7 +49,7 @@ def for_tasks(task_ids: list[int], limit: int = 6) -> list[dict[str, Any]]:
     if not task_ids:
         return []
     rows = db.fetch_all(
-        f"select {_COLS} from messages where task_ids && %s order by created_at desc, id desc limit %s",
+        f"select {_COLS} from messages where task_ids && %s::bigint[] order by created_at desc, id desc limit %s",
         (list(task_ids), limit),
     )
     return rows[::-1]
