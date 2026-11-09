@@ -4,7 +4,7 @@ import calendar
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from zoneinfo import ZoneInfo
 
 
@@ -32,20 +32,77 @@ def job_is_due(now_local: datetime, scheduled: time, window_hours: float = 3.0) 
 
 def next_reminder_after_nag(
     now: datetime, nag_count: int, priority: int, interval_min: int, max_nags: int
-) -> tuple[datetime | None, bool]:
+) -> datetime | None:
     """
-    Decide what happens after a reminder was just sent (nag_count already incremented).
-    Returns (next remind_at or None to stop nagging, escalate_to_pushover).
-    Higher priority nags more often.
+    When to check in next after a reminder was just sent (nag_count already incremented).
+    None = stop nagging. Higher priority nags more often.
     """
     if nag_count >= max_nags:
-        return None, priority >= 3
+        return None
     interval = interval_min
     if priority == 2:
         interval = max(10, interval_min * 2 // 3)
     elif priority >= 3:
         interval = max(5, interval_min // 2)
-    return now + timedelta(minutes=interval), False
+    return now + timedelta(minutes=interval)
+
+
+# ================================================================ how loud (Pushover priority)
+#
+# NORMAL  → Pushover priority 0, the normal sound
+# URGENT  → priority 1: the urgent sound, highlighted, ignores the Pushover app's own quiet hours
+# ALARM   → priority 2: repeats every few minutes until acknowledged (or cancelled by the app)
+# The guardrails (quiet hours, Shabbat, gaps, caps) decide WHETHER to send; this only decides how loud.
+
+NORMAL, URGENT, ALARM = 0, 1, 2
+
+_ALARM_MIN_PRIORITY = {"critical": 3, "important": 2, "all": 1}
+
+
+@dataclass(frozen=True)
+class AlertPolicy:
+    urgent_after: int = 1          # ignored check-ins before they turn urgent
+    alarm_for: str = "important"   # critical | important | all | off  (by task priority)
+    alarm_after: int = 2           # ignored check-ins before the next one is an alarm
+    max_nags: int = 4              # check-ins per task before nagging stops
+
+
+def alert_level(task: dict[str, Any], ignored: int, p: AlertPolicy) -> int:
+    """
+    How loud a contact about one task should be.
+    ignored: check-ins about it in a row that got no reply.
+      ALARM  — a task of an alarm-worthy priority, ignored `alarm_after` times; if nagging would stop
+               before that, the last check-in is the alarm (only when all the earlier ones were ignored)
+      URGENT — meetings, reminders the user asked for, important/critical tasks, or ignored
+               `urgent_after` times
+      NORMAL — everything else (first check-ins about ordinary tasks)
+    """
+    min_prio = _ALARM_MIN_PRIORITY.get(p.alarm_for)
+    if (task["kind"] != "meeting" and min_prio is not None and task["priority"] >= min_prio
+            and ignored >= min(p.alarm_after, max(p.max_nags - 1, 0))):
+        return ALARM
+    if (task["kind"] == "meeting" or task.get("remind_requested") or task["priority"] >= 2
+            or ignored >= p.urgent_after):
+        return URGENT
+    return NORMAL
+
+
+def next_time_at(now_local: datetime, t: time) -> datetime:
+    """Next occurrence of a wall-clock time, strictly after now."""
+    candidate = now_local.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
+    if candidate <= now_local:
+        candidate += timedelta(days=1)
+    return candidate
+
+
+def alarm_window_s(now_local: datetime, quiet_start: time, next_rest_start: datetime | None,
+                   max_s: int = 3600) -> int:
+    """Seconds an alarm may keep repeating: up to max_s, but never into quiet hours or Shabbat."""
+    end = now_local + timedelta(seconds=max_s)
+    end = min(end, next_time_at(now_local, quiet_start))
+    if next_rest_start is not None and next_rest_start > now_local:
+        end = min(end, next_rest_start)
+    return max(0, int((end - now_local).total_seconds()))
 
 
 def _add_month(d: date) -> date:
@@ -73,6 +130,33 @@ def next_occurrence(current: datetime, recurrence: str, tz: ZoneInfo) -> datetim
     else:
         raise ValueError(f"Unknown recurrence: {recurrence}")
     return datetime.combine(d, local.timetz().replace(tzinfo=None), tzinfo=tz)
+
+
+def meeting_occurrences(meetings: Iterable[dict[str, Any]], start: datetime, end: datetime,
+                        tz: ZoneInfo) -> list[tuple[datetime, dict[str, Any]]]:
+    """
+    (start time, meeting) for every meeting starting in [start, end), soonest first.
+    Recurring meetings are expanded inside the window, and rolled forward if their stored
+    due_at is already in the past.
+    """
+    out: list[tuple[datetime, dict[str, Any]]] = []
+    for m in meetings:
+        when = m.get("due_at")
+        if when is None:
+            continue
+        recurrence = m.get("recurrence")
+        if not recurrence:
+            if start <= when < end:
+                out.append((when, m))
+            continue
+        for _ in range(400):  # hard stop; a daily meeting over a week needs ~7
+            if when >= end:
+                break
+            if when >= start:
+                out.append((when, m))
+            when = next_occurrence(when, recurrence, tz)
+    out.sort(key=lambda x: (x[0], x[1].get("id", 0)))
+    return out
 
 
 def parse_local_datetime(value: str | None, tz: ZoneInfo) -> datetime | None:
@@ -109,6 +193,8 @@ class Guardrails:
     max_per_task_per_day: int = 4
     followup_min_min: int = 10
     followup_max_days: int = 7
+    # Shabbat / holidays: local time → when the current rest period ends, or None (not one now)
+    rest_until: Callable[[datetime], datetime | None] | None = None
 
 
 @dataclass(frozen=True)
@@ -138,7 +224,7 @@ def contact_decision(task: dict[str, Any], state: ContactState, now_local: datet
     task has: id, kind ('task' | 'meeting'), blocked_until (aware datetime | None),
               remind_requested (bool: the user asked for this reminder time).
     Rules:
-      - quiet hours are never overruled, whatever the priority
+      - Shabbat / holidays (g.rest_until) and quiet hours are never overruled, meetings included
       - blocked tasks wait until blocked_until
       - meetings skip the gap and the caps (they still count toward the daily cap)
       - min gap between proactive messages
@@ -147,6 +233,8 @@ def contact_decision(task: dict[str, Any], state: ContactState, now_local: datet
     When several rules apply, the latest postponement wins (saves re-deferring every tick).
     """
     later: list[datetime] = []
+    if g.rest_until is not None and (rest_end := g.rest_until(now_local)) is not None:
+        later.append(rest_end)
     if in_quiet_hours(now_local, g.quiet_start, g.quiet_end):
         later.append(quiet_end_after(now_local, g.quiet_end))
     if task.get("blocked_until") and task["blocked_until"] > now_local:

@@ -13,7 +13,7 @@ first step when you're stuck, remembers progress and blockers, and decides sensi
  │ tasks drawer · plan  │ ◀──push── │  • agent  (OpenRouter)   │          │ (RLS on)     │
  │  [✓ Done] [⏰ Snooze] │           │  • /tick → coach         │          └──────────────┘
  └──────────────────────┘           └──────────────────────────┘
-                                        ▲ every 5 min          └──▶ Pushover (critical backup)
+                                        ▲ every 5 min          └──▶ Pushover (loud, alarms)
                                   cron-job.org (X-Cron-Secret)
 ```
 
@@ -34,7 +34,7 @@ writes the messages and can adjust follow-ups through tools, within those limits
 ### Each tick (every 5 minutes)
 1. Tasks whose `remind_at` has passed are due for contact.
 2. Guardrails, in code, before any LLM call ([`logic.contact_decision`](backend/app/logic.py)):
-   - quiet hours are never overruled, whatever the priority
+   - Shabbat / holidays and quiet hours are never overruled, whatever the priority (meetings included)
    - `MIN_GAP_MIN` between proactive messages (meetings exempt)
    - `MAX_PROACTIVE_PER_DAY` messages per day (meetings skip it but count toward it)
    - `MAX_PER_TASK_PER_DAY` assistant check-ins per task (reminders you asked for don't count)
@@ -46,9 +46,54 @@ writes the messages and can adjust follow-ups through tools, within those limits
    priority-based nag interval. Meeting times always come from code.
 5. **Fallback:** if the LLM errors, times out (`LLM_TIMEOUT_S`), returns nothing, hits a 429 or the
    daily cap, the old template text is sent instead. A reminder is never lost because of the LLM.
-6. Ignored critical (priority 3) tasks still escalate to a Pushover emergency alert after `MAX_NAGS`.
+6. The push is as loud as its most pressing task (see [Pushover](#pushover-alerts-that-get-your-attention)):
+   normal → urgent → a repeating alarm for important tasks you keep ignoring.
 
 The `/tick` request itself only decides and returns; the LLM work runs in a background task.
+
+### Pushover: alerts that get your attention
+Chrome notifications are easy to miss: one quiet buzz, same as every other app. With
+[Pushover](https://pushover.net) (one-time purchase per platform after a 30-day trial) every message
+also gets a **level**, decided by code ([`logic.alert_level`](backend/app/logic.py)):
+
+| Level | When | On the phone |
+|---|---|---|
+| **Normal** | daily messages, meeting digests, the first check-in about an ordinary task | normal sound |
+| **Urgent** | meeting reminders, reminders you asked for ("remind me at 5"), important/critical tasks, and any check-in after one was ignored | the urgent sound (default *Persistent*, long), highlighted, ignores the Pushover app's own quiet hours |
+| **Alarm** | an important or critical task ignored twice in a row (if check-ins would stop sooner, the last one) | **repeats every 2 minutes** until you acknowledge it, for up to an hour |
+
+- "Ignored" means no message from you in the chat since that check-in. Replying resets the ladder.
+- An alarm stops by itself as soon as you **write in the chat or tap ✓ / ⏰ / cancel** on any task: you've
+  seen it. It also never repeats into quiet hours or Shabbat: it ends before they start, and if there
+  isn't time for even one repeat, it's sent as urgent instead.
+- The guardrails above still decide *whether* something is sent; the level only decides how loud.
+- **Send to Pushover** (⚙ → Pushover): *every message* (default; browser push too), *instead of browser*
+  push (falls back to browser push if Pushover fails), *as a backup* (only when no browser got it, plus
+  alarms), or *never*. The sounds, when check-ins turn urgent, what gets alarms (critical /
+  important / every task / nothing) and how often they repeat are all there, plus test buttons.
+
+Setup: see [step 6](#6-pushover-recommended).
+
+### Extra meeting reminders
+On top of the reminder before each meeting and at its start, two digests (built by code, no LLM):
+- **Start of the week** (default Sunday 08:00): every meeting in the coming 7 days.
+- **The evening before** (default 20:00): every meeting tomorrow.
+
+Each is one chat message (linked to those meetings, so a reply like "move the dentist to 10" knows
+what you mean) and one push. Nothing is sent when there are no meetings. Recurring meetings are included.
+
+### Shabbat & holidays
+From candle lighting to havdalah nothing is sent: no check-ins, meeting reminders, daily messages
+or Pushover alerts ([`jewish_calendar.py`](backend/app/jewish_calendar.py), using the
+[`hdate`](https://pypi.org/project/hdate/) library, offline). Defaults: Rosh HaAyin, candle lighting
+20 min before sunset, havdalah at nightfall, and quiet from 1 hour before candle lighting until
+1 hour after havdalah. A holiday next to Shabbat (e.g. Rosh Hashana on Friday-Saturday) is one period.
+Only Shabbat and yom tov count, not chol hamoed or fast days.
+- Anything that comes due is held and sent as **one** message when the quiet time ends.
+- A daily message whose time falls inside it is skipped that day, unless its window reaches past the
+  end (e.g. Saturday's 20:00 "tomorrow's meetings" in summer arrives right after Shabbat).
+- Your own messages are still answered.
+- The settings screen shows the next quiet time, so you can check it.
 
 ### Replies
 When you reply, the agent gets the last check-in (if recent) and up to 3 candidate tasks with their
@@ -125,6 +170,17 @@ with the default caps the coach uses at most a few dozen calls a day.
 3. Chrome menu ⋮ → **Add to Home screen / Install app** (from Chrome itself, not an APK).
 4. Recommended: Android Settings → Apps → Chrome → Battery → **Unrestricted**, so pushes aren't delayed.
 
+### 6. Pushover (recommended)
+1. Install the Pushover app and create an account. Your **User Key** is on the app's / website's
+   home screen → `PUSHOVER_USER`.
+2. <https://pushover.net/apps/build> → create an application (e.g. "Annoying Reminder") → its
+   **API Token** → `PUSHOVER_TOKEN`. Add both on Render (api service → Environment).
+3. In the app: ⚙ → Pushover → **Normal / Urgent / Alarm** test buttons, to hear each one.
+4. So alarms get through Do Not Disturb:
+   - Android: Pushover app → Settings → enable **Bypass Do Not Disturb** for emergency priority (and
+     allow it when Android asks); also set its battery usage to **Unrestricted**.
+   - iPhone: allow **Critical Alerts** for Pushover when asked (Settings → Notifications → Pushover).
+
 ## Using it
 
 Type in the chat box, for example:
@@ -137,26 +193,34 @@ Type in the chat box, for example:
 - `Waiting for the landlord to answer` → marked blocked, it asks again later
 - `What's left for today?`
 
-The ☑ Tasks drawer lists today's and all open tasks (✓ / ⏰ on each row). Tap a task to see and edit
+**⚙** opens the settings (times, delays, limits, Shabbat, Pushover). The ☑ Tasks drawer lists today's and all open tasks (✓ / ⏰ on each row). Tap a task to see and edit
 its description, steps and history.
 
-## Settings (env vars on the API service)
+## Settings
 
-Required ones are listed in [`backend/.env.example`](backend/.env.example). Optional, with defaults:
+### In the app (⚙)
+Times, delays and limits are edited in the app: **⚙ → Settings**. They're validated by the server
+and stored in the `app_settings` table, and apply from the next tick (within 5 minutes).
+↺ next to a setting puts it back to its default.
+
+| Group | Settings (defaults) |
+|---|---|
+| Daily messages | time zone (`Asia/Jerusalem`), morning plan (`07:30`), mid-day check-ins (`13:00, 17:00`), evening review (`21:30`), new chat day starts at (`04:00`) |
+| Quiet hours | `23:00` – `07:00`: no proactive messages at all |
+| Shabbat & holidays | on; location (Rosh HaAyin), outside Israel (off), candle lighting (`20` min before sunset), havdalah (`0` = nightfall), quiet before / after (`60` / `60` min) |
+| Meetings | reminder before (`15` min, plus one at start), first day of the week (Sunday), this week's meetings at (`08:00`), tomorrow's meetings at (`20:00`); either digest can be off |
+| Check-ins & limits | follow-up interval (`30` min) and stop after (`4`), minimum gap between messages (`20` min, meetings exempt), messages per day (`20`), check-ins per task per day (`4`), follow-ups the assistant may pick (`10` min – `7` days), a reply refers to the last check-in for (`3` h) |
+| Pushover | send to Pushover (every message), sound: normal (app default) / urgent (`Persistent`), urgent after (`1`) ignored check-in, alarm for (important + critical tasks) after (`2`) ignored check-ins, alarm repeats every (`2` min) |
+
+The defaults can also come from env vars with the same name in capitals (e.g. `MORNING_TIME`), but
+there's no need: you can remove them from Render. A setting saved in the app wins over the env var.
+
+### On the server only (Render env vars)
+Secrets and URLs are listed in [`backend/.env.example`](backend/.env.example). These spend guards also
+stay server-side, so they still cap OpenRouter spend even if the login were ever compromised:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `TIMEZONE` | `Asia/Jerusalem` | |
-| `MORNING_TIME` / `CHECKIN_TIMES` / `EVENING_TIME` | `07:30` / `13:00,17:00` / `21:30` | daily messages |
-| `QUIET_START` / `QUIET_END` | `23:00` / `07:00` | no proactive messages at all in between |
-| `NAG_INTERVAL_MIN` / `MAX_NAGS` | `30` / `4` | default follow-up interval (faster for higher priority) and when to stop |
-| `MEETING_LEAD_MIN` | `15` | reminder before a meeting (plus one at start) |
-| `MIN_GAP_MIN` | `20` | minimum minutes between proactive messages (meetings exempt) |
-| `MAX_PROACTIVE_PER_DAY` | `20` | proactive messages per chat day |
-| `MAX_PER_TASK_PER_DAY` | `4` | assistant check-ins per task per day |
-| `FOLLOWUP_MIN_MIN` / `FOLLOWUP_MAX_DAYS` | `10` / `7` | clamp for follow-ups chosen by the LLM |
-| `DAY_RESET_TIME` | `04:00` | when the chat "day" starts |
-| `REPLY_LINK_HOURS` | `3` | how long a check-in stays the likely topic of your replies |
 | `CHAT_PER_MINUTE` / `LLM_CALLS_PER_DAY` | `15` / `300` | spend guards |
 | `LLM_TIMEOUT_S` / `LLM_MAX_TOKENS` | `25` / `500` | per LLM call |
 | `LLM_REASONING_EFFORT` | empty | `minimal` / `low` / `medium` / `high` for reasoning models (empty = provider default). Reasoning tokens may count toward `LLM_MAX_TOKENS` |
@@ -185,19 +249,23 @@ python -m http.server 5173   # set WEB_ORIGIN=http://localhost:5173 for the back
 backend/app/
   main.py        API routes
   scheduler.py   /tick: plan (guardrails, lease) + background delivery, daily jobs
-  coach.py       writes check-ins / meeting reminders / daily plans (LLM + template fallback)
+  coach.py       writes check-ins / meeting reminders / daily plans (LLM + template fallback),
+                 meeting digests (week ahead, tomorrow)
+  jewish_calendar.py  Shabbat / holiday quiet periods (hdate library, pure)
+  config.py      settings: env-only secrets + the editable behaviour settings (SPECS)
+  user_settings.py    behaviour settings saved from the app (app_settings table)
   agent.py       chat agent: likely-topic candidates, linking turns to tasks
   tools.py       the 9 tools, validation, text tool-call parsing
   llm_loop.py    tool-calling loop (one retry, one text-call recovery)
   context.py     compact plain-text context for the LLM
-  logic.py       pure scheduling logic and guardrails (tested)
+  logic.py       pure scheduling logic, guardrails and alert levels (tested)
   tasks.py       task storage, events (interaction log)
   thread.py      the chat thread, task links, guardrail counts
   actions.py     Done / Snooze / Cancel + chat events
   prompting.py   loads prompts/*.md
   prompts/       system, coach (the skill), checkin, daily_morning/checkin/evening
   llm.py         OpenRouter client: fallback models, daily cap, timeout, 429 → fallback
-  notify.py      web push + Pushover
+  notify.py      web push + Pushover (levels, alarms, cancelling them)
   auth.py        owner-only login check, cron secret
   tokens.py      signed notification-button tokens
 backend/tests/   unit + end-to-end tests (in-memory store, scripted LLM)

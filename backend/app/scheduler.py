@@ -5,8 +5,10 @@ The /tick logic, called every 5 minutes by cron-job.org.
    due tasks → guardrails (logic.plan_contacts) → postpone what may not be sent now
    → lease the rest for one delivery.
 2. deliver()    (background task)
-   one combined message (LLM or template) → saved in the chat → one push → next check-in times.
-3. Daily jobs: morning plan, mid-day check-ins, evening review (background, once per day each).
+   one combined message (LLM or template) → saved in the chat → one push (as loud as its most
+   pressing task: normal / urgent / alarm, see logic.alert_level) → next check-in times.
+3. Daily jobs: morning plan, mid-day check-ins, evening review (background, once per day each),
+   plus the meeting digests: the week's meetings at the start of the week, tomorrow's in the evening.
 """
 
 import logging
@@ -15,8 +17,9 @@ from datetime import datetime, timedelta
 
 from . import coach, db, notify, tasks, thread
 from .config import get_settings
-from .logic import (ContactState, Guardrails, day_start, job_is_due, next_reminder_after_nag,
-                    plan_contacts)
+from .jewish_calendar import next_period, rest_config, rest_until
+from .logic import (ALARM, URGENT, AlertPolicy, ContactState, Guardrails, alarm_window_s, alert_level,
+                    day_start, job_is_due, next_reminder_after_nag, plan_contacts)
 
 log = logging.getLogger("scheduler")
 
@@ -26,12 +29,43 @@ _delivering_since: float | None = None  # one delivery at a time (single Render 
 
 def guardrails() -> Guardrails:
     s = get_settings()
+    cfg = rest_config(s)
     return Guardrails(
         quiet_start=s.quiet_start, quiet_end=s.quiet_end, day_reset=s.day_reset_time,
         min_gap_min=s.min_gap_min, max_per_day=s.max_proactive_per_day,
         max_per_task_per_day=s.max_per_task_per_day,
         followup_min_min=s.followup_min_min, followup_max_days=s.followup_max_days,
+        rest_until=(lambda now: rest_until(now, cfg)) if cfg else None,
     )
+
+
+def alert_policy() -> AlertPolicy:
+    s = get_settings()
+    return AlertPolicy(urgent_after=s.pushover_urgent_after, alarm_for=s.pushover_alarm_for,
+                       alarm_after=s.pushover_alarm_after, max_nags=s.max_nags)
+
+
+def ignored_streak(task: dict) -> int:
+    """Check-ins about this task in a row with no reply from the user since (approximate)."""
+    if not task["last_notified_at"] or thread.user_replied_since(task["last_notified_at"]):
+        return 0
+    return task["nag_count"]
+
+
+def message_level(group: list[dict], now: datetime) -> tuple[int, int]:
+    """(level, alarm seconds) for one message: as loud as its most pressing task."""
+    s = get_settings()
+    policy = alert_policy()
+    level = max(alert_level(t, ignored_streak(t), policy) for t in group)
+    if level < ALARM:
+        return level, 0
+    now_local = now.astimezone(s.tz)
+    cfg = rest_config(s)
+    period = next_period(now, cfg) if cfg else None
+    window = alarm_window_s(now_local, s.quiet_start, period.start if period else None)
+    if window < s.pushover_alarm_retry_min * 60:
+        return URGENT, 0  # quiet hours or Shabbat start too soon for an alarm to repeat even once
+    return ALARM, window
 
 
 def _delivery_running() -> bool:
@@ -87,19 +121,22 @@ async def _deliver(task_ids: list[int]) -> None:
     composed = await coach.compose(group, now, state.sent_today_by_task)
     msg = thread.add("assistant", composed.text, composed.kind, [t["id"] for t in group])
     single = group[0] if len(group) == 1 else None
+    level, alarm_s = message_level(group, now)
     notify.notify(
         composed.title, composed.text,
+        level=level, expire_s=alarm_s,
         task_id=single["id"] if single else None,            # ✓ / ⏰ only for exactly one task
         message_id=msg["id"],
         priority=max(t["priority"] for t in group),
     )
-    log.info("Sent message %s about tasks %s (llm=%s)", msg["id"], [t["id"] for t in group], composed.used_llm)
+    log.info("Sent message %s about tasks %s (llm=%s, level=%s)",
+             msg["id"], [t["id"] for t in group], composed.used_llm, level)
 
     for task in group:
-        _after_contact(task, now, composed.followups.get(task["id"]))
+        _after_contact(task, now, composed.followups.get(task["id"]), alarmed=level == ALARM)
 
 
-def _after_contact(task: dict, now: datetime, followup: datetime | None) -> None:
+def _after_contact(task: dict, now: datetime, followup: datetime | None, alarmed: bool = False) -> None:
     s = get_settings()
     if task["last_notified_at"] and not thread.user_replied_since(task["last_notified_at"]):
         tasks.add_event(task["id"], "ignored")
@@ -108,16 +145,11 @@ def _after_contact(task: dict, now: datetime, followup: datetime | None) -> None
     if task["kind"] == "meeting" and task["due_at"]:
         # Meetings: one reminder before, one at start time, then stop.
         next_at = task["due_at"] if now < task["due_at"] - timedelta(minutes=2) else None
-        escalate = False
     else:
-        next_at, escalate = next_reminder_after_nag(now, nag_count, task["priority"], s.nag_interval_min, s.max_nags)
+        next_at = next_reminder_after_nag(now, nag_count, task["priority"], s.nag_interval_min, s.max_nags)
         if followup is not None:
             next_at = followup  # the coach chose a time (already clamped by code)
-
-    if escalate and not task["escalated"]:
-        notify.send_pushover(task["title"], f"Ignored {nag_count} times. Do it now.", emergency=True,
-                             url=f"{s.web_origin}/?task={task['id']}")
-    tasks.finish_contact(task["id"], nag_count, next_at, requested=task["kind"] == "meeting", escalate=escalate)
+    tasks.finish_contact(task["id"], nag_count, next_at, requested=task["kind"] == "meeting", escalate=alarmed)
 
 
 # ---------------------------------------------------------------- 3. daily jobs
@@ -132,10 +164,17 @@ def claim_job(job: str, run_date) -> bool:
 
 
 def due_daily_jobs() -> list[str]:
-    """Which daily jobs should run now (and claim them)."""
+    """
+    Which daily jobs should run now (and claim them).
+    Nothing runs on Shabbat / holidays. A job isn't claimed then, so if its window reaches past the
+    end (e.g. Saturday's 20:00 "tomorrow's meetings" when quiet lasts until 20:30) it runs right after;
+    otherwise it's skipped that day (Saturday's morning plan).
+    """
     s = get_settings()
     now_local = datetime.now(s.tz)
     today = now_local.date()
+    if rest_until(now_local, rest_config(s)) is not None:
+        return []
     jobs: list[str] = []
     if job_is_due(now_local, s.morning_time) and claim_job("morning", today):
         jobs.append("morning")
@@ -144,10 +183,18 @@ def due_daily_jobs() -> list[str]:
             jobs.append("checkin")
     if job_is_due(now_local, s.evening_time, window_hours=2) and claim_job("evening", today):
         jobs.append("evening")
+    if (s.week_meetings_time and now_local.weekday() == s.week_start_day
+            and job_is_due(now_local, s.week_meetings_time) and claim_job("week_meetings", today)):
+        jobs.append("week_meetings")
+    if (s.meetings_eve_time and job_is_due(now_local, s.meetings_eve_time, window_hours=2)
+            and claim_job("meetings_eve", today)):
+        jobs.append("meetings_eve")
     return jobs
 
 
 async def run_daily_job(job: str) -> None:
+    if job in coach.MEETING_JOBS:
+        return run_meeting_digest(job)
     try:
         text = await coach.compose_daily(job, tasks.now_utc())
         if text is None:
@@ -156,3 +203,15 @@ async def run_daily_job(job: str) -> None:
         notify.notify(coach.JOB_TITLES[job], text, message_id=msg["id"], priority=1)
     except Exception:
         log.exception("Daily job %s failed", job)
+
+
+def run_meeting_digest(job: str) -> None:
+    """The week's / tomorrow's meetings: one chat message (linked to the meetings) and one push."""
+    try:
+        digest = coach.meeting_digest(job, tasks.now_utc())
+        if digest is None:
+            return  # no meetings, nothing to say
+        msg = thread.add("assistant", digest.text, "meeting", digest.task_ids)
+        notify.notify(digest.title, digest.text, message_id=msg["id"], priority=1)
+    except Exception:
+        log.exception("Meeting digest %s failed", job)

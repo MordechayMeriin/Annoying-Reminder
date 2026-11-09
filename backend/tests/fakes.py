@@ -21,6 +21,7 @@ class FakeStore:
         self.messages: list[dict[str, Any]] = []
         self.pushes: list[dict[str, Any]] = []
         self.pushovers: list[dict[str, Any]] = []
+        self.pushover_mode = "always"   # as if PUSHOVER_TOKEN / PUSHOVER_USER were set
         self._ids = {"task": 0, "msg": 0}
 
     # ------------------------------------------------------------ setup helpers
@@ -43,7 +44,7 @@ class FakeStore:
     def install(self, setattr_: Callable[[Any, str, Any], None]) -> None:
         for name in ("now_utc", "get", "get_many", "subtasks", "add_event", "recent_events", "event_counts",
                      "create", "update", "complete", "set_followup", "snooze", "block", "unblock", "cancel",
-                     "close_finished_meetings", "due_for_contact", "defer", "lease", "finish_contact",
+                     "close_finished_meetings", "due_for_contact", "meetings_between", "defer", "lease", "finish_contact",
                      "list_tasks"):
             setattr_(tasks, name, getattr(self, "t_" + name))
         for name in ("add", "add_event", "link", "since", "for_tasks", "last_proactive", "recent_task_ids",
@@ -51,16 +52,19 @@ class FakeStore:
             setattr_(thread, name, getattr(self, "m_" + name))
         setattr_(notify, "send_push", self.send_push)
         setattr_(notify, "send_pushover", self.send_pushover)
+        setattr_(notify, "pushover_mode", lambda: self.pushover_mode)
 
     # ------------------------------------------------------------ notify
 
     def send_push(self, title, body, *, task_id=None, message_id=None, priority=1, url=None) -> int:
         self.pushes.append({"title": title, "body": notify.push_body(body), "task_id": task_id,
-                            "message_id": message_id, "url": url or (f"/?m={message_id}" if message_id else "/")})
+                            "message_id": message_id, "priority": priority,
+                            "url": url or (f"/?m={message_id}" if message_id else "/")})
         return 1
 
-    def send_pushover(self, title, message, *, emergency=False, url=None) -> bool:
-        self.pushovers.append({"title": title, "message": message, "emergency": emergency})
+    def send_pushover(self, title, message, *, level=0, url=None, expire_s=3600) -> bool:
+        self.pushovers.append({"title": title, "message": message, "level": level, "url": url,
+                               "expire_s": expire_s})
         return True
 
     # ------------------------------------------------------------ tasks.*
@@ -162,6 +166,11 @@ class FakeStore:
     def t_due_for_contact(self, limit=20):
         due = [t for t in self.tasks.values() if t["status"] == "open" and t["remind_at"] and t["remind_at"] <= self.now]
         return [dict(t) for t in sorted(due, key=lambda t: t["remind_at"])][:limit]
+
+    def t_meetings_between(self, start, end):
+        rows = [t for t in self.tasks.values() if t["status"] == "open" and t["kind"] == "meeting"
+                and t["due_at"] and t["due_at"] < end and (t["due_at"] >= start or t["recurrence"])]
+        return [dict(t) for t in sorted(rows, key=lambda t: t["due_at"])]
 
     def t_defer(self, task_id, until):
         t = self.tasks[task_id]
