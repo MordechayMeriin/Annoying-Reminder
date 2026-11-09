@@ -145,7 +145,7 @@ class Spec:
 
 
 _G_DAY, _G_QUIET, _G_SHABBAT, _G_MEET, _G_NAG, _G_PUSHOVER = (
-    "Daily messages", "Quiet hours", "Shabbat & holidays", "Meetings", "Check-ins & limits", "Pushover")
+    "Daily messages", "Quiet hours", "Shabbat & holidays", "Meetings", "Check-ins & limits", "Notifications")
 
 PUSHOVER_MODES = (
     ("always", "Every message"),
@@ -223,6 +223,9 @@ SPECS: dict[str, Spec] = {s.key: s for s in [
     Spec("reply_link_hours", "float", "3", "A reply refers to the last check-in for (hours)", _G_NAG,
          min=0, max=48),
 
+    Spec("browser_push", "bool", "true", "Browser notifications", _G_PUSHOVER,
+         "Off: everything goes to Pushover, whatever \"Send to Pushover\" says. Browser notifications "
+         "are still used while Pushover isn't set up, so reminders are never lost."),
     Spec("pushover_mode", "choice", "always", "Send to Pushover", _G_PUSHOVER,
          "Every message: Pushover and browser push. Instead of browser: browser push only if Pushover "
          "fails. As a backup: only when no browser got it, and alarms.", options=PUSHOVER_MODES),
@@ -295,10 +298,10 @@ class Settings:
         default_factory=lambda: [m.strip() for m in _req("OPENROUTER_MODELS").split(",") if m.strip()]
     )
 
-    # --- Web push (VAPID) ---
-    vapid_private_key: str = field(default_factory=lambda: _req("VAPID_PRIVATE_KEY"))
-    vapid_public_key: str = field(default_factory=lambda: _req("VAPID_PUBLIC_KEY"))
-    vapid_subject: str = field(default_factory=lambda: _req("VAPID_SUBJECT"))  # mailto:you@example.com
+    # --- Web push (VAPID; optional: without the keys there are no browser notifications) ---
+    vapid_private_key: str = field(default_factory=lambda: _opt("VAPID_PRIVATE_KEY", ""))
+    vapid_public_key: str = field(default_factory=lambda: _opt("VAPID_PUBLIC_KEY", ""))
+    vapid_subject: str = field(default_factory=lambda: _opt("VAPID_SUBJECT", ""))  # mailto:you@example.com
 
     # --- Pushover (optional; strongly recommended: priorities, loud sounds, repeating alarms) ---
     pushover_token: str = field(default_factory=lambda: _opt("PUSHOVER_TOKEN", ""))
@@ -348,7 +351,9 @@ class Settings:
     # A reply this soon after a check-in treats that check-in's tasks as the likely topic.
     reply_link_hours: float = field(default_factory=lambda: _env("reply_link_hours"))
 
-    # Pushover (only used when PUSHOVER_TOKEN and PUSHOVER_USER are set)
+    # Browser push (only when the VAPID keys are set) and Pushover (only when PUSHOVER_TOKEN and
+    # PUSHOVER_USER are set); notify.py combines them.
+    browser_push: bool = field(default_factory=lambda: _env("browser_push"))
     pushover_mode: str = field(default_factory=lambda: _env("pushover_mode"))
     pushover_sound: str = field(default_factory=lambda: _env("pushover_sound"))
     pushover_sound_urgent: str = field(default_factory=lambda: _env("pushover_sound_urgent"))
@@ -361,6 +366,8 @@ class Settings:
     chat_per_minute: int = field(default_factory=lambda: int(_opt("CHAT_PER_MINUTE", "15")))
     llm_calls_per_day: int = field(default_factory=lambda: int(_opt("LLM_CALLS_PER_DAY", "300")))
     llm_timeout_s: float = field(default_factory=lambda: float(_opt("LLM_TIMEOUT_S", "25")))
+    # A whole chat turn (several model calls and tools) stops after this, so "typing…" never hangs.
+    chat_turn_timeout_s: float = field(default_factory=lambda: float(_opt("CHAT_TURN_TIMEOUT_S", "60")))
     llm_max_tokens: int = field(default_factory=lambda: int(_opt("LLM_MAX_TOKENS", "500")))
     # Thinking effort for reasoning models (OpenRouter `reasoning.effort`). Empty = provider default.
     llm_reasoning_effort: str = field(default_factory=lambda: _reasoning_effort(_opt("LLM_REASONING_EFFORT", "")))
@@ -368,6 +375,10 @@ class Settings:
     @property
     def pushover_enabled(self) -> bool:
         return bool(self.pushover_token and self.pushover_user)
+
+    @property
+    def browser_push_available(self) -> bool:
+        return bool(self.vapid_private_key and self.vapid_public_key and self.vapid_subject)
 
 
 # ================================================================ access

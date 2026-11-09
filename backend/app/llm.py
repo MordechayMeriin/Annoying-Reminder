@@ -10,6 +10,7 @@ from typing import Any
 
 import httpx
 
+from . import httpclient
 from .config import get_settings
 
 log = logging.getLogger("llm")
@@ -64,12 +65,12 @@ async def chat_completion(messages: list[dict[str, Any]], tools: list[dict] | No
         body["parallel_tool_calls"] = False  # a hint; we still handle several calls if they come
 
     try:
-        async with httpx.AsyncClient(timeout=timeout or s.llm_timeout_s) as client:
-            r = await client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={"Authorization": f"Bearer {s.openrouter_api_key}", "X-Title": "Annoying Reminder"},
-                json=body,
-            )
+        r = await httpclient.client().post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={"Authorization": f"Bearer {s.openrouter_api_key}", "X-Title": "Annoying Reminder"},
+            json=body,
+            timeout=timeout or s.llm_timeout_s,
+        )
     except httpx.HTTPError as e:  # timeouts and network errors
         raise LLMUnavailable(f"OpenRouter unreachable: {type(e).__name__}") from e
 

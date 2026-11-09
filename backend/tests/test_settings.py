@@ -71,6 +71,9 @@ class FakeDB:
             def __exit__(self, *exc):
                 return False
 
+            def transaction(self):
+                return self
+
             def execute(self, sql, params):
                 if sql.lstrip().startswith("insert"):
                     db.rows[params[0]] = params[1]

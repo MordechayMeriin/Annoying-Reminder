@@ -23,6 +23,7 @@ class FakeStore:
         self.pushovers: list[dict[str, Any]] = []
         self.pushover_mode = "always"   # as if PUSHOVER_TOKEN / PUSHOVER_USER were set
         self._ids = {"task": 0, "msg": 0}
+        self.calls: list[str] = []      # every storage call, in order (for counting round trips)
 
     # ------------------------------------------------------------ setup helpers
 
@@ -43,20 +44,32 @@ class FakeStore:
 
     def install(self, setattr_: Callable[[Any, str, Any], None]) -> None:
         for name in ("now_utc", "get", "get_many", "subtasks", "add_event", "recent_events", "event_counts",
+                     "subtasks_many", "recent_events_many", "event_counts_many",
                      "create", "update", "complete", "set_followup", "snooze", "block", "unblock", "cancel",
                      "close_finished_meetings", "due_for_contact", "meetings_between", "defer", "lease", "finish_contact",
                      "list_tasks"):
-            setattr_(tasks, name, getattr(self, "t_" + name))
+            setattr_(tasks, name, self._counted("tasks." + name, getattr(self, "t_" + name), name != "now_utc"))
         for name in ("add", "add_event", "link", "since", "for_tasks", "last_proactive", "recent_task_ids",
-                     "user_replied_since", "contact_state", "page"):
-            setattr_(thread, name, getattr(self, "m_" + name))
+                     "user_replied_since", "last_user_reply_at", "contact_state", "page", "by_ids"):
+            setattr_(thread, name, self._counted("thread." + name, getattr(self, "m_" + name)))
         setattr_(notify, "send_push", self.send_push)
         setattr_(notify, "send_pushover", self.send_pushover)
         setattr_(notify, "pushover_mode", lambda: self.pushover_mode)
 
+    def _counted(self, label: str, fn: Callable, count: bool = True) -> Callable:
+        if not count:
+            return fn
+
+        def wrapper(*args, **kwargs):
+            # Calls with an empty id list never reach the database in the real code.
+            if not (args and isinstance(args[0], (list, tuple)) and not args[0]):
+                self.calls.append(label)
+            return fn(*args, **kwargs)
+        return wrapper
+
     # ------------------------------------------------------------ notify
 
-    def send_push(self, title, body, *, task_id=None, message_id=None, priority=1, url=None) -> int:
+    def send_push(self, title, body, *, task_id=None, message_id=None, priority=1, url=None, force=False) -> int:
         self.pushes.append({"title": title, "body": notify.push_body(body), "task_id": task_id,
                             "message_id": message_id, "priority": priority,
                             "url": url or (f"/?m={message_id}" if message_id else "/")})
@@ -94,6 +107,16 @@ class FakeStore:
             if e["task_id"] == task_id and e["created_at"] > self.now - timedelta(days=days):
                 out[e["kind"]] = out.get(e["kind"], 0) + 1
         return out
+
+    def t_subtasks_many(self, ids):
+        return {i: self.t_subtasks(i) for i in ids}
+
+    def t_recent_events_many(self, ids, limit=8):
+        return {i: [{k: e[k] for k in ("kind", "note", "created_at")} for e in self.t_recent_events(i, limit)]
+                for i in ids}
+
+    def t_event_counts_many(self, ids, days=7):
+        return {i: self.t_event_counts(i, days) for i in ids}
 
     def t_create(self, title, *, kind="task", priority=1, description=None, due_at=None, remind_at=None,
                  recurrence=None, parent_id=None):
@@ -250,6 +273,10 @@ class FakeStore:
     def m_user_replied_since(self, t):
         return any(m["role"] == "user" and m["kind"] == "chat" and m["created_at"] > t for m in self.messages)
 
+    def m_last_user_reply_at(self):
+        rows = [m for m in self.messages if m["role"] == "user" and m["kind"] == "chat"]
+        return rows[-1]["created_at"] if rows else None
+
     def m_contact_state(self, day_start):
         pro = [m for m in self.messages if m["kind"] in thread.PROACTIVE_KINDS]
         by_task: dict[int, int] = {}
@@ -263,9 +290,18 @@ class FakeStore:
             sent_today_by_task=by_task,
         )
 
-    def m_page(self, before_id=None, limit=50):
-        rows = [m for m in self.messages if before_id is None or m["id"] < before_id]
-        return [dict(m) for m in rows[-limit:]]
+    def _public(self, m):
+        main = self.tasks.get(m["task_id"]) if m["task_id"] else None
+        return {**m, "task_title": main["title"] if main else None, "task_status": main["status"] if main else None,
+                "task_titles": {str(i): self.tasks[i]["title"] for i in m["task_ids"] if i in self.tasks}}
+
+    def m_page(self, before_id=None, limit=50, after_id=None):
+        rows = [m for m in self.messages if (before_id is None or m["id"] < before_id)
+                and (after_id is None or m["id"] > after_id)]
+        return [self._public(m) for m in rows[-limit:]]
+
+    def m_by_ids(self, ids):
+        return [self._public(m) for m in self.messages if m["id"] in ids]
 
 
 class ScriptedLLM:

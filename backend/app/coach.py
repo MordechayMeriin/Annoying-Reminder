@@ -16,7 +16,7 @@ from . import context, tasks, thread
 from .config import get_settings
 from .llm import LLMUnavailable, chat_completion
 from .llm_loop import run as run_tools
-from .logic import day_start, meeting_occurrences
+from .logic import clip, day_start, meeting_occurrences
 from .prompting import render
 from .tools import COACH_TOOLS, ToolContext
 
@@ -111,7 +111,7 @@ async def compose(group: list[dict[str, Any]], now: datetime,
     if not used:
         others = [t for t in group if t not in meetings]
         body, followups = "\n".join(template_line(t, now) for t in others), {}
-    text = "\n".join(x for x in (head, body.strip()) if x)[:MAX_TEXT]
+    text = clip("\n".join(x for x in (head, body.strip()) if x), MAX_TEXT)
     return Composed(text=text, kind=kind, title=title, followups=followups, used_llm=used)
 
 
@@ -119,11 +119,23 @@ async def _llm_body(group: list[dict[str, Any]], now: datetime, contacts_today: 
                     ctx: ToolContext) -> str:
     s = get_settings()
     now_local = now.astimezone(s.tz)
-    ids = [t["id"] for t in group]
+    user = await asyncio.to_thread(_checkin_prompt, group, now, now_local, contacts_today)
+    messages = [
+        {"role": "system", "content": render("checkin", now=f"{now_local:%Y-%m-%d %H:%M}", weekday=f"{now_local:%A}")},
+        {"role": "user", "content": user},
+    ]
+    has_tasks = any(t["kind"] != "meeting" for t in group)
+    return await run_tools(messages, COACH_TOOLS if has_tasks else [], ctx, max_rounds=3,
+                           timeout=s.llm_timeout_s)
 
+
+def _checkin_prompt(group: list[dict[str, Any]], now: datetime, now_local: datetime,
+                    contacts_today: dict[int, int]) -> str:
+    """Blocking: the check-in prompt's facts, read from the database."""
+    s = get_settings()
+    ids = [t["id"] for t in group]
     blocks = []
-    for t in group:
-        block = context.task_context(t, now_local, contacts_today.get(t["id"], 0))
+    for t, block in zip(group, context.task_contexts(group, now_local, contacts_today)):
         if t["kind"] == "meeting" and t.get("due_at"):
             block += f"\n  (Shown above your text by the system: {meeting_line(t, now)})"
         elif t.get("remind_requested"):
@@ -132,20 +144,13 @@ async def _llm_body(group: list[dict[str, Any]], now: datetime, contacts_today: 
 
     today = thread.since(day_start(now_local, s.day_reset_time), 8)
     open_today = tasks.list_tasks("today")
-    user = "\n\n".join([
+    return "\n\n".join([
         "Due for a check-in now:\n" + "\n".join(blocks),
         "Earlier messages about these tasks:\n" + context.linked_history(ids, now_local),
         "Today's conversation so far (latest last):\n" + (context.format_messages(today, now_local) or "(nothing yet)"),
         "Other open items today:\n" + context.format_open_items(open_today, now_local, set(ids)),
         "Write the check-in message now.",
     ])
-    messages = [
-        {"role": "system", "content": render("checkin", now=f"{now_local:%Y-%m-%d %H:%M}", weekday=f"{now_local:%A}")},
-        {"role": "user", "content": user},
-    ]
-    has_tasks = any(t["kind"] != "meeting" for t in group)
-    return await run_tools(messages, COACH_TOOLS if has_tasks else [], ctx, max_rounds=3,
-                           timeout=s.llm_timeout_s)
 
 
 # ================================================================ daily jobs
@@ -158,8 +163,10 @@ def _snapshot_text(now_local: datetime) -> tuple[str, int]:
     today = tasks.list_tasks("today")
     parts = []
     if today:
+        shown = today[:12]
+        counts = tasks.event_counts_many([t["id"] for t in shown], 7)
         parts.append("Open for today (incl. overdue):\n" + "\n".join(
-            context.format_task(t, now_local, counts=tasks.event_counts(t["id"], 7)) for t in today[:12]))
+            context.format_task(t, now_local, counts=counts.get(t["id"], {})) for t in shown))
     done = tasks.list_tasks("done_today")
     parts.append("Done today:\n" + ("\n".join(f"- {t['title']}" for t in done) or "(nothing yet)"))
     upcoming = tasks.list_tasks("upcoming", 7)
@@ -171,14 +178,20 @@ def _snapshot_text(now_local: datetime) -> tuple[str, int]:
     return "\n\n".join(parts), len(today)
 
 
+def _daily_facts(now_local: datetime) -> tuple[str, int, list[dict[str, Any]]]:
+    """Blocking: the task snapshot, how many are open today, and today's messages."""
+    snapshot, open_count = _snapshot_text(now_local)
+    today = thread.since(day_start(now_local, get_settings().day_reset_time), 12)
+    return snapshot, open_count, today
+
+
 async def compose_daily(job: str, now: datetime) -> str | None:
     """Text for a daily job, or None if there's nothing worth saying (empty mid-day check-in)."""
     s = get_settings()
     now_local = now.astimezone(s.tz)
-    snapshot, open_count = _snapshot_text(now_local)
+    snapshot, open_count, today = await asyncio.to_thread(_daily_facts, now_local)
     if job == "checkin" and open_count == 0:
         return None
-    today = thread.since(day_start(now_local, s.day_reset_time), 12)
     messages = [
         {"role": "system", "content": render(JOB_PROMPTS[job], now=f"{now_local:%Y-%m-%d %H:%M}",
                                              weekday=f"{now_local:%A}")},
@@ -189,7 +202,7 @@ async def compose_daily(job: str, now: datetime) -> str | None:
         msg = await chat_completion(messages, temperature=0.5)
         text = (msg.get("content") or "").strip()
         if text:
-            return text[:MAX_TEXT]
+            return clip(text, MAX_TEXT)
     except LLMUnavailable as e:
         log.warning("Daily job %s falls back to template: %s", job, e)
     except Exception:
@@ -239,7 +252,7 @@ def meeting_digest(job: str, now: datetime) -> Digest | None:
     else:
         lines = [f"{w.astimezone(tz):%H:%M} — {m['title']}" for w, m in occurrences]
         head = f"📅 Tomorrow ({start:%a %d/%m}):"
-    text = "\n".join([head, *lines])[:MAX_TEXT]
+    text = clip("\n".join([head, *lines]), MAX_TEXT)
     ids = list(dict.fromkeys(m["id"] for _, m in occurrences))
     return Digest(text=text, title=MEETING_JOB_TITLES[job], task_ids=ids)
 

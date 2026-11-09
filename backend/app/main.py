@@ -10,7 +10,7 @@ Writing in the chat or acting on a task stops any repeating Pushover alarm (you'
 
 POST /chat answers with a short Server-Sent Events stream of progress, so the app can show what's
 happening: received → thinking → tool … → thinking → done (or error). The reply itself arrives whole
-in `done`. The agent runs as its own task, so a dropped connection (screen locked, app closed) never
+in `done`, with both saved messages (`messages`) so the app can show them without another request. The agent runs as its own task, so a dropped connection (screen locked, app closed) never
 cuts a turn short: the reply is still saved and shows up on the next refresh.
 """
 
@@ -19,6 +19,7 @@ import json
 import logging
 import time
 from collections import deque
+from contextlib import asynccontextmanager
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
@@ -26,7 +27,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import actions, agent, db, notify, prompting, scheduler, tasks, thread, user_settings
+from . import actions, agent, db, httpclient, notify, prompting, scheduler, tasks, thread, user_settings
 from .auth import require_cron, require_owner
 from .config import SPECS, get_settings
 from .llm import LLMLimitReached, LLMUnavailable
@@ -39,7 +40,16 @@ log = logging.getLogger("main")
 settings = get_settings()  # fail fast at startup if env vars are missing (env-only values below)
 prompting.check_all()      # ... or a prompt file is missing
 user_settings.load()       # behaviour settings changed in the app (logs and keeps defaults on error)
-app = FastAPI(title="Annoying Reminder", docs_url=None, redoc_url=None, openapi_url=None)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    yield
+    await httpclient.aclose()
+    await run_in_threadpool(db.close_pool)
+
+
+app = FastAPI(title="Annoying Reminder", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[settings.web_origin],
@@ -57,7 +67,10 @@ def health():
 
 @app.get("/config/push")
 def push_config():
-    return {"vapidPublicKey": settings.vapid_public_key}
+    """Whether the app should offer browser notifications (and the key to subscribe with)."""
+    s = get_settings()
+    enabled = notify.browser_push_on() or (s.browser_push_available and not s.pushover_enabled)
+    return {"enabled": enabled, "vapidPublicKey": s.vapid_public_key if enabled else None}
 
 
 # ---------------------------------------------------------------- cron
@@ -122,11 +135,26 @@ def _sse(event: dict) -> str:
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
 
+def _public_messages(rows: list[dict]) -> list[dict]:
+    tz = get_settings().tz
+    out = []
+    for r in rows:
+        r = dict(r)
+        r["created_at"] = r["created_at"].astimezone(tz).isoformat(timespec="minutes")
+        out.append(r)
+    return out
+
+
 async def _chat_turn(text: str, emit) -> None:
     try:
         r = await agent.handle_user_message(text, emit)
+        try:
+            saved = await run_in_threadpool(thread.by_ids, [r.user_message_id, r.reply_message_id])
+        except Exception:  # the app falls back to reloading the chat
+            log.exception("Loading the saved messages failed")
+            saved = []
         emit({"type": "done", "reply": r.reply, "tasksChanged": r.changed, "userMessageId": r.user_message_id,
-              "replyMessageId": r.reply_message_id, "taskIds": r.task_ids})
+              "replyMessageId": r.reply_message_id, "taskIds": r.task_ids, "messages": _public_messages(saved)})
     except LLMLimitReached:
         emit({"type": "error", "status": 429, "detail": "Daily LLM limit reached. Reminders still work."})
     except LLMUnavailable:
@@ -146,7 +174,14 @@ async def _chat_turn(text: str, emit) -> None:
 async def chat(body: ChatIn):
     _rate_limit()
     queue: asyncio.Queue[dict] = asyncio.Queue()
-    turn = asyncio.create_task(_chat_turn(body.message.strip(), queue.put_nowait))
+    loop = asyncio.get_running_loop()
+
+    def emit(event: dict) -> None:
+        # Progress comes from worker threads too (database work, tools); asyncio.Queue isn't
+        # thread-safe, so every event is handed to the event loop.
+        loop.call_soon_threadsafe(queue.put_nowait, event)
+
+    turn = asyncio.create_task(_chat_turn(body.message.strip(), emit))
     _running.add(turn)
     turn.add_done_callback(_running.discard)
 
@@ -166,17 +201,24 @@ async def chat(body: ChatIn):
 
 
 @app.get("/messages", dependencies=[Depends(require_owner)])
-def messages(limit: int = 50, before: int | None = None):
-    rows = thread.page(before, min(max(limit, 1), 200))
-    tz = get_settings().tz
-    for r in rows:
-        r["created_at"] = r["created_at"].astimezone(tz).isoformat(timespec="minutes")
-    return rows
+def messages(limit: int = 50, before: int | None = None, after: int | None = None):
+    """The newest `limit` messages, or those older than `before` / newer than `after`."""
+    return _public_messages(thread.page(before, min(max(limit, 1), 200), after))
 
 
 @app.get("/tasks", dependencies=[Depends(require_owner)])
 def list_tasks(scope: str = "open", days: int = 7):
     return [tasks.to_public(t) for t in tasks.list_tasks(scope, days)]
+
+
+@app.get("/tasks/overview", dependencies=[Depends(require_owner)])
+def tasks_overview(days: int = 7):
+    """Everything the tasks drawer shows, in one request."""
+    return {
+        "today": [tasks.to_public(t) for t in tasks.list_tasks("today")],
+        "upcoming": [tasks.to_public(t) for t in tasks.list_tasks("upcoming", days)],
+        "open": [tasks.to_public(t) for t in tasks.list_tasks("open")],
+    }
 
 
 @app.get("/tasks/{task_id}", dependencies=[Depends(require_owner)])
@@ -261,7 +303,10 @@ def subscribe(sub: SubscriptionIn):
 
 @app.post("/push/test", dependencies=[Depends(require_owner)])
 def push_test():
-    sent = notify.send_push("🔔 Test", "Notifications work.", url="/")
+    s = get_settings()
+    if not s.browser_push_available:
+        raise HTTPException(status_code=400, detail="Browser notifications aren't set up (no VAPID keys).")
+    sent = notify.send_push("🔔 Test", "Notifications work.", url="/", force=not s.pushover_enabled)
     return {"sent": sent}
 
 

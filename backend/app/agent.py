@@ -7,8 +7,9 @@ long-term memory). Which task a turn is about is the model's call: code only off
 and the turn is linked to the tasks the model actually acted on.
 """
 
+import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, Callable
 
@@ -31,6 +32,8 @@ class ChatResult:
     user_message_id: int
     reply_message_id: int
     task_ids: list[int]
+    user_message: dict[str, Any] = field(default_factory=dict)    # the saved rows (for the app)
+    reply_message: dict[str, Any] = field(default_factory=dict)
 
 
 def normalize_roles(history: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -52,16 +55,16 @@ def normalize_roles(history: list[dict[str, Any]]) -> list[dict[str, str]]:
     return out
 
 
-def likely_topic(candidate_ids: list[int], checkin: dict[str, Any] | None, now_local) -> str:
+def likely_topic(candidates: list[dict[str, Any]], checkin: dict[str, Any] | None, now_local) -> str:
     parts = []
     if checkin:
         parts.append(f"Your last check-in ({context.fmt_when(checkin['created_at'], now_local)}): "
                      f"\"{checkin['content'][:400]}\"")
-    by_id = {t["id"]: t for t in tasks.get_many(candidate_ids)}
-    blocks = [context.task_context(by_id[i], now_local) for i in candidate_ids if i in by_id]
+    blocks = context.task_contexts(candidates, now_local)
     if blocks:
         parts.append("Tasks it may be about (a guess from recent messages, not certain):\n" + "\n".join(blocks))
-        parts.append("Earlier messages about these:\n" + context.linked_history(candidate_ids, now_local, 6))
+        parts.append("Earlier messages about these:\n"
+                     + context.linked_history([t["id"] for t in candidates], now_local, 6))
         parts.append("The user's message may be about one of these, a different task, a new task, or nothing "
                      "task-related. Decide from what they wrote. If it's ambiguous and it matters, ask one short question.")
     else:
@@ -69,8 +72,11 @@ def likely_topic(candidate_ids: list[int], checkin: dict[str, Any] | None, now_l
     return "\n\n".join(parts)
 
 
-def tool_status(name: str, args: dict[str, Any]) -> dict[str, Any]:
-    """A tool call → a small status for the chat UI ("Writing a new task: …"). Never raises."""
+def tool_status(name: str, args: dict[str, Any], known_titles: dict[int, str] | None = None) -> dict[str, Any]:
+    """
+    A tool call → a small status for the chat UI ("Writing a new task: …"). Never raises.
+    known_titles: titles of tasks already loaded for this turn, to skip a database lookup.
+    """
     status: dict[str, Any] = {"type": "tool", "name": name}
     title = args.get("title")
     if isinstance(title, str) and title.strip():
@@ -79,17 +85,58 @@ def tool_status(name: str, args: dict[str, Any]) -> dict[str, Any]:
         status["kind"] = "meeting"
     task_id = args.get("id") if "id" in args else args.get("task_id")
     if isinstance(task_id, int) and not isinstance(task_id, bool):
-        try:
-            task = tasks.get(task_id)
-        except Exception:  # only a label: never let it break the turn
-            log.exception("Status lookup for task %s failed", task_id)
-            task = None
-        if task:
-            status["taskTitle"] = task["title"]
+        task_title = (known_titles or {}).get(task_id)
+        if task_title is None:
+            try:
+                task = tasks.get(task_id)
+            except Exception:  # only a label: never let it break the turn
+                log.exception("Status lookup for task %s failed", task_id)
+                task = None
+            task_title = task["title"] if task else None
+        if task_title:
+            status["taskTitle"] = task_title
     return status
 
 
 Progress = Callable[[dict[str, Any]], None]
+
+TIMEOUT_REPLY = "That took too long, so I stopped. Anything I already changed is saved. Try again?"
+
+
+@dataclass
+class _Turn:
+    """What the model needs for one chat turn, read from the database in one go."""
+    history: list[dict[str, Any]]
+    user_msg: dict[str, Any]
+    checkin_ids: list[int]
+    system: str
+    titles: dict[int, str]
+
+
+def _start_turn(text: str, now, on_saved: Callable[[dict[str, Any]], None]) -> _Turn:
+    """Blocking: saves the user's message (then calls on_saved) and builds the prompt."""
+    s = get_settings()
+    now_local = now.astimezone(s.tz)
+    start = day_start(now_local, s.day_reset_time)
+
+    history = thread.since(start, 40)
+    user_msg = thread.add("user", text)
+    on_saved(user_msg)
+
+    last = thread.last_proactive()
+    recent = last if last and now - last["created_at"] <= timedelta(hours=s.reply_link_hours) else None
+    open_tasks = tasks.list_tasks("open")
+    candidate_ids = select_candidate_tasks(text, now, last, thread.recent_task_ids(start), open_tasks,
+                                           s.reply_link_hours)
+    by_id = {t["id"]: t for t in open_tasks}
+    missing = [i for i in candidate_ids if i not in by_id]
+    by_id.update({t["id"]: t for t in tasks.get_many(missing)})
+    candidates = [by_id[i] for i in candidate_ids if i in by_id]
+
+    system = render("system", now=f"{now_local:%Y-%m-%d %H:%M}", weekday=f"{now_local:%A}", tz=s.tz.key,
+                    likely_topic=likely_topic(candidates, recent, now_local))
+    return _Turn(history=history, user_msg=user_msg, checkin_ids=list(recent["task_ids"]) if recent else [],
+                 system=system, titles={i: t["title"] for i, t in by_id.items()})
 
 
 async def handle_user_message(text: str, on_progress: Progress | None = None) -> ChatResult:
@@ -98,47 +145,45 @@ async def handle_user_message(text: str, on_progress: Progress | None = None) ->
 
     on_progress, if given, gets {"type": "received", "userMessageId"} once the message is saved,
     then {"type": "thinking"} before each LLM call and a tool_status() before each tool runs.
+    It must be thread-safe: database work runs in worker threads and reports from there.
     """
+    titles: dict[int, str] = {}
+
     def progress(event: dict[str, Any]) -> None:
         if on_progress is None:
             return
         try:
-            on_progress(tool_status(event["name"], event["args"]) if event["type"] == "tool" else event)
+            on_progress(tool_status(event["name"], event["args"], titles) if event["type"] == "tool" else event)
         except Exception:  # status updates are cosmetic
             log.exception("Progress callback failed")
 
     s = get_settings()
     now = tasks.now_utc()
-    now_local = now.astimezone(s.tz)
-    start = day_start(now_local, s.day_reset_time)
-
-    history = thread.since(start, 40)
-    user_msg = thread.add("user", text)
-    progress({"type": "received", "userMessageId": user_msg["id"]})
-
-    last = thread.last_proactive()
-    recent = last if last and now - last["created_at"] <= timedelta(hours=s.reply_link_hours) else None
-    checkin_ids = list(recent["task_ids"]) if recent else []
-    candidates = select_candidate_tasks(text, now, last, thread.recent_task_ids(start),
-                                        tasks.list_tasks("open"), s.reply_link_hours)
-
-    system = render("system", now=f"{now_local:%Y-%m-%d %H:%M}", weekday=f"{now_local:%A}", tz=s.tz.key,
-                    likely_topic=likely_topic(candidates, recent, now_local))
+    turn = await asyncio.to_thread(
+        _start_turn, text, now, lambda m: progress({"type": "received", "userMessageId": m["id"]}))
+    titles.update(turn.titles)
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": system},
-        *normalize_roles(history + [{"role": "user", "content": text}]),
+        {"role": "system", "content": turn.system},
+        *normalize_roles(turn.history + [{"role": "user", "content": text}]),
     ]
 
     ctx = ToolContext(mode="chat", now=now)
     try:
-        reply = await run_tools(messages, CHAT_TOOLS, ctx, max_rounds=MAX_TOOL_ROUNDS, timeout=s.llm_timeout_s,
-                                on_event=progress)
+        reply = await asyncio.wait_for(
+            run_tools(messages, CHAT_TOOLS, ctx, max_rounds=MAX_TOOL_ROUNDS, timeout=s.llm_timeout_s,
+                      on_event=progress),
+            timeout=s.chat_turn_timeout_s)
+    except asyncio.TimeoutError:
+        log.warning("Chat turn stopped after %ss", s.chat_turn_timeout_s)
+        reply = TIMEOUT_REPLY
     finally:
-        linked = link_task_ids(ctx.acted_on, checkin_ids)
-        thread.link([user_msg["id"]], linked)
+        linked = link_task_ids(ctx.acted_on, turn.checkin_ids)
+        await asyncio.to_thread(thread.link, [turn.user_msg["id"]], linked)
     if not reply:
         reply = "Done." if ctx.changed else "Sorry, I couldn't process that. Try again?"
 
-    reply_msg = thread.add("assistant", reply, "chat", linked)
+    reply_msg = await asyncio.to_thread(thread.add, "assistant", reply, "chat", linked)
+    user_msg = {**turn.user_msg, "task_ids": linked, "task_id": linked[0] if linked else None}
     return ChatResult(reply=reply, changed=ctx.changed, user_message_id=user_msg["id"],
-                      reply_message_id=reply_msg["id"], task_ids=linked)
+                      reply_message_id=reply_msg["id"], task_ids=linked,
+                      user_message=user_msg, reply_message=reply_msg)

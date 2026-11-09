@@ -11,6 +11,7 @@ The /tick logic, called every 5 minutes by cron-job.org.
    plus the meeting digests: the week's meetings at the start of the week, tomorrow's in the evening.
 """
 
+import asyncio
 import logging
 import time
 from datetime import datetime, timedelta
@@ -45,18 +46,32 @@ def alert_policy() -> AlertPolicy:
                        alarm_after=s.pushover_alarm_after, max_nags=s.max_nags)
 
 
-def ignored_streak(task: dict) -> int:
-    """Check-ins about this task in a row with no reply from the user since (approximate)."""
-    if not task["last_notified_at"] or thread.user_replied_since(task["last_notified_at"]):
+_UNSET = object()
+
+
+def _replied_since(last_reply: datetime | None, t: datetime) -> bool:
+    return last_reply is not None and last_reply > t
+
+
+def ignored_streak(task: dict, last_reply=_UNSET) -> int:
+    """
+    Check-ins about this task in a row with no reply from the user since (approximate).
+    last_reply: thread.last_user_reply_at(), when the caller already has it (one query for many tasks).
+    """
+    if not task["last_notified_at"]:
         return 0
-    return task["nag_count"]
+    if last_reply is _UNSET:
+        last_reply = thread.last_user_reply_at()
+    return 0 if _replied_since(last_reply, task["last_notified_at"]) else task["nag_count"]
 
 
-def message_level(group: list[dict], now: datetime) -> tuple[int, int]:
+def message_level(group: list[dict], now: datetime, last_reply=_UNSET) -> tuple[int, int]:
     """(level, alarm seconds) for one message: as loud as its most pressing task."""
     s = get_settings()
     policy = alert_policy()
-    level = max(alert_level(t, ignored_streak(t), policy) for t in group)
+    if last_reply is _UNSET:
+        last_reply = thread.last_user_reply_at()
+    level = max(alert_level(t, ignored_streak(t, last_reply), policy) for t in group)
     if level < ALARM:
         return level, 0
     now_local = now.astimezone(s.tz)
@@ -110,18 +125,30 @@ async def deliver(task_ids: list[int]) -> None:
 
 
 async def _deliver(task_ids: list[int]) -> None:
-    s = get_settings()
+    # Database and notification calls block, so they run in worker threads; only the LLM part
+    # (coach.compose) runs on the event loop.
     now = tasks.now_utc()
+    group, state = await asyncio.to_thread(_load_group, task_ids, now)
+    if not group:
+        return
+    composed = await coach.compose(group, now, state.sent_today_by_task)
+    await asyncio.to_thread(_send, group, composed, now)
+
+
+def _load_group(task_ids: list[int], now: datetime) -> tuple[list[dict], ContactState | None]:
+    s = get_settings()
     by_id = {t["id"]: t for t in tasks.get_many(task_ids) if t["status"] == "open"}
     group = [by_id[i] for i in task_ids if i in by_id]
     if not group:
-        return
-    state: ContactState = thread.contact_state(day_start(now.astimezone(s.tz), s.day_reset_time))
+        return [], None
+    return group, thread.contact_state(day_start(now.astimezone(s.tz), s.day_reset_time))
 
-    composed = await coach.compose(group, now, state.sent_today_by_task)
+
+def _send(group: list[dict], composed: "coach.Composed", now: datetime) -> None:
     msg = thread.add("assistant", composed.text, composed.kind, [t["id"] for t in group])
     single = group[0] if len(group) == 1 else None
-    level, alarm_s = message_level(group, now)
+    last_reply = thread.last_user_reply_at()
+    level, alarm_s = message_level(group, now, last_reply)
     notify.notify(
         composed.title, composed.text,
         level=level, expire_s=alarm_s,
@@ -133,12 +160,16 @@ async def _deliver(task_ids: list[int]) -> None:
              msg["id"], [t["id"] for t in group], composed.used_llm, level)
 
     for task in group:
-        _after_contact(task, now, composed.followups.get(task["id"]), alarmed=level == ALARM)
+        _after_contact(task, now, composed.followups.get(task["id"]), alarmed=level == ALARM,
+                       last_reply=last_reply)
 
 
-def _after_contact(task: dict, now: datetime, followup: datetime | None, alarmed: bool = False) -> None:
+def _after_contact(task: dict, now: datetime, followup: datetime | None, alarmed: bool = False,
+                   last_reply=_UNSET) -> None:
     s = get_settings()
-    if task["last_notified_at"] and not thread.user_replied_since(task["last_notified_at"]):
+    if last_reply is _UNSET:
+        last_reply = thread.last_user_reply_at()
+    if task["last_notified_at"] and not _replied_since(last_reply, task["last_notified_at"]):
         tasks.add_event(task["id"], "ignored")
 
     nag_count = task["nag_count"] + 1
@@ -178,8 +209,9 @@ def due_daily_jobs() -> list[str]:
     jobs: list[str] = []
     if job_is_due(now_local, s.morning_time) and claim_job("morning", today):
         jobs.append("morning")
-    for i, t in enumerate(s.checkin_times):
-        if job_is_due(now_local, t, window_hours=1) and claim_job(f"checkin{i}", today):
+    for t in s.checkin_times:
+        # Keyed by the time itself, not its position: editing the list mid-day can't repeat or skip one.
+        if job_is_due(now_local, t, window_hours=1) and claim_job(f"checkin@{t:%H:%M}", today):
             jobs.append("checkin")
     if job_is_due(now_local, s.evening_time, window_hours=2) and claim_job("evening", today):
         jobs.append("evening")
@@ -194,15 +226,19 @@ def due_daily_jobs() -> list[str]:
 
 async def run_daily_job(job: str) -> None:
     if job in coach.MEETING_JOBS:
-        return run_meeting_digest(job)
+        return await asyncio.to_thread(run_meeting_digest, job)
     try:
         text = await coach.compose_daily(job, tasks.now_utc())
         if text is None:
             return
-        msg = thread.add("assistant", text, job)
-        notify.notify(coach.JOB_TITLES[job], text, message_id=msg["id"], priority=1)
+        await asyncio.to_thread(_post_daily, job, text)
     except Exception:
         log.exception("Daily job %s failed", job)
+
+
+def _post_daily(job: str, text: str) -> None:
+    msg = thread.add("assistant", text, job)
+    notify.notify(coach.JOB_TITLES[job], text, message_id=msg["id"], priority=1)
 
 
 def run_meeting_digest(job: str) -> None:

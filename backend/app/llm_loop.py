@@ -9,6 +9,7 @@ Robust for a mid-size free model:
 - optional progress callback (on_event) so the chat UI can show "typing…" / "writing a new task"
 """
 
+import asyncio
 import json
 import logging
 from typing import Any, Callable
@@ -19,6 +20,12 @@ from .tools import ToolArgError, ToolContext, FENCE, execute, parse_text_tool_ca
 log = logging.getLogger("llm_loop")
 
 
+def _run_tool(name: str, args: Any, ctx: ToolContext, emit: Callable[[dict[str, Any]], None]) -> Any:
+    if isinstance(args, dict):
+        emit({"type": "tool", "name": name, "args": args})
+    return execute(name, args, ctx)
+
+
 async def run(messages: list[dict[str, Any]], tool_defs: list[dict[str, Any]], ctx: ToolContext, *,
               max_rounds: int = 5, temperature: float = 0.3, timeout: float | None = None,
               on_event: Callable[[dict[str, Any]], None] | None = None) -> str:
@@ -26,7 +33,8 @@ async def run(messages: list[dict[str, Any]], tool_defs: list[dict[str, Any]], c
     Returns the model's final text ('' if it produced none or gave up after errors).
 
     on_event, if given, gets {"type": "thinking"} before each LLM call and
-    {"type": "tool", "name": ..., "args": {...}} before each tool runs. It must not raise.
+    {"type": "tool", "name": ..., "args": {...}} before each tool runs. It must not raise, and must be
+    thread-safe: tool events come from the worker thread that runs the tool.
     """
     emit = on_event or (lambda event: None)
     names = {t["function"]["name"] for t in tool_defs}
@@ -56,9 +64,9 @@ async def run(messages: list[dict[str, Any]], tool_defs: list[dict[str, Any]], c
             try:
                 raw = call["function"].get("arguments") or "{}"
                 args = json.loads(raw) if isinstance(raw, str) else raw
-                if isinstance(args, dict):
-                    emit({"type": "tool", "name": name, "args": args})
-                result = execute(name, args, ctx)
+                # Tools hit the database (blocking), and so may the status event, so both run in a
+                # worker thread: the event loop keeps serving other requests meanwhile.
+                result = await asyncio.to_thread(_run_tool, name, args, ctx, emit)
             except (ToolArgError, json.JSONDecodeError) as e:
                 errors += 1
                 log.info("Tool %s rejected: %s", name, e)

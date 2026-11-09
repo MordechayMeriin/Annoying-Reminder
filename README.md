@@ -71,9 +71,13 @@ also gets a **level**, decided by code ([`logic.alert_level`](backend/app/logic.
   seen it. It also never repeats into quiet hours or Shabbat: it ends before they start, and if there
   isn't time for even one repeat, it's sent as urgent instead.
 - The guardrails above still decide *whether* something is sent; the level only decides how loud.
-- **Send to Pushover** (⚙ → Pushover): *every message* (default; browser push too), *instead of browser*
+- **Send to Pushover** (⚙ → Notifications): *every message* (default; browser push too), *instead of browser*
   push (falls back to browser push if Pushover fails), *as a backup* (only when no browser got it, plus
-  alarms), or *never*. The sounds, when check-ins turn urgent, what gets alarms (critical /
+  alarms), or *never*.
+- **Browser notifications** (⚙ → Notifications) can be switched off altogether: then every message goes
+  to Pushover, whatever *Send to Pushover* says, with no browser fallback, and the app stops offering
+  "Enable notifications". While Pushover isn't set up, browser push keeps working anyway, so reminders
+  are never lost. Without the `VAPID_*` keys there are no browser notifications at all. The sounds, when check-ins turn urgent, what gets alarms (critical /
   important / every task / nothing) and how often they repeat are all there, plus test buttons.
 
 Setup: see [step 6](#6-pushover-recommended).
@@ -227,6 +231,7 @@ stay server-side, so they still cap OpenRouter spend even if the login were ever
 |---|---|---|
 | `CHAT_PER_MINUTE` / `LLM_CALLS_PER_DAY` | `15` / `300` | spend guards |
 | `LLM_TIMEOUT_S` / `LLM_MAX_TOKENS` | `25` / `500` | per LLM call |
+| `CHAT_TURN_TIMEOUT_S` | `60` | a whole chat turn (all its LLM calls and tools); then it stops with a message |
 | `LLM_REASONING_EFFORT` | empty | `minimal` / `low` / `medium` / `high` for reasoning models (empty = provider default). Reasoning tokens may count toward `LLM_MAX_TOKENS` |
 
 ## Local development

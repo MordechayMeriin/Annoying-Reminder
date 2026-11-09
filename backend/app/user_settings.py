@@ -38,7 +38,7 @@ def save(values: dict[str, str | None]) -> dict[str, str]:
     if errors:
         return errors
     to_reset = [k for k, v in values.items() if v is None]
-    with db.connect() as conn:
+    with db.connect() as conn, conn.transaction():  # all or nothing
         for key, value in to_set.items():
             conn.execute(
                 """insert into app_settings (key, value, updated_at) values (%s, %s, now())
@@ -77,4 +77,6 @@ def describe(now: datetime) -> dict[str, Any]:
             rest = {"name": p.name, "start": p.start.astimezone(tz).isoformat(timespec="minutes"),
                     "end": p.end.astimezone(tz).isoformat(timespec="minutes"),
                     "active": current_period(now, cfg) is not None}
-    return {"fields": out, "rest": rest, "pushover": {"configured": config.get_settings().pushover_enabled}}
+    s = config.get_settings()
+    return {"fields": out, "rest": rest, "pushover": {"configured": s.pushover_enabled},
+            "browserPush": {"available": s.browser_push_available}}

@@ -1,5 +1,7 @@
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+// Pinned to an exact version: an unpinned "@2" can change under you at any time.
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.118.0";
 
+window.__appLoaded = true; // tells index.html's load watchdog the script arrived
 const cfg = window.APP_CONFIG;
 const supabase = createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY);
 const $ = (id) => document.getElementById(id);
@@ -30,12 +32,35 @@ let drawerTab = "today";
 let detailTaskId = null;
 const pendingSettings = new Map(); // unsaved settings: key → new text value, or null = back to default
 let outgoing = null;        // the chat message being sent: { el, id (once the server saved it) }
+let pollTimer = null;       // the 60 s check for new messages
+let todayTasks = [];        // for the badge
+const pendingDone = new Map(); // task id → timer: ✓ Done waits a few seconds so it can be undone
+const UNDO_MS = 5000;
+let renderedSigs = [];      // what's on screen: one signature per rendered message
+let renderedOn = "";        // the date "Today" / "Yesterday" labels were computed on
+let renderedLastDay = "";   // day of the last rendered message (for day separators)
+let navDepth = 0;           // history entries pushed for open panels (Back button)
+let ignorePops = 0;         // popstate events caused by our own history.go()
+let drawerView = null;      // "list" | "detail" | "settings" | null (closed)
+// Touch keyboards have no Shift+Enter, so there Enter makes a new line and only ➤ sends.
+const touchKeyboard = window.matchMedia("(pointer: coarse)").matches;
 
 // ------------------------------------------------------------------ helpers
 
-function toast(text, ms = 2500) {
+/** A short message at the bottom; `action` ({ label, onClick }) adds a button, e.g. Undo. */
+function toast(text, ms = 2500, action = null) {
   const t = $("toast");
   t.textContent = text;
+  if (action) {
+    const b = el("button", "toast-action", action.label);
+    b.type = "button";
+    b.onclick = () => {
+      clearTimeout(toast._t);
+      t.hidden = true;
+      action.onClick();
+    };
+    t.appendChild(b);
+  }
   t.hidden = false;
   clearTimeout(toast._t);
   toast._t = setTimeout(() => (t.hidden = true), ms);
@@ -110,10 +135,18 @@ function chatDayStart(now = new Date()) {
 
 // ------------------------------------------------------------------ auth
 
+function hideLoading() {
+  $("loading").hidden = true;
+}
+
 function showLogin() {
   started = false;
+  clearInterval(pollTimer);
+  pollTimer = null;
+  hideLoading();
   $("main").hidden = true;
-  closeDrawer();
+  closeDrawer({ force: true });
+  navBack(0);
   $("login").hidden = false;
 }
 
@@ -154,6 +187,7 @@ supabase.auth.onAuthStateChange((_event, session) => {
 // ------------------------------------------------------------------ chat
 
 function taskChip(id, title) {
+  // Title order: from the message itself (all linked tasks), then the loaded task list.
   const chip = el("button", "task-chip", title || tasksById.get(id)?.title || `Task #${id}`);
   chip.type = "button";
   chip.dir = "auto";
@@ -173,7 +207,8 @@ function messageEl(m) {
   if (KIND_LABEL[m.kind] || (m.role === "assistant" && m.task_ids?.length)) {
     const head = el("div", "msg-head");
     if (KIND_LABEL[m.kind]) head.appendChild(el("span", "kind", KIND_LABEL[m.kind]));
-    (m.task_ids || []).forEach((id) => head.appendChild(taskChip(id, id === m.task_id ? m.task_title : null)));
+    (m.task_ids || []).forEach((id) =>
+      head.appendChild(taskChip(id, m.task_titles?.[id] || (id === m.task_id ? m.task_title : null))));
     div.appendChild(head);
   }
   const body = el("div", "msg-body", m.content);
@@ -183,20 +218,40 @@ function messageEl(m) {
   return div;
 }
 
+// Only new messages are appended, and a refresh with nothing new does no work: a full rebuild would
+// clear selected text and cut off the highlight animation. (State: renderedSigs etc. at the top.)
+function msgSig(m) {
+  return `${m.id}|${(m.task_ids || []).join(",")}|${m.task_status || ""}|${m.task_title || ""}`;
+}
+
 function renderMessages() {
   const box = $("messages");
-  box.textContent = "";
-  let lastDay = "";
-  for (const m of messages) {
+  // Bubbles of messages being sent (or that failed): drop those whose saved copy is loaded now,
+  // and keep the rest at the bottom.
+  const ids = new Set(messages.map((m) => m.id));
+  const bubbles = [...box.querySelectorAll(".msg.outgoing")];
+  bubbles.forEach((b) => b.remove());
+  const keep = bubbles.filter((b) => !(b.dataset.sentId && ids.has(Number(b.dataset.sentId))));
+
+  const sigs = messages.map(msgSig);
+  const today = new Date().toDateString();
+  const n = renderedSigs.length;
+  const appendOnly = n > 0 && today === renderedOn && sigs.length >= n && renderedSigs.every((s, i) => s === sigs[i]);
+  if (!appendOnly) {
+    box.textContent = "";
+    renderedLastDay = "";
+  }
+  for (const m of appendOnly ? messages.slice(n) : messages) {
     const d = new Date(m.created_at);
-    if (d.toDateString() !== lastDay) {
-      lastDay = d.toDateString();
+    if (d.toDateString() !== renderedLastDay) {
+      renderedLastDay = d.toDateString();
       box.appendChild(el("div", "day-sep", fmtDay(d)));
     }
     box.appendChild(messageEl(m));
   }
-  // the message being sent, until the saved copy is loaded
-  if (outgoing && !messages.some((m) => m.id === outgoing.id)) box.appendChild(outgoing.el);
+  renderedSigs = sigs;
+  renderedOn = today;
+  keep.forEach((b) => box.appendChild(b));
   $("load-earlier").hidden = !hasMore;
   renderPlan();
 }
@@ -234,6 +289,22 @@ async function loadLatest({ stickToBottom = true } = {}) {
   firstLoad = false;
 }
 
+/** Only what's new since the last loaded message (the 60 s check). */
+async function loadNewer() {
+  if (!messages.length) return loadLatest();
+  const wasNearBottom = nearBottom();
+  const rows = await api(`/messages?limit=${PAGE}&after=${messages[messages.length - 1].id}`);
+  if (!rows.length) return;
+  if (rows.length === PAGE) {
+    // A big gap (the app was closed for a while): start over from the newest page.
+    messages = [];
+    hasMore = true;
+  }
+  mergeMessages(rows);
+  renderMessages();
+  if (wasNearBottom) scrollToBottom();
+}
+
 async function loadEarlier() {
   if (!messages.length) return 0;
   const before = messages[0].id;
@@ -267,12 +338,16 @@ async function showMessage(id) {
 function autosize() {
   const input = $("chat-input");
   input.style.height = "auto";
-  input.style.height = Math.min(input.scrollHeight, 160) + "px";
+  const borders = input.offsetHeight - input.clientHeight; // height is border-box; scrollHeight isn't
+  input.style.height = Math.min(input.scrollHeight + borders, 160) + "px";
+  // The composer is fixed at the bottom; keep the last messages clear of it as it grows.
+  $("main").style.paddingBottom = $("chat-form").offsetHeight + 12 + "px";
 }
 
+if (touchKeyboard) $("chat-input").enterKeyHint = "enter";
 $("chat-input").addEventListener("input", autosize);
 $("chat-input").addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing && !touchKeyboard) {
     e.preventDefault();
     $("chat-form").requestSubmit();
   }
@@ -309,7 +384,13 @@ async function sendChat(text, onEvent) {
       buf = buf.slice(cut + 2);
       const data = block.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("\n");
       if (!data) continue; // keepalive
-      const ev = JSON.parse(data);
+      let ev;
+      try {
+        ev = JSON.parse(data);
+      } catch {
+        console.warn("Skipping a malformed progress event", data);
+        continue; // progress is cosmetic; a turn that never sends a readable `done` ends as "connection lost"
+      }
       if (ev.type === "done") return ev;
       if (ev.type === "error") throw new Error(ev.detail || "Something went wrong");
       onEvent(ev);
@@ -382,10 +463,13 @@ $("chat-form").addEventListener("submit", async (e) => {
   input.value = "";
   autosize();
 
+  $("messages").querySelectorAll(".msg.outgoing.failed").forEach((b) => b.remove()); // old "Not sent"
   const bubble = messageEl({ role: "user", content: text, kind: "chat" });
+  bubble.classList.add("outgoing");
   bubble.appendChild(el("div", "msg-delivery"));
   setDelivery(bubble, "Sending…", "sending");
-  outgoing = { el: bubble, id: null };
+  const sending = { el: bubble, id: null }; // stays readable after `outgoing` is cleared
+  outgoing = sending;
   $("messages").appendChild(bubble);
   status.reset();
   scrollToBottom();
@@ -395,7 +479,8 @@ $("chat-form").addEventListener("submit", async (e) => {
   try {
     const res = await sendChat(text, (ev) => {
       if (ev.type === "received") {
-        outgoing.id = ev.userMessageId;
+        sending.id = ev.userMessageId;
+        bubble.dataset.sentId = ev.userMessageId;
         setDelivery(bubble, "✓ Sent", "sent");
       } else if (ev.type === "thinking") {
         status.typing = true;
@@ -406,28 +491,84 @@ $("chat-form").addEventListener("submit", async (e) => {
       status.render();
       follow();
     });
+    // Show the reply straight from `done` (it carries both saved messages); sync the rest quietly.
+    const stick = nearBottom();
     status.reset();
     outgoing = null;
-    await loadLatest(); // the reply, real ids, task links and any events
+    if (res.messages?.length) {
+      mergeMessages(res.messages);
+      renderMessages();
+      if (stick) scrollToBottom();
+      loadNewer().catch(() => {}); // events this turn created, anything else new
+    } else {
+      loadLatest().catch(() => {});
+    }
     if (res.tasksChanged) loadTasks().catch(() => {});
   } catch (err) {
-    const saved = outgoing.id !== null; // the server has the message (the reply may still come)
+    const saved = sending.id !== null; // the server has the message (the reply may still come)
     outgoing = null;
     status.reset();
     status.error = err.connectionLost && saved ? "Connection lost. Refresh in a moment to see the reply." : err.message;
     status.render();
     if (saved) {
-      await loadLatest().catch(() => {});
+      loadLatest().catch(() => {});
     } else {
-      setDelivery(bubble, "Not sent", "failed"); // stays until the next refresh
+      setDelivery(bubble, "Not sent", "failed"); // stays until the next message is sent
+      bubble.classList.add("failed");
       if (!input.value) {
         input.value = text; // give the text back to retry
         autosize();
       }
     }
+    follow();
   } finally {
     $("chat-send").disabled = false;
-    scrollToBottom();
+  }
+});
+
+// ------------------------------------------------------------------ Back button
+//
+// Panels add browser history entries, so Android's Back closes them instead of leaving the app:
+// depth 1 = the drawer (task lists, settings, or a task opened from the chat), depth 2 = a task
+// opened from the lists. Closing a panel with ✕ / ‹ Back / Esc steps history back to match.
+
+let queuedDepth = 0;  // a push asked for while our history.go() was still on its way
+
+function navPush(depth) {
+  if (ignorePops > 0) {
+    // history.go() is async: pushing now would add the entry before the back step lands, and that
+    // step would then undo it. Push once it has landed (see popstate).
+    queuedDepth = Math.max(queuedDepth, depth);
+    return;
+  }
+  while (navDepth < depth) history.pushState({ nav: ++navDepth }, "");
+}
+
+function navBack(depth) {
+  if (navDepth <= depth) return;
+  const steps = navDepth - depth;
+  navDepth = depth;
+  ignorePops++;
+  history.go(-steps);
+}
+
+window.addEventListener("popstate", (e) => {
+  if (ignorePops > 0) {
+    ignorePops--;
+    if (!ignorePops && queuedDepth) {
+      const depth = queuedDepth;
+      queuedDepth = 0;
+      navPush(depth);
+    }
+    return;
+  }
+  const depth = e.state?.nav || 0;
+  if (depth >= navDepth) return;
+  navDepth = depth;
+  if (depth === 0) {
+    if (!closeDrawer()) navPush(1); // kept open (unsaved settings): put the entry back
+  } else if (drawerView === "detail") {
+    showDrawerTab(drawerTab);
   }
 });
 
@@ -437,10 +578,14 @@ function openDrawer() {
   $("drawer").hidden = false;
   $("drawer-backdrop").hidden = false;
   document.body.classList.add("drawer-open");
+  navPush(1);
 }
 
-function closeDrawer() {
-  if (!$("settings-panel").hidden && pendingSettings.size && !confirm("Discard unsaved settings?")) return;
+/** Closes the drawer. Returns false if the user chose to keep unsaved settings. */
+function closeDrawer({ force = false } = {}) {
+  if (!force && !$("settings-panel").hidden && pendingSettings.size && !confirm("Discard unsaved settings?")) {
+    return false;
+  }
   pendingSettings.clear();
   $("settings-panel").hidden = true;
   $("drawer-title").hidden = true;
@@ -448,9 +593,23 @@ function closeDrawer() {
   $("drawer-backdrop").hidden = true;
   document.body.classList.remove("drawer-open");
   detailTaskId = null;
+  drawerView = null;
+  return true;
+}
+
+/** ✕, the backdrop, Esc. */
+function requestCloseDrawer() {
+  if (closeDrawer()) navBack(0);
+}
+
+/** ‹ Back from a task to the lists. */
+function backToList() {
+  navBack(1);
+  showDrawerTab(drawerTab);
 }
 
 function showDrawerTab(tab) {
+  drawerView = "list";
   drawerTab = tab;
   detailTaskId = null;
   $("task-detail").hidden = true;
@@ -468,12 +627,12 @@ $("open-tasks").onclick = () => {
   openDrawer();
   loadTasks().catch((e) => toast(e.message));
 };
-$("drawer-close").onclick = closeDrawer;
-$("drawer-backdrop").onclick = closeDrawer;
-$("drawer-back").onclick = () => showDrawerTab(drawerTab);
+$("drawer-close").onclick = requestCloseDrawer;
+$("drawer-backdrop").onclick = requestCloseDrawer;
+$("drawer-back").onclick = backToList;
 document.querySelectorAll("#drawer-tabs button").forEach((b) => (b.onclick = () => showDrawerTab(b.dataset.tab)));
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && !$("drawer").hidden) closeDrawer();
+  if (e.key === "Escape" && !$("drawer").hidden) requestCloseDrawer();
 });
 
 function taskMeta(t) {
@@ -487,6 +646,8 @@ function taskMeta(t) {
 
 function taskItem(t) {
   const li = el("li", "task");
+  li.dataset.taskId = t.id;
+  li.hidden = pendingDone.has(t.id);
   const prio = t.priority === 3 ? "🚨 " : t.priority === 2 ? "❗ " : "";
   const icon = t.kind === "meeting" ? "📅 " : "";
   const info = el("button", "info");
@@ -503,7 +664,7 @@ function taskItem(t) {
   snooze.onclick = () => taskAction(t.id, "snooze");
   const done = el("button", "done-btn", "✓");
   done.title = "Done";
-  done.onclick = () => taskAction(t.id, "done");
+  done.onclick = () => markDone(t.id);
   btns.append(snooze, done);
   li.append(info, btns);
   return li;
@@ -520,33 +681,74 @@ function fill(listId, list, emptyText) {
 }
 
 async function loadTasks() {
-  const [today, upcoming, all] = await Promise.all([
-    api("/tasks?scope=today"),
-    api("/tasks?scope=upcoming&days=7"),
-    api("/tasks?scope=open"),
-  ]);
-  tasksById = new Map(all.map((t) => [t.id, t]));
+  const { today, upcoming, open } = await api("/tasks/overview?days=7");
+  tasksById = new Map(open.map((t) => [t.id, t]));
+  todayTasks = today;
   fill("today-list", today, "Nothing for today 🎉");
   fill("upcoming-list", upcoming, "Nothing in the next 7 days");
-  fill("all-list", all, "No open tasks");
-  const badge = $("task-count");
-  badge.textContent = today.length;
-  badge.hidden = !today.length;
+  fill("all-list", open, "No open tasks");
+  updateBadge();
 }
 
-async function taskAction(id, action) {
+function updateBadge() {
+  const n = todayTasks.filter((t) => !pendingDone.has(t.id)).length;
+  const badge = $("task-count");
+  badge.textContent = n;
+  badge.hidden = !n;
+}
+
+async function taskAction(id, action, { quiet = false } = {}) {
   try {
     await api(`/tasks/${id}/action`, { method: "POST", body: JSON.stringify({ action, minutes: 60 }) });
-    toast({ done: "Done ✓", snooze: "Snoozed for 1 hour", cancel: "Cancelled" }[action]);
-    await Promise.all([loadTasks(), loadLatest()]);
+    if (!quiet) toast({ done: "Done ✓", snooze: "Snoozed for 1 hour", cancel: "Cancelled" }[action]);
+    await Promise.all([loadTasks(), loadNewer()]);
     if (detailTaskId === id) openTask(id);
   } catch (e) {
     toast(e.message);
+    loadTasks().catch(() => {});
   }
 }
 
+// ✓ Done is easy to hit by accident, so it waits UNDO_MS before reaching the server; until then the
+// task is just hidden and the toast offers Undo. Leaving the app sends any waiting Done right away.
+
+function setTaskRowsHidden(id, hidden) {
+  document.querySelectorAll(`.task[data-task-id="${id}"]`).forEach((li) => (li.hidden = hidden));
+}
+
+function markDone(id) {
+  if (pendingDone.has(id)) return;
+  pendingDone.set(id, setTimeout(() => commitDone(id), UNDO_MS));
+  setTaskRowsHidden(id, true);
+  updateBadge();
+  toast("Done ✓", UNDO_MS, { label: "Undo", onClick: () => undoDone(id) });
+}
+
+function undoDone(id) {
+  if (!pendingDone.has(id)) return;
+  clearTimeout(pendingDone.get(id));
+  pendingDone.delete(id);
+  setTaskRowsHidden(id, false);
+  updateBadge();
+  toast("Not done");
+}
+
+function commitDone(id) {
+  if (!pendingDone.has(id)) return;
+  clearTimeout(pendingDone.get(id));
+  pendingDone.delete(id);
+  taskAction(id, "done", { quiet: true });
+}
+
+function flushPendingDone() {
+  [...pendingDone.keys()].forEach(commitDone);
+}
+
 async function openTask(id) {
+  const fromList = !$("drawer").hidden && drawerView === "list";
   openDrawer();
+  if (fromList) navPush(2); // Back returns to the list
+  drawerView = "detail";
   detailTaskId = id;
   $("tab-today").hidden = $("tab-all").hidden = true;
   $("settings-panel").hidden = $("drawer-title").hidden = true;
@@ -616,7 +818,11 @@ $("detail-save").onclick = async () => {
     toast(e.message);
   }
 };
-$("detail-done").onclick = () => taskAction(detailTaskId, "done");
+$("detail-done").onclick = () => {
+  const id = detailTaskId;
+  backToList();
+  markDone(id);
+};
 $("detail-snooze").onclick = () => taskAction(detailTaskId, "snooze");
 $("detail-cancel").onclick = () => {
   if (confirm("Cancel this task?")) taskAction(detailTaskId, "cancel");
@@ -834,6 +1040,7 @@ function renderSettings(rest, pushover) {
 
 async function openSettings() {
   openDrawer();
+  drawerView = "settings";
   detailTaskId = null;
   $("tab-today").hidden = $("tab-all").hidden = $("task-detail").hidden = true;
   $("drawer-tabs").hidden = $("drawer-back").hidden = true;
@@ -857,6 +1064,7 @@ $("settings-save").onclick = async () => {
   if (!pendingSettings.size) return;
   const btn = $("settings-save");
   btn.disabled = true;
+  const pushChanged = pendingSettings.has("browser_push");
   try {
     const data = applySettings(await api("/settings", {
       method: "PATCH",
@@ -864,6 +1072,7 @@ $("settings-save").onclick = async () => {
     }));
     renderSettings(data.rest, data.pushover);
     toast("Settings saved");
+    if (pushChanged) setupPush().catch(() => {});
   } catch (e) {
     for (const [key, msg] of Object.entries(e.errors || {})) {
       const c = settingControls.get(key);
@@ -887,9 +1096,8 @@ function urlBase64ToUint8Array(base64) {
   return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)));
 }
 
-async function subscribePush() {
+async function subscribePush(vapidPublicKey) {
   const reg = await navigator.serviceWorker.ready;
-  const { vapidPublicKey } = await fetch(cfg.API_URL + "/config/push").then((r) => r.json());
   let sub = await reg.pushManager.getSubscription();
   if (!sub) {
     sub = await reg.pushManager.subscribe({
@@ -903,17 +1111,24 @@ async function subscribePush() {
 
 async function setupPush() {
   if (!("serviceWorker" in navigator) || !("PushManager" in window)) return;
-  await navigator.serviceWorker.register("/sw.js");
+  await navigator.serviceWorker.register("/sw.js"); // also needed for installing the app
   const btn = $("enable-push");
+  btn.hidden = true;
+  let push;
+  try {
+    push = await fetch(cfg.API_URL + "/config/push").then((r) => r.json());
+  } catch {
+    return;
+  }
+  if (!push.enabled) return; // browser notifications are switched off (⚙ Settings) or not set up
   if (Notification.permission === "granted") {
-    btn.hidden = true;
-    subscribePush().catch((e) => console.warn("push subscribe failed", e));
+    subscribePush(push.vapidPublicKey).catch((e) => console.warn("push subscribe failed", e));
   } else if (Notification.permission === "default") {
     btn.hidden = false;
     btn.onclick = async () => {
       const perm = await Notification.requestPermission();
       if (perm === "granted") {
-        await subscribePush();
+        await subscribePush(push.vapidPublicKey);
         btn.hidden = true;
         await api("/push/test", { method: "POST" });
         toast("Notifications enabled — a test is on its way");
@@ -928,9 +1143,9 @@ async function setupPush() {
 navigator.serviceWorker?.addEventListener("message", async (e) => {
   const msg = e.data || {};
   if (msg.type === "tasks-changed") {
-    Promise.all([loadTasks(), loadLatest()]).catch(() => {});
+    Promise.all([loadTasks(), loadNewer()]).catch(() => {});
   } else if (msg.type === "open-message" && msg.messageId) {
-    closeDrawer();
+    requestCloseDrawer();
     await loadLatest({ stickToBottom: false }).catch(() => {});
     showMessage(Number(msg.messageId));
   } else if (msg.type === "open-task" && msg.taskId) {
@@ -944,19 +1159,27 @@ async function refreshAll() {
   await Promise.all([loadTasks(), loadLatest()]);
 }
 
+// Registered once (startApp runs again after every login).
+$("refresh").onclick = () => refreshAll().catch((e) => toast(e.message));
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") flushPendingDone();
+  else if (started) refreshAll().catch(() => {});
+});
+window.addEventListener("pagehide", flushPendingDone);
+window.addEventListener("resize", autosize);
+
 async function startApp() {
+  hideLoading();
   $("login").hidden = true;
   $("main").hidden = false;
+  autosize();
   if (started) return;
   started = true;
   history.replaceState(null, "", location.pathname); // drop ?m= / ?task= / login params
 
-  $("refresh").onclick = () => refreshAll().catch((e) => toast(e.message));
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") refreshAll().catch(() => {});
-  });
-  setInterval(() => {
-    if (document.visibilityState === "visible") loadLatest().catch(() => {});
+  clearInterval(pollTimer);
+  pollTimer = setInterval(() => {
+    if (document.visibilityState === "visible") loadNewer().catch(() => {});
   }, 60_000);
 
   api("/settings").then(applySettings).catch(() => {}); // day-reset time for the plan card

@@ -12,6 +12,22 @@
   <script type="module" src="/app.js"></script>
 </head>
 <body>
+  <!-- Shown until app.js has loaded and checked the login -->
+  <section id="loading" class="screen loading" aria-live="polite">
+    <div class="loading-icon" aria-hidden="true">🔔</div>
+    <p id="loading-msg" class="muted">Loading…</p>
+    <button id="loading-retry" class="small" hidden>Retry</button>
+  </section>
+  <script>
+    // If app.js (or the login library it imports) can't load, say so instead of a blank screen.
+    setTimeout(function () {
+      if (window.__appLoaded) return;
+      document.getElementById("loading-msg").textContent = "Couldn't load the app. Check your connection.";
+      var retry = document.getElementById("loading-retry");
+      retry.hidden = false;
+      retry.onclick = function () { location.reload(); };
+    }, 10000);
+  </script>
   <!-- Login -->
   <section id="login" class="screen" hidden>
     <div class="card login-card">
