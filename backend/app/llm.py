@@ -52,6 +52,10 @@ async def chat_completion(messages: list[dict[str, Any]], tools: list[dict] | No
         "temperature": temperature,
         "max_tokens": max_tokens or s.llm_max_tokens,
     }
+    if s.llm_reasoning_effort:
+        # OpenRouter maps this to each provider's own setting (e.g. Gemini thinking budget).
+        # exclude=True: we only use the final answer, so don't send the reasoning text back.
+        body["reasoning"] = {"effort": s.llm_reasoning_effort, "exclude": True}
     if len(s.openrouter_models) > 1:
         body["models"] = s.openrouter_models  # automatic fallback, in order
     if tools:
