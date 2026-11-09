@@ -24,6 +24,10 @@ writes the messages and can adjust follow-ups through tools, within those limits
 - Every proactive contact (task check-in, meeting reminder, morning plan, mid-day check-in, evening
   review) is first saved as an assistant message in the chat, then pushed. The notification body is
   that message; tapping it opens the chat at that message with the reply box focused.
+- While you wait for a reply you see what's happening: your message shows *Sending…* → *✓ Sent*,
+  typing dots while the LLM works, and a status line for each action it takes ("📝 Writing a new
+  task: Dentist"). `POST /chat` streams these as Server-Sent Events; the reply itself arrives whole.
+  The turn runs on the server even if you close the app, and the reply shows up on the next refresh.
 - ✓ Done / ⏰ Snooze buttons appear when a message is about exactly one task. Done / Snooze from a
   notification or the task list also writes a short event into the chat (`[Marked done: …]`).
 - **Daily reset:** the assistant only sees today's chat (from `DAY_RESET_TIME`, default 04:00). Long-term

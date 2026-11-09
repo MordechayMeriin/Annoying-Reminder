@@ -29,6 +29,7 @@ let tasksById = new Map();  // open tasks we know about (for task chips)
 let drawerTab = "today";
 let detailTaskId = null;
 const pendingSettings = new Map(); // unsaved settings: key → new text value, or null = back to default
+let outgoing = null;        // the chat message being sent: { el, id (once the server saved it) }
 
 // ------------------------------------------------------------------ helpers
 
@@ -40,7 +41,8 @@ function toast(text, ms = 2500) {
   toast._t = setTimeout(() => (t.hidden = true), ms);
 }
 
-async function api(path, options = {}) {
+/** fetch() to our API with the login token; throws on errors (and logs out on 401). */
+async function authFetch(path, options = {}) {
   const { data } = await supabase.auth.getSession();
   const token = data.session?.access_token;
   const res = await fetch(cfg.API_URL + path, {
@@ -63,7 +65,11 @@ async function api(path, options = {}) {
     if (detail?.errors) err.errors = detail.errors; // per-field errors (settings)
     throw err;
   }
-  return res.json();
+  return res;
+}
+
+async function api(path, options = {}) {
+  return (await authFetch(path, options)).json();
 }
 
 function el(tag, className, text) {
@@ -189,6 +195,8 @@ function renderMessages() {
     }
     box.appendChild(messageEl(m));
   }
+  // the message being sent, until the saved copy is loaded
+  if (outgoing && !messages.some((m) => m.id === outgoing.id)) box.appendChild(outgoing.el);
   $("load-earlier").hidden = !hasMore;
   renderPlan();
 }
@@ -270,27 +278,153 @@ $("chat-input").addEventListener("keydown", (e) => {
   }
 });
 
+// ---- sending: progress from POST /chat (a short Server-Sent Events stream)
+
+/** Sends a chat message; calls onEvent for each progress event; resolves with the final `done` event. */
+async function sendChat(text, onEvent) {
+  const lost = () => Object.assign(new Error("Connection lost"), { connectionLost: true });
+  let res;
+  try {
+    res = await authFetch("/chat", { method: "POST", body: JSON.stringify({ message: text }) });
+  } catch (err) {
+    // fetch() throws a TypeError ("Failed to fetch") when the server can't be reached at all
+    throw err instanceof TypeError ? new Error("Couldn't reach the server. Check your connection and try again.") : err;
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    let chunk;
+    try {
+      chunk = await reader.read();
+    } catch {
+      throw lost();
+    }
+    const { value, done } = chunk;
+    if (done) break;
+    buf += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+    let cut;
+    while ((cut = buf.indexOf("\n\n")) >= 0) {
+      const block = buf.slice(0, cut);
+      buf = buf.slice(cut + 2);
+      const data = block.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("\n");
+      if (!data) continue; // keepalive
+      const ev = JSON.parse(data);
+      if (ev.type === "done") return ev;
+      if (ev.type === "error") throw new Error(ev.detail || "Something went wrong");
+      onEvent(ev);
+    }
+  }
+  throw lost();
+}
+
+// What the assistant is doing, by tool. t = the tool event ({ name, title?, taskTitle?, kind? }).
+const TOOL_LABEL = {
+  add_task: (t) => [t.kind === "meeting" ? "📅 Saving a new meeting" : "📝 Writing a new task", t.title],
+  list_tasks: () => ["🔎 Checking your tasks"],
+  update_task: (t) => ["✏️ Updating task", t.taskTitle || t.title],
+  complete_task: (t) => ["✅ Marking as done", t.taskTitle],
+  cancel_task: (t) => ["🗑 Cancelling task", t.taskTitle],
+  schedule_followup: (t) => ["⏰ Scheduling a follow-up", t.taskTitle],
+  add_subtask: (t) => ["➕ Adding a step", t.title],
+  log_interaction: (t) => ["🗒 Making a note", t.taskTitle],
+  mark_blocked: (t) => ["⛔ Marking as blocked", t.taskTitle],
+};
+
+function toolLabel(t) {
+  const [what, which] = (TOOL_LABEL[t.name] || (() => ["⚙️ Working"]))(t);
+  return which ? `${what}: ${which}` : what;
+}
+
+/** The status area under the messages: tool steps of this turn + "typing…". Not a chat message. */
+const status = {
+  steps: [],
+  typing: false,
+  error: "",
+  reset() {
+    this.steps = [];
+    this.typing = false;
+    this.error = "";
+    this.render();
+  },
+  render() {
+    const box = $("chat-status");
+    box.textContent = "";
+    this.steps.forEach((s, i) => {
+      const running = i === this.steps.length - 1 && !this.typing;
+      const line = el("div", "status-step" + (running ? " running" : ""), s);
+      line.dir = "auto";
+      box.appendChild(line);
+    });
+    if (this.typing) {
+      const t = el("div", "typing");
+      t.setAttribute("aria-label", "The assistant is typing");
+      t.append(el("span"), el("span"), el("span"));
+      box.appendChild(t);
+    }
+    if (this.error) box.appendChild(el("div", "status-error", "⚠️ " + this.error));
+    box.hidden = !box.childElementCount;
+  },
+};
+
+function setDelivery(bubble, text, cls) {
+  const d = bubble.querySelector(".msg-delivery");
+  d.textContent = text;
+  d.className = "msg-delivery " + (cls || "");
+}
+
 $("chat-form").addEventListener("submit", async (e) => {
   e.preventDefault();
+  if (outgoing) return; // one at a time
   const input = $("chat-input");
   const text = input.value.trim();
   if (!text) return;
   input.value = "";
   autosize();
-  const box = $("messages");
-  box.appendChild(messageEl({ role: "user", content: text, kind: "chat" }));
-  const pending = messageEl({ role: "assistant", content: "…", kind: "chat" });
-  pending.classList.add("pending");
-  box.appendChild(pending);
+
+  const bubble = messageEl({ role: "user", content: text, kind: "chat" });
+  bubble.appendChild(el("div", "msg-delivery"));
+  setDelivery(bubble, "Sending…", "sending");
+  outgoing = { el: bubble, id: null };
+  $("messages").appendChild(bubble);
+  status.reset();
   scrollToBottom();
   $("chat-send").disabled = true;
+
+  const follow = () => nearBottom() && scrollToBottom();
   try {
-    const res = await api("/chat", { method: "POST", body: JSON.stringify({ message: text }) });
-    await loadLatest(); // real ids, task links and any events
+    const res = await sendChat(text, (ev) => {
+      if (ev.type === "received") {
+        outgoing.id = ev.userMessageId;
+        setDelivery(bubble, "✓ Sent", "sent");
+      } else if (ev.type === "thinking") {
+        status.typing = true;
+      } else if (ev.type === "tool") {
+        status.typing = false;
+        status.steps.push(toolLabel(ev));
+      }
+      status.render();
+      follow();
+    });
+    status.reset();
+    outgoing = null;
+    await loadLatest(); // the reply, real ids, task links and any events
     if (res.tasksChanged) loadTasks().catch(() => {});
   } catch (err) {
-    pending.querySelector(".msg-body").textContent = "⚠️ " + err.message;
-    pending.classList.remove("pending");
+    const saved = outgoing.id !== null; // the server has the message (the reply may still come)
+    outgoing = null;
+    status.reset();
+    status.error = err.connectionLost && saved ? "Connection lost. Refresh in a moment to see the reply." : err.message;
+    status.render();
+    if (saved) {
+      await loadLatest().catch(() => {});
+    } else {
+      setDelivery(bubble, "Not sent", "failed"); // stays until the next refresh
+      if (!input.value) {
+        input.value = text; // give the text back to retry
+        autosize();
+      }
+    }
   } finally {
     $("chat-send").disabled = false;
     scrollToBottom();

@@ -10,7 +10,7 @@ and the turn is linked to the tasks the model actually acted on.
 import logging
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any
+from typing import Any, Callable
 
 from . import context, tasks, thread
 from .config import get_settings
@@ -69,8 +69,44 @@ def likely_topic(candidate_ids: list[int], checkin: dict[str, Any] | None, now_l
     return "\n\n".join(parts)
 
 
-async def handle_user_message(text: str) -> ChatResult:
-    """Process one chat message. LLMUnavailable propagates (the user message is kept)."""
+def tool_status(name: str, args: dict[str, Any]) -> dict[str, Any]:
+    """A tool call → a small status for the chat UI ("Writing a new task: …"). Never raises."""
+    status: dict[str, Any] = {"type": "tool", "name": name}
+    title = args.get("title")
+    if isinstance(title, str) and title.strip():
+        status["title"] = title.strip()[:120]
+    if name == "add_task" and args.get("kind") == "meeting":
+        status["kind"] = "meeting"
+    task_id = args.get("id") if "id" in args else args.get("task_id")
+    if isinstance(task_id, int) and not isinstance(task_id, bool):
+        try:
+            task = tasks.get(task_id)
+        except Exception:  # only a label: never let it break the turn
+            log.exception("Status lookup for task %s failed", task_id)
+            task = None
+        if task:
+            status["taskTitle"] = task["title"]
+    return status
+
+
+Progress = Callable[[dict[str, Any]], None]
+
+
+async def handle_user_message(text: str, on_progress: Progress | None = None) -> ChatResult:
+    """
+    Process one chat message. LLMUnavailable propagates (the user message is kept).
+
+    on_progress, if given, gets {"type": "received", "userMessageId"} once the message is saved,
+    then {"type": "thinking"} before each LLM call and a tool_status() before each tool runs.
+    """
+    def progress(event: dict[str, Any]) -> None:
+        if on_progress is None:
+            return
+        try:
+            on_progress(tool_status(event["name"], event["args"]) if event["type"] == "tool" else event)
+        except Exception:  # status updates are cosmetic
+            log.exception("Progress callback failed")
+
     s = get_settings()
     now = tasks.now_utc()
     now_local = now.astimezone(s.tz)
@@ -78,6 +114,7 @@ async def handle_user_message(text: str) -> ChatResult:
 
     history = thread.since(start, 40)
     user_msg = thread.add("user", text)
+    progress({"type": "received", "userMessageId": user_msg["id"]})
 
     last = thread.last_proactive()
     recent = last if last and now - last["created_at"] <= timedelta(hours=s.reply_link_hours) else None
@@ -94,7 +131,8 @@ async def handle_user_message(text: str) -> ChatResult:
 
     ctx = ToolContext(mode="chat", now=now)
     try:
-        reply = await run_tools(messages, CHAT_TOOLS, ctx, max_rounds=MAX_TOOL_ROUNDS, timeout=s.llm_timeout_s)
+        reply = await run_tools(messages, CHAT_TOOLS, ctx, max_rounds=MAX_TOOL_ROUNDS, timeout=s.llm_timeout_s,
+                                on_event=progress)
     finally:
         linked = link_task_ids(ctx.acted_on, checkin_ids)
         thread.link([user_msg["id"]], linked)
