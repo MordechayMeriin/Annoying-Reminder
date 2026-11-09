@@ -99,7 +99,35 @@ header {
   font-size: .75rem; font-weight: 600; padding: 1px 8px; border-radius: 10px;
   max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.msg.pending { opacity: .6; }
+.msg-delivery { font-size: .7rem; text-align: end; margin-top: 2px; opacity: .7; }
+.msg-delivery.sending::before {
+  content: ""; display: inline-block; width: 8px; height: 8px; margin-inline-end: 5px;
+  border: 1.5px solid currentColor; border-right-color: transparent; border-radius: 50%;
+  animation: spin .8s linear infinite; vertical-align: -1px;
+}
+.msg-delivery.failed { color: #7f1d1d; opacity: 1; font-weight: 600; }
+
+/* What the assistant is doing right now (not a message) */
+.chat-status { padding: 0 16px 12px; display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+.status-step { color: var(--muted); font-size: .85rem; overflow-wrap: anywhere; }
+.status-step.running::after { content: "…"; animation: blink 1s steps(2) infinite; }
+.status-error { color: var(--danger); font-size: .85rem; }
+.typing {
+  display: inline-flex; gap: 4px; padding: 12px 14px; border-radius: 14px; border-bottom-left-radius: 4px;
+  background: var(--card);
+}
+.typing span {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--muted);
+  animation: bounce 1.2s infinite ease-in-out;
+}
+.typing span:nth-child(2) { animation-delay: .15s; }
+.typing span:nth-child(3) { animation-delay: .3s; }
+@keyframes bounce { 0%, 60%, 100% { transform: translateY(0); opacity: .5; } 30% { transform: translateY(-4px); opacity: 1; } }
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes blink { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .typing span, .msg-delivery.sending::before, .status-step.running::after { animation: none; }
+}
 .msg.highlight, .event.highlight { box-shadow: 0 0 0 2px var(--accent); }
 .event {
   align-self: center; max-width: 90%; color: var(--muted); font-size: .8rem; font-style: italic;

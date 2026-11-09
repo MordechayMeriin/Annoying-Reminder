@@ -7,8 +7,15 @@ Buttons:  POST /actions             (signed token from the notification)
 Owner:    everything else           (Supabase login + OWNER_USER_ID check), incl. GET/PATCH /settings
 
 Writing in the chat or acting on a task stops any repeating Pushover alarm (you've seen it).
+
+POST /chat answers with a short Server-Sent Events stream of progress, so the app can show what's
+happening: received → thinking → tool … → thinking → done (or error). The reply itself arrives whole
+in `done`. The agent runs as its own task, so a dropped connection (screen locked, app closed) never
+cuts a turn short: the reply is still saved and shows up on the next refresh.
 """
 
+import asyncio
+import json
 import logging
 import time
 from collections import deque
@@ -16,6 +23,7 @@ from collections import deque
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from . import actions, agent, db, notify, prompting, scheduler, tasks, thread, user_settings
@@ -26,6 +34,7 @@ from .logic import ALARM, NORMAL, URGENT
 from .tokens import verify_action_token
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+log = logging.getLogger("main")
 
 settings = get_settings()  # fail fast at startup if env vars are missing (env-only values below)
 prompting.check_all()      # ... or a prompt file is missing
@@ -105,18 +114,55 @@ class ChatIn(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
 
 
-@app.post("/chat", dependencies=[Depends(require_owner)])
-async def chat(body: ChatIn, background: BackgroundTasks):
-    _rate_limit()
-    background.add_task(notify.cancel_alarms)
+_running: set[asyncio.Task] = set()  # chat turns in progress (keeps a reference until they finish)
+_KEEPALIVE_S = 15
+
+
+def _sse(event: dict) -> str:
+    return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+
+async def _chat_turn(text: str, emit) -> None:
     try:
-        r = await agent.handle_user_message(body.message.strip())
+        r = await agent.handle_user_message(text, emit)
+        emit({"type": "done", "reply": r.reply, "tasksChanged": r.changed, "userMessageId": r.user_message_id,
+              "replyMessageId": r.reply_message_id, "taskIds": r.task_ids})
     except LLMLimitReached:
-        raise HTTPException(status_code=429, detail="Daily LLM limit reached. Reminders still work.")
+        emit({"type": "error", "status": 429, "detail": "Daily LLM limit reached. Reminders still work."})
     except LLMUnavailable:
-        raise HTTPException(status_code=503, detail="The assistant is unavailable right now. Try again in a minute.")
-    return {"reply": r.reply, "tasksChanged": r.changed, "userMessageId": r.user_message_id,
-            "replyMessageId": r.reply_message_id, "taskIds": r.task_ids}
+        emit({"type": "error", "status": 503,
+              "detail": "The assistant is unavailable right now. Try again in a minute."})
+    except Exception:
+        log.exception("Chat turn failed")
+        emit({"type": "error", "status": 500, "detail": "Something went wrong. Try again."})
+    finally:
+        try:
+            await run_in_threadpool(notify.cancel_alarms)
+        except Exception:
+            log.exception("Cancelling alarms failed")
+
+
+@app.post("/chat", dependencies=[Depends(require_owner)])
+async def chat(body: ChatIn):
+    _rate_limit()
+    queue: asyncio.Queue[dict] = asyncio.Queue()
+    turn = asyncio.create_task(_chat_turn(body.message.strip(), queue.put_nowait))
+    _running.add(turn)
+    turn.add_done_callback(_running.discard)
+
+    async def events():
+        while True:
+            try:
+                event = await asyncio.wait_for(queue.get(), _KEEPALIVE_S)
+            except asyncio.TimeoutError:
+                yield ": keepalive\n\n"
+                continue
+            yield _sse(event)
+            if event["type"] in ("done", "error"):
+                return
+
+    return StreamingResponse(events(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.get("/messages", dependencies=[Depends(require_owner)])

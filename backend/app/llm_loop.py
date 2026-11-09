@@ -6,11 +6,12 @@ Robust for a mid-size free model:
 - malformed arguments go back to the model as a clear error, with ONE retry per turn
 - a tool call written as text instead of `tool_calls` is parsed once
 - LLMUnavailable propagates so the caller can fall back
+- optional progress callback (on_event) so the chat UI can show "typing…" / "writing a new task"
 """
 
 import json
 import logging
-from typing import Any
+from typing import Any, Callable
 
 from .llm import chat_completion
 from .tools import ToolArgError, ToolContext, FENCE, execute, parse_text_tool_call
@@ -19,14 +20,22 @@ log = logging.getLogger("llm_loop")
 
 
 async def run(messages: list[dict[str, Any]], tool_defs: list[dict[str, Any]], ctx: ToolContext, *,
-              max_rounds: int = 5, temperature: float = 0.3, timeout: float | None = None) -> str:
-    """Returns the model's final text ('' if it produced none or gave up after errors)."""
+              max_rounds: int = 5, temperature: float = 0.3, timeout: float | None = None,
+              on_event: Callable[[dict[str, Any]], None] | None = None) -> str:
+    """
+    Returns the model's final text ('' if it produced none or gave up after errors).
+
+    on_event, if given, gets {"type": "thinking"} before each LLM call and
+    {"type": "tool", "name": ..., "args": {...}} before each tool runs. It must not raise.
+    """
+    emit = on_event or (lambda event: None)
     names = {t["function"]["name"] for t in tool_defs}
     errors = 0
     parsed_text_call = False
     leftover = ""  # text the model wrote next to a text-form tool call
 
     for round_no in range(max_rounds):
+        emit({"type": "thinking"})
         msg = await chat_completion(messages, tools=tool_defs, temperature=temperature, timeout=timeout)
         content = (msg.get("content") or "").strip()
         calls = msg.get("tool_calls") or []
@@ -47,6 +56,8 @@ async def run(messages: list[dict[str, Any]], tool_defs: list[dict[str, Any]], c
             try:
                 raw = call["function"].get("arguments") or "{}"
                 args = json.loads(raw) if isinstance(raw, str) else raw
+                if isinstance(args, dict):
+                    emit({"type": "tool", "name": name, "args": args})
                 result = execute(name, args, ctx)
             except (ToolArgError, json.JSONDecodeError) as e:
                 errors += 1
