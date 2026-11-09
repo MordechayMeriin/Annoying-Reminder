@@ -1,6 +1,5 @@
 """Run: cd backend && python -m pytest -q"""
 
-import time as _time
 from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 

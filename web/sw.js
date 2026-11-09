@@ -1,5 +1,7 @@
-// Service worker: shows push notifications and handles the Done / Snooze buttons
-// without opening the app.
+// Service worker: shows push notifications, handles the Done / Snooze buttons without opening
+// the app, and opens the chat at the right message when a notification is tapped.
+//
+// Push payload: { title, body, url, priority, api, messageId?, taskId?, token? }
 
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
@@ -17,7 +19,8 @@ self.addEventListener("push", (event) => {
     icon: "/icon-192.png",
     badge: "/icon-192.png",
     data,
-    tag: data.taskId ? `task-${data.taskId}` : `msg-${Date.now()}`,
+    // One notification per task (a newer check-in replaces the older one); group messages stack.
+    tag: data.taskId ? `task-${data.taskId}` : data.messageId ? `msg-${data.messageId}` : `msg-${Date.now()}`,
     renotify: true,
     requireInteraction: (data.priority || 1) >= 2,
     vibrate: (data.priority || 1) >= 2 ? [200, 100, 200, 100, 400] : [200],
@@ -51,14 +54,17 @@ self.addEventListener("notificationclick", (event) => {
           self.registration.showNotification("Couldn't update the task", {
             body: "Open the app and try again.",
             icon: "/icon-192.png",
-            data: { url: data.url || "/" },
+            data: { url: data.url || "/", messageId: data.messageId },
           })
         )
     );
     return;
   }
 
-  event.waitUntil(openApp(data.url || "/"));
+  // Tapping the body = reply: open the chat at this message with the reply box focused.
+  // (Chrome on Android has no inline text reply for web notifications.)
+  const url = data.messageId ? `/?m=${data.messageId}` : data.url || "/";
+  event.waitUntil(openApp(url, data));
 });
 
 async function broadcast(message) {
@@ -66,14 +72,16 @@ async function broadcast(message) {
   clients.forEach((c) => c.postMessage(message));
 }
 
-async function openApp(url) {
+async function openApp(url, data) {
   const clients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
-  for (const c of clients) {
-    if ("focus" in c) {
-      await c.focus();
-      if ("navigate" in c) await c.navigate(url);
-      return;
-    }
+  const client = clients.find((c) => new URL(c.url).origin === self.location.origin);
+  if (client) {
+    await client.focus();
+    // The app is already open: jump to the message without reloading.
+    if (data.messageId) client.postMessage({ type: "open-message", messageId: data.messageId });
+    else if (data.taskId) client.postMessage({ type: "open-task", taskId: data.taskId });
+    else if ("navigate" in client) await client.navigate(url);
+    return;
   }
   return self.clients.openWindow(url);
 }

@@ -13,11 +13,27 @@ from .tokens import make_action_token
 log = logging.getLogger("notify")
 
 
-def send_push(title: str, body: str, *, task_id: int | None = None, priority: int = 1,
-              url: str = "/") -> int:
-    """Send to every subscribed browser. Returns how many deliveries succeeded."""
+PUSH_BODY_MAX = 300
+
+
+def push_body(text: str) -> str:
+    text = " ".join(text.split())  # notifications show one paragraph anyway
+    return text if len(text) <= PUSH_BODY_MAX else text[: PUSH_BODY_MAX - 1] + "…"
+
+
+def send_push(title: str, body: str, *, task_id: int | None = None, message_id: int | None = None,
+              priority: int = 1, url: str | None = None) -> int:
+    """
+    Send to every subscribed browser. Returns how many deliveries succeeded.
+    message_id: the chat message this notification shows; tapping it opens the chat there.
+    task_id: adds the ✓ Done / ⏰ Snooze buttons (with a signed token).
+    """
     s = get_settings()
-    payload: dict = {"title": title, "body": body[:400], "url": url, "priority": priority, "api": s.api_url}
+    if url is None:
+        url = f"/?m={message_id}" if message_id is not None else "/"
+    payload: dict = {"title": title, "body": push_body(body), "url": url, "priority": priority, "api": s.api_url}
+    if message_id is not None:
+        payload["messageId"] = message_id
     if task_id is not None:
         payload["taskId"] = task_id
         payload["token"] = make_action_token(task_id, s.action_secret)
@@ -67,4 +83,5 @@ def send_pushover(title: str, message: str, *, emergency: bool = False, url: str
 def notify(title: str, body: str, **kwargs) -> None:
     """Browser push first; if no browser received it, fall back to Pushover."""
     if send_push(title, body, **kwargs) == 0:
-        send_pushover(title, body, url=get_settings().web_origin)
+        mid = kwargs.get("message_id")
+        send_pushover(title, body, url=get_settings().web_origin + (f"/?m={mid}" if mid else "/"))

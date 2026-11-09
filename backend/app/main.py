@@ -16,15 +16,16 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from . import agent, db, notify, scheduler, tasks
+from . import actions, agent, db, notify, prompting, scheduler, tasks, thread
 from .auth import require_cron, require_owner
 from .config import get_settings
-from .llm import LLMLimitReached
+from .llm import LLMLimitReached, LLMUnavailable
 from .tokens import verify_action_token
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 settings = get_settings()  # fail fast at startup if env vars are missing
+prompting.check_all()      # ... or a prompt file is missing
 app = FastAPI(title="Annoying Reminder", docs_url=None, redoc_url=None, openapi_url=None)
 app.add_middleware(
     CORSMiddleware,
@@ -50,12 +51,15 @@ def push_config():
 
 @app.post("/tick", dependencies=[Depends(require_cron)])
 async def tick(background: BackgroundTasks):
-    sent = await run_in_threadpool(scheduler.process_due_reminders)
+    # Deciding WHEN is fast and synchronous; writing the message (LLM) runs after the response,
+    # so cron-job.org never times out.
+    task_ids = await run_in_threadpool(scheduler.plan_tick)
+    if task_ids:
+        background.add_task(scheduler.deliver, task_ids)
     jobs = await run_in_threadpool(scheduler.due_daily_jobs)
     for job in jobs:
-        # LLM jobs run after the response, so cron-job.org doesn't time out.
         background.add_task(scheduler.run_daily_job, job)
-    return {"reminders_sent": sent, "jobs": jobs}
+    return {"contacting": task_ids, "jobs": jobs}
 
 
 # ---------------------------------------------------------------- notification buttons
@@ -71,7 +75,7 @@ def action(body: ActionIn):
     task_id = verify_action_token(body.token, settings.action_secret)
     if task_id is None:
         raise HTTPException(status_code=403, detail="Invalid or expired link")
-    task = tasks.complete(task_id) if body.action == "done" else tasks.snooze(task_id, body.minutes)
+    task = actions.apply(task_id, body.action, body.minutes)
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
     return {"ok": True, "task": tasks.to_public(task)}
@@ -99,27 +103,54 @@ class ChatIn(BaseModel):
 async def chat(body: ChatIn):
     _rate_limit()
     try:
-        reply, changed = await agent.handle_user_message(body.message.strip())
+        r = await agent.handle_user_message(body.message.strip())
     except LLMLimitReached:
-        raise HTTPException(status_code=429, detail="Daily LLM limit reached")
-    return {"reply": reply, "tasksChanged": changed}
+        raise HTTPException(status_code=429, detail="Daily LLM limit reached. Reminders still work.")
+    except LLMUnavailable:
+        raise HTTPException(status_code=503, detail="The assistant is unavailable right now. Try again in a minute.")
+    return {"reply": r.reply, "tasksChanged": r.changed, "userMessageId": r.user_message_id,
+            "replyMessageId": r.reply_message_id, "taskIds": r.task_ids}
 
 
 @app.get("/messages", dependencies=[Depends(require_owner)])
-def messages(limit: int = 50):
-    rows = db.fetch_all(
-        "select id, role, content, kind, created_at from messages order by created_at desc limit %s",
-        (min(limit, 200),),
-    )
+def messages(limit: int = 50, before: int | None = None):
+    rows = thread.page(before, min(max(limit, 1), 200))
     tz = settings.tz
     for r in rows:
         r["created_at"] = r["created_at"].astimezone(tz).isoformat(timespec="minutes")
-    return rows[::-1]
+    return rows
 
 
 @app.get("/tasks", dependencies=[Depends(require_owner)])
 def list_tasks(scope: str = "open", days: int = 7):
     return [tasks.to_public(t) for t in tasks.list_tasks(scope, days)]
+
+
+@app.get("/tasks/{task_id}", dependencies=[Depends(require_owner)])
+def get_task(task_id: int):
+    task = tasks.get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    events = tasks.recent_events(task_id, 20)
+    for e in events:
+        e["created_at"] = e["created_at"].astimezone(settings.tz).isoformat(timespec="minutes")
+    return {**tasks.to_public(task),
+            "subtasks": [tasks.to_public(s) for s in tasks.subtasks(task_id)],
+            "events": events}
+
+
+class TaskPatch(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=tasks.DESCRIPTION_MAX)
+
+
+@app.patch("/tasks/{task_id}", dependencies=[Depends(require_owner)])
+def patch_task(task_id: int, body: TaskPatch):
+    fields = body.model_dump(exclude_none=True)
+    task = tasks.update(task_id, **fields)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return tasks.to_public(task)
 
 
 class TaskAction(BaseModel):
@@ -129,12 +160,7 @@ class TaskAction(BaseModel):
 
 @app.post("/tasks/{task_id}/action", dependencies=[Depends(require_owner)])
 def task_action(task_id: int, body: TaskAction):
-    if body.action == "done":
-        task = tasks.complete(task_id)
-    elif body.action == "snooze":
-        task = tasks.snooze(task_id, body.minutes)
-    else:
-        task = tasks.cancel(task_id)
+    task = actions.apply(task_id, body.action, body.minutes)
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
     return tasks.to_public(task)

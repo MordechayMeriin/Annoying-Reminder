@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
   <meta name="theme-color" content="#111827">
   <title>Annoying Reminder</title>
   <link rel="manifest" href="/manifest.webmanifest">
@@ -30,45 +30,76 @@
     </div>
   </section>
 
-  <!-- Main -->
+  <!-- Main: the chat -->
   <section id="main" class="screen" hidden>
     <header>
       <h1>🔔 Reminder</h1>
       <div class="header-actions">
         <button id="enable-push" class="small" hidden>Enable notifications</button>
+        <button id="open-tasks" class="small ghost" title="Tasks">☑ Tasks <span id="task-count" class="badge" hidden></span></button>
         <button id="refresh" class="small ghost" title="Refresh">↻</button>
         <button id="logout" class="small ghost" title="Log out">⎋</button>
       </div>
     </header>
 
-    <nav class="tabs">
-      <button data-tab="today" class="active">Today</button>
-      <button data-tab="tasks">All tasks</button>
-      <button data-tab="chat">Chat</button>
-    </nav>
+    <details id="plan" class="plan" hidden>
+      <summary><span class="plan-title">☀️ Today's plan</span> <span id="plan-preview" class="plan-preview" dir="auto"></span></summary>
+      <div id="plan-body" class="plan-body" dir="auto"></div>
+    </details>
 
-    <div id="tab-today" class="tab">
-      <div id="plan" class="card plan" hidden></div>
-      <h2>Overdue & today</h2>
+    <main id="chat" class="chat">
+      <button id="load-earlier" class="small ghost load-earlier" hidden>Load earlier messages</button>
+      <div id="messages" class="messages"></div>
+    </main>
+
+    <form id="chat-form" class="chat-form">
+      <textarea id="chat-input" dir="auto" rows="1" autocomplete="off"
+                placeholder="Reply or add a task…"></textarea>
+      <button type="submit" id="chat-send" aria-label="Send">➤</button>
+    </form>
+  </section>
+
+  <!-- Tasks drawer -->
+  <div id="drawer-backdrop" class="backdrop" hidden></div>
+  <aside id="drawer" class="drawer" hidden aria-label="Tasks">
+    <div class="drawer-head">
+      <button id="drawer-back" class="small ghost" hidden>‹ Back</button>
+      <nav class="tabs" id="drawer-tabs">
+        <button data-tab="today" class="active">Today</button>
+        <button data-tab="all">All open</button>
+      </nav>
+      <button id="drawer-close" class="small ghost" aria-label="Close">✕</button>
+    </div>
+
+    <div id="tab-today" class="drawer-body">
+      <h2>Overdue &amp; today</h2>
       <ul id="today-list" class="tasks"></ul>
       <h2>Coming up</h2>
       <ul id="upcoming-list" class="tasks"></ul>
     </div>
-
-    <div id="tab-tasks" class="tab" hidden>
+    <div id="tab-all" class="drawer-body" hidden>
       <ul id="all-list" class="tasks"></ul>
     </div>
 
-    <div id="tab-chat" class="tab chat-tab" hidden>
-      <div id="messages" class="messages"></div>
+    <div id="task-detail" class="drawer-body detail" hidden>
+      <h3 id="detail-title" dir="auto"></h3>
+      <div id="detail-meta" class="muted"></div>
+      <div id="detail-blocked" class="blocked" dir="auto" hidden></div>
+      <label for="detail-desc" class="field-label">Description <span class="muted">— what the assistant knows about this task</span></label>
+      <textarea id="detail-desc" dir="auto" rows="5" maxlength="800"></textarea>
+      <div class="detail-actions">
+        <button id="detail-save" class="small" disabled>Save</button>
+        <span class="spacer"></span>
+        <button id="detail-snooze" class="small ghost">⏰ 1h</button>
+        <button id="detail-done" class="small done">✓ Done</button>
+        <button id="detail-cancel" class="small ghost">Cancel task</button>
+      </div>
+      <h2>Steps</h2>
+      <ul id="detail-subtasks" class="tasks"></ul>
+      <h2>History</h2>
+      <ul id="detail-events" class="events"></ul>
     </div>
-
-    <form id="chat-form" class="chat-form">
-      <input id="chat-input" dir="auto" autocomplete="off"
-             placeholder="e.g. Dentist Thursday 10:00 / לשלם ארנונה עד ראשון">
-      <button type="submit" id="chat-send">➤</button>
-    </form>
-  </section>
+  </aside>
 
   <div id="toast" class="toast" hidden></div>
 </body>
