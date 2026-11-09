@@ -6,7 +6,8 @@ The /tick logic, called every 5 minutes by cron-job.org.
    → lease the rest for one delivery.
 2. deliver()    (background task)
    one combined message (LLM or template) → saved in the chat → one push → next check-in times.
-3. Daily jobs: morning plan, mid-day check-ins, evening review (background, once per day each).
+3. Daily jobs: morning plan, mid-day check-ins, evening review (background, once per day each),
+   plus the meeting digests: the week's meetings at the start of the week, tomorrow's in the evening.
 """
 
 import logging
@@ -144,10 +145,18 @@ def due_daily_jobs() -> list[str]:
             jobs.append("checkin")
     if job_is_due(now_local, s.evening_time, window_hours=2) and claim_job("evening", today):
         jobs.append("evening")
+    if (s.week_meetings_time and now_local.weekday() == s.week_start_day
+            and job_is_due(now_local, s.week_meetings_time) and claim_job("week_meetings", today)):
+        jobs.append("week_meetings")
+    if (s.meetings_eve_time and job_is_due(now_local, s.meetings_eve_time, window_hours=2)
+            and claim_job("meetings_eve", today)):
+        jobs.append("meetings_eve")
     return jobs
 
 
 async def run_daily_job(job: str) -> None:
+    if job in coach.MEETING_JOBS:
+        return run_meeting_digest(job)
     try:
         text = await coach.compose_daily(job, tasks.now_utc())
         if text is None:
@@ -156,3 +165,15 @@ async def run_daily_job(job: str) -> None:
         notify.notify(coach.JOB_TITLES[job], text, message_id=msg["id"], priority=1)
     except Exception:
         log.exception("Daily job %s failed", job)
+
+
+def run_meeting_digest(job: str) -> None:
+    """The week's / tomorrow's meetings: one chat message (linked to the meetings) and one push."""
+    try:
+        digest = coach.meeting_digest(job, tasks.now_utc())
+        if digest is None:
+            return  # no meetings, nothing to say
+        msg = thread.add("assistant", digest.text, "meeting", digest.task_ids)
+        notify.notify(digest.title, digest.text, message_id=msg["id"], priority=1)
+    except Exception:
+        log.exception("Meeting digest %s failed", job)

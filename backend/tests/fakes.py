@@ -43,7 +43,7 @@ class FakeStore:
     def install(self, setattr_: Callable[[Any, str, Any], None]) -> None:
         for name in ("now_utc", "get", "get_many", "subtasks", "add_event", "recent_events", "event_counts",
                      "create", "update", "complete", "set_followup", "snooze", "block", "unblock", "cancel",
-                     "close_finished_meetings", "due_for_contact", "defer", "lease", "finish_contact",
+                     "close_finished_meetings", "due_for_contact", "meetings_between", "defer", "lease", "finish_contact",
                      "list_tasks"):
             setattr_(tasks, name, getattr(self, "t_" + name))
         for name in ("add", "add_event", "link", "since", "for_tasks", "last_proactive", "recent_task_ids",
@@ -162,6 +162,11 @@ class FakeStore:
     def t_due_for_contact(self, limit=20):
         due = [t for t in self.tasks.values() if t["status"] == "open" and t["remind_at"] and t["remind_at"] <= self.now]
         return [dict(t) for t in sorted(due, key=lambda t: t["remind_at"])][:limit]
+
+    def t_meetings_between(self, start, end):
+        rows = [t for t in self.tasks.values() if t["status"] == "open" and t["kind"] == "meeting"
+                and t["due_at"] and t["due_at"] < end and (t["due_at"] >= start or t["recurrence"])]
+        return [dict(t) for t in sorted(rows, key=lambda t: t["due_at"])]
 
     def t_defer(self, task_id, until):
         t = self.tasks[task_id]

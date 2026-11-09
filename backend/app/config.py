@@ -26,6 +26,22 @@ def _times(value: str) -> list[time]:
     return [_time(v.strip()) for v in value.split(",") if v.strip()]
 
 
+def _time_or_off(value: str) -> time | None:
+    """A time, or None when the value is "off" (the feature is disabled)."""
+    return None if value.lower() in ("off", "none", "no", "false", "0") else _time(value)
+
+
+_WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+def _weekday(value: str) -> int:
+    """'sun' / 'Sunday' → Python weekday (Mon=0 … Sun=6)."""
+    key = value.strip().lower()[:3]
+    if key not in _WEEKDAYS:
+        raise RuntimeError(f"Unknown weekday: {value!r} (use sun, mon, …)")
+    return _WEEKDAYS.index(key)
+
+
 @dataclass(frozen=True)
 class Settings:
     # --- Database (Supabase Postgres, use the *pooler* connection string) ---
@@ -70,6 +86,13 @@ class Settings:
     nag_interval_min: int = field(default_factory=lambda: int(_opt("NAG_INTERVAL_MIN", "30")))
     max_nags: int = field(default_factory=lambda: int(_opt("MAX_NAGS", "4")))
     meeting_lead_min: int = field(default_factory=lambda: int(_opt("MEETING_LEAD_MIN", "15")))
+    # Extra meeting reminders: the week's meetings at the start of the week, and tomorrow's
+    # meetings the evening before. Set a time to "off" to disable it.
+    week_start_day: int = field(default_factory=lambda: _weekday(_opt("WEEK_START_DAY", "sun")))
+    week_meetings_time: time | None = field(
+        default_factory=lambda: _time_or_off(_opt("WEEK_MEETINGS_TIME", "08:00")))
+    meetings_eve_time: time | None = field(
+        default_factory=lambda: _time_or_off(_opt("MEETINGS_EVE_TIME", "20:00")))
 
     # --- Proactive-contact guardrails (enforced in code, before any LLM call) ---
     min_gap_min: int = field(default_factory=lambda: int(_opt("MIN_GAP_MIN", "20")))

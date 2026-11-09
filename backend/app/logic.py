@@ -75,6 +75,33 @@ def next_occurrence(current: datetime, recurrence: str, tz: ZoneInfo) -> datetim
     return datetime.combine(d, local.timetz().replace(tzinfo=None), tzinfo=tz)
 
 
+def meeting_occurrences(meetings: Iterable[dict[str, Any]], start: datetime, end: datetime,
+                        tz: ZoneInfo) -> list[tuple[datetime, dict[str, Any]]]:
+    """
+    (start time, meeting) for every meeting starting in [start, end), soonest first.
+    Recurring meetings are expanded inside the window, and rolled forward if their stored
+    due_at is already in the past.
+    """
+    out: list[tuple[datetime, dict[str, Any]]] = []
+    for m in meetings:
+        when = m.get("due_at")
+        if when is None:
+            continue
+        recurrence = m.get("recurrence")
+        if not recurrence:
+            if start <= when < end:
+                out.append((when, m))
+            continue
+        for _ in range(400):  # hard stop; a daily meeting over a week needs ~7
+            if when >= end:
+                break
+            if when >= start:
+                out.append((when, m))
+            when = next_occurrence(when, recurrence, tz)
+    out.sort(key=lambda x: (x[0], x[1].get("id", 0)))
+    return out
+
+
 def parse_local_datetime(value: str | None, tz: ZoneInfo) -> datetime | None:
     """Parse an ISO string from the LLM/UI. Naive values are treated as local time."""
     if value is None or str(value).strip() == "":

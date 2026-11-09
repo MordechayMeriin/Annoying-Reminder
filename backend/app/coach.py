@@ -9,14 +9,14 @@ Meeting facts (title, time, minutes left) always come from code; the LLM only ad
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from . import context, tasks, thread
 from .config import get_settings
 from .llm import LLMUnavailable, chat_completion
 from .llm_loop import run as run_tools
-from .logic import day_start
+from .logic import day_start, meeting_occurrences
 from .prompting import render
 from .tools import COACH_TOOLS, ToolContext
 
@@ -194,3 +194,62 @@ async def compose_daily(job: str, now: datetime) -> str | None:
     if open_count == 0:
         return "Nothing open for today." if job != "evening" else "Nothing left open today. 👍"
     return f"{open_count} open item(s) for today. Open the app to see them."
+
+
+# ================================================================ meeting digests
+#
+# Extra meeting reminders on top of the ones before / at the start of each meeting:
+#   week_meetings — at the start of the week: every meeting in the coming 7 days
+#   meetings_eve  — in the evening: every meeting tomorrow
+# Built from code only (meeting facts never come from the LLM). Nothing is sent when there are none.
+
+MEETING_JOBS = ("week_meetings", "meetings_eve")
+MEETING_JOB_TITLES = {"week_meetings": "📅 This week's meetings", "meetings_eve": "📅 Tomorrow's meetings"}
+
+
+@dataclass
+class Digest:
+    text: str
+    title: str
+    task_ids: list[int]
+
+
+def meeting_digest(job: str, now: datetime) -> Digest | None:
+    tz = get_settings().tz
+    now_local = now.astimezone(tz)
+    midnight = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    if job == "week_meetings":
+        start, end = now_local, _local_midnight(midnight, 7, tz)
+    elif job == "meetings_eve":
+        start, end = _local_midnight(midnight, 1, tz), _local_midnight(midnight, 2, tz)
+    else:
+        raise ValueError(f"Unknown meeting job: {job}")
+
+    occurrences = meeting_occurrences(tasks.meetings_between(start, end), start, end, tz)
+    if not occurrences:
+        return None
+    if job == "week_meetings":
+        today = now_local.date()
+        lines = [f"{_day_label(w.astimezone(tz), today)} {w.astimezone(tz):%H:%M} — {m['title']}"
+                 for w, m in occurrences]
+        head = "📅 Your meetings this week:"
+    else:
+        lines = [f"{w.astimezone(tz):%H:%M} — {m['title']}" for w, m in occurrences]
+        head = f"📅 Tomorrow ({start:%a %d/%m}):"
+    text = "\n".join([head, *lines])[:MAX_TEXT]
+    ids = list(dict.fromkeys(m["id"] for _, m in occurrences))
+    return Digest(text=text, title=MEETING_JOB_TITLES[job], task_ids=ids)
+
+
+def _local_midnight(midnight: datetime, days: int, tz) -> datetime:
+    """Local midnight `days` later (re-localised, so a DST change doesn't shift it by an hour)."""
+    d = (midnight + timedelta(days=days)).date()
+    return datetime(d.year, d.month, d.day, tzinfo=tz)
+
+
+def _day_label(when: datetime, today) -> str:
+    if when.date() == today:
+        return "Today"
+    if when.date() == today + timedelta(days=1):
+        return "Tomorrow"
+    return f"{when:%a %d/%m}"

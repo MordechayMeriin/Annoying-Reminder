@@ -50,6 +50,15 @@ writes the messages and can adjust follow-ups through tools, within those limits
 
 The `/tick` request itself only decides and returns; the LLM work runs in a background task.
 
+### Extra meeting reminders
+On top of the reminder before each meeting and at its start, two digests (built by code, no LLM):
+- **Start of the week** (`WEEK_START_DAY` at `WEEK_MEETINGS_TIME`, default Sunday 08:00): every meeting
+  in the coming 7 days.
+- **The evening before** (`MEETINGS_EVE_TIME`, default 20:00): every meeting tomorrow.
+
+Each is one chat message (linked to those meetings, so a reply like "move the dentist to 10" knows
+what you mean) and one push. Nothing is sent when there are no meetings. Recurring meetings are included.
+
 ### Replies
 When you reply, the agent gets the last check-in (if recent) and up to 3 candidate tasks with their
 context, marked as a *guess*. The model decides what your message is about and may ask one short
@@ -151,6 +160,8 @@ Required ones are listed in [`backend/.env.example`](backend/.env.example). Opti
 | `QUIET_START` / `QUIET_END` | `23:00` / `07:00` | no proactive messages at all in between |
 | `NAG_INTERVAL_MIN` / `MAX_NAGS` | `30` / `4` | default follow-up interval (faster for higher priority) and when to stop |
 | `MEETING_LEAD_MIN` | `15` | reminder before a meeting (plus one at start) |
+| `WEEK_START_DAY` / `WEEK_MEETINGS_TIME` | `sun` / `08:00` | at the start of the week: one message listing the week's meetings (`off` disables) |
+| `MEETINGS_EVE_TIME` | `20:00` | every evening: one message listing tomorrow's meetings (`off` disables) |
 | `MIN_GAP_MIN` | `20` | minimum minutes between proactive messages (meetings exempt) |
 | `MAX_PROACTIVE_PER_DAY` | `20` | proactive messages per chat day |
 | `MAX_PER_TASK_PER_DAY` | `4` | assistant check-ins per task per day |
@@ -184,7 +195,8 @@ python -m http.server 5173   # set WEB_ORIGIN=http://localhost:5173 for the back
 backend/app/
   main.py        API routes
   scheduler.py   /tick: plan (guardrails, lease) + background delivery, daily jobs
-  coach.py       writes check-ins / meeting reminders / daily plans (LLM + template fallback)
+  coach.py       writes check-ins / meeting reminders / daily plans (LLM + template fallback),
+                 meeting digests (week ahead, tomorrow)
   agent.py       chat agent: likely-topic candidates, linking turns to tasks
   tools.py       the 9 tools, validation, text tool-call parsing
   llm_loop.py    tool-calling loop (one retry, one text-call recovery)
