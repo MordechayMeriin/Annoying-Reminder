@@ -21,6 +21,7 @@ class FakeStore:
         self.messages: list[dict[str, Any]] = []
         self.pushes: list[dict[str, Any]] = []
         self.pushovers: list[dict[str, Any]] = []
+        self.pushover_mode = "always"   # as if PUSHOVER_TOKEN / PUSHOVER_USER were set
         self._ids = {"task": 0, "msg": 0}
 
     # ------------------------------------------------------------ setup helpers
@@ -51,16 +52,19 @@ class FakeStore:
             setattr_(thread, name, getattr(self, "m_" + name))
         setattr_(notify, "send_push", self.send_push)
         setattr_(notify, "send_pushover", self.send_pushover)
+        setattr_(notify, "pushover_mode", lambda: self.pushover_mode)
 
     # ------------------------------------------------------------ notify
 
     def send_push(self, title, body, *, task_id=None, message_id=None, priority=1, url=None) -> int:
         self.pushes.append({"title": title, "body": notify.push_body(body), "task_id": task_id,
-                            "message_id": message_id, "url": url or (f"/?m={message_id}" if message_id else "/")})
+                            "message_id": message_id, "priority": priority,
+                            "url": url or (f"/?m={message_id}" if message_id else "/")})
         return 1
 
-    def send_pushover(self, title, message, *, emergency=False, url=None) -> bool:
-        self.pushovers.append({"title": title, "message": message, "emergency": emergency})
+    def send_pushover(self, title, message, *, level=0, url=None, expire_s=3600) -> bool:
+        self.pushovers.append({"title": title, "message": message, "level": level, "url": url,
+                               "expire_s": expire_s})
         return True
 
     # ------------------------------------------------------------ tasks.*

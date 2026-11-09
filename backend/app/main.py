@@ -5,6 +5,8 @@ Public:   GET  /health, GET /config/push
 Cron:     POST /tick                (X-Cron-Secret header)
 Buttons:  POST /actions             (signed token from the notification)
 Owner:    everything else           (Supabase login + OWNER_USER_ID check), incl. GET/PATCH /settings
+
+Writing in the chat or acting on a task stops any repeating Pushover alarm (you've seen it).
 """
 
 import logging
@@ -20,6 +22,7 @@ from . import actions, agent, db, notify, prompting, scheduler, tasks, thread, u
 from .auth import require_cron, require_owner
 from .config import SPECS, get_settings
 from .llm import LLMLimitReached, LLMUnavailable
+from .logic import ALARM, NORMAL, URGENT
 from .tokens import verify_action_token
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -73,10 +76,11 @@ class ActionIn(BaseModel):
 
 
 @app.post("/actions")
-def action(body: ActionIn):
+def action(body: ActionIn, background: BackgroundTasks):
     task_id = verify_action_token(body.token, settings.action_secret)
     if task_id is None:
         raise HTTPException(status_code=403, detail="Invalid or expired link")
+    background.add_task(notify.cancel_alarms)
     task = actions.apply(task_id, body.action, body.minutes)
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -102,8 +106,9 @@ class ChatIn(BaseModel):
 
 
 @app.post("/chat", dependencies=[Depends(require_owner)])
-async def chat(body: ChatIn):
+async def chat(body: ChatIn, background: BackgroundTasks):
     _rate_limit()
+    background.add_task(notify.cancel_alarms)
     try:
         r = await agent.handle_user_message(body.message.strip())
     except LLMLimitReached:
@@ -161,7 +166,8 @@ class TaskAction(BaseModel):
 
 
 @app.post("/tasks/{task_id}/action", dependencies=[Depends(require_owner)])
-def task_action(task_id: int, body: TaskAction):
+def task_action(task_id: int, body: TaskAction, background: BackgroundTasks):
+    background.add_task(notify.cancel_alarms)
     task = actions.apply(task_id, body.action, body.minutes)
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -211,3 +217,25 @@ def subscribe(sub: SubscriptionIn):
 def push_test():
     sent = notify.send_push("🔔 Test", "Notifications work.", url="/")
     return {"sent": sent}
+
+
+class PushoverTest(BaseModel):
+    level: str = Field(default="normal", pattern="^(normal|urgent|alarm)$")
+
+
+_TESTS = {
+    "normal": (NORMAL, "🔔 Test", "This is how a normal message sounds."),
+    "urgent": (URGENT, "❗ Test: urgent", "This is how meetings, your own reminders and ignored check-ins sound."),
+    "alarm": (ALARM, "🚨 Test: alarm",
+              "This repeats until you acknowledge it (or for 5 minutes). Write in the chat to stop it too."),
+}
+
+
+@app.post("/pushover/test", dependencies=[Depends(require_owner)])
+def pushover_test(body: PushoverTest):
+    if not settings.pushover_enabled:
+        raise HTTPException(status_code=400, detail="Pushover isn't set up: add PUSHOVER_TOKEN and PUSHOVER_USER on Render.")
+    level, title, text = _TESTS[body.level]
+    if not notify.send_pushover(title, text, level=level, url=settings.web_origin + "/", expire_s=300):
+        raise HTTPException(status_code=502, detail="Pushover didn't accept the message. Check the token and user key.")
+    return {"ok": True}
