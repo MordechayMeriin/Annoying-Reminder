@@ -159,6 +159,7 @@ Required ones are listed in [`backend/.env.example`](backend/.env.example). Opti
 | `REPLY_LINK_HOURS` | `3` | how long a check-in stays the likely topic of your replies |
 | `CHAT_PER_MINUTE` / `LLM_CALLS_PER_DAY` | `15` / `300` | spend guards |
 | `LLM_TIMEOUT_S` / `LLM_MAX_TOKENS` | `25` / `500` | per LLM call |
+| `LLM_REASONING_EFFORT` | empty | `minimal` / `low` / `medium` / `high` for reasoning models (empty = provider default). Reasoning tokens may count toward `LLM_MAX_TOKENS` |
 
 ## Local development
 

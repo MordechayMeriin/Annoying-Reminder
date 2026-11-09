@@ -26,6 +26,17 @@ def _times(value: str) -> list[time]:
     return [_time(v.strip()) for v in value.split(",") if v.strip()]
 
 
+REASONING_EFFORTS = ("minimal", "low", "medium", "high")
+
+
+def _reasoning_effort(value: str) -> str:
+    value = value.lower()
+    if value and value not in REASONING_EFFORTS:
+        # Fail at startup: a bad value would otherwise make every LLM call fail quietly.
+        raise RuntimeError(f"LLM_REASONING_EFFORT must be empty or one of {', '.join(REASONING_EFFORTS)}")
+    return value
+
+
 @dataclass(frozen=True)
 class Settings:
     # --- Database (Supabase Postgres, use the *pooler* connection string) ---
@@ -89,6 +100,8 @@ class Settings:
     llm_calls_per_day: int = field(default_factory=lambda: int(_opt("LLM_CALLS_PER_DAY", "300")))
     llm_timeout_s: float = field(default_factory=lambda: float(_opt("LLM_TIMEOUT_S", "25")))
     llm_max_tokens: int = field(default_factory=lambda: int(_opt("LLM_MAX_TOKENS", "500")))
+    # Thinking effort for reasoning models (OpenRouter `reasoning.effort`). Empty = provider default.
+    llm_reasoning_effort: str = field(default_factory=lambda: _reasoning_effort(_opt("LLM_REASONING_EFFORT", "")))
 
     @property
     def pushover_enabled(self) -> bool:
