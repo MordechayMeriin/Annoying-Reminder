@@ -1,8 +1,15 @@
 # 🔔 Annoying Reminder
 
-A personal, LLM-powered assistant that doesn't let things slide. It's one ongoing chat: you log tasks
-and meetings in plain Hebrew or English, and it checks in on you, asks how it's going, suggests a tiny
-first step when you're stuck, remembers progress and blockers, and decides sensibly when to follow up.
+A personal, LLM-powered ADHD assistant. It doesn't just remind: it helps you **start, keep going and
+come back**, with less effort than a to-do app. It's one ongoing chat: you say a task once, in plain
+Hebrew or English, and it works out the first step, proposes Today's 3 every morning, checks in with
+one-tap reply buttons, and decides sensibly when to follow up.
+
+**The one rule: the app does the work.** Nothing asks you to fill in fields, sort lists or answer
+questions just to keep it running. Every question comes with buttons, silence means "accept the
+default", starting and finishing work from the notification, and new features replace messages
+rather than add to them. (The plan is in [the implementation brief](<Annoying Reminder → ADHD Assistant Implementation Brief.md>);
+Phase 1 is in: reply buttons, the silent first step, Today's 3 and playbooks.)
 
 ## How it works
 
@@ -10,15 +17,56 @@ first step when you're stuck, remembers progress and blockers, and decides sensi
  Phone (Chrome web app)                Render (free)                         Supabase (free)
  ┌──────────────────────┐   HTTPS   ┌──────────────────────────┐   SQL    ┌──────────────┐
  │ chat (main screen)   │ ────────▶ │ FastAPI                  │ ───────▶ │ Postgres     │
- │ tasks drawer · plan  │ ◀──push── │  • agent  (OpenRouter)   │          │ (RLS on)     │
- │  [✓ Done] [⏰ Snooze] │           │  • /tick → coach         │          └──────────────┘
+ │ Today's 3 · tasks    │ ◀──push── │  • agent  (OpenRouter)   │          │ (RLS on)     │
+ │ [▶ Start] [✓ Done]   │           │  • /tick → coach         │          └──────────────┘
  └──────────────────────┘           └──────────────────────────┘
                                         ▲ every 5 min          └──▶ Pushover (loud, alarms)
                                   cron-job.org (X-Cron-Secret)
 ```
 
-**Code decides WHEN, the LLM decides WHAT.** Timing, limits and safety are deterministic code; the LLM
-writes the messages and can adjust follow-ups through tools, within those limits.
+**Code decides WHEN, WHICH playbook and WHICH buttons. The LLM writes the words.** Timing, limits,
+safety, the reply buttons and which coaching playbook applies are deterministic code; the LLM writes
+the messages and can adjust follow-ups through tools, within those limits.
+
+### Task stages
+Every task has a stage ([`logic.task_stage`](backend/app/logic.py)), and the app's move depends on it:
+**captured** (you said it) → **clarified** (it has a next action, filled in silently in the same turn) →
+**planned** (in Today's 3) → **done**. A task postponed or ignored 3+ times in 7 days is **avoided**: the
+coach switches to the avoiding playbook instead of pushing harder.
+
+### Reply buttons ("chips")
+Every proactive message, and every chat reply about exactly one open task, comes with 2–4 buttons,
+chosen by code from the message kind and the task's stage ([`logic.chips_for`](backend/app/logic.py)),
+in Hebrew or English (the language of your latest message). They show only under the latest message
+and disappear once you reply.
+
+| Message | Buttons |
+|---|---|
+| Task check-in | ▶ Start 5 min · ✓ Done · Later · I'm stuck |
+| Morning plan | ▶ Start the first one · Change it |
+| Mid-day check-in | ▶ Start next · What now? |
+| Chat reply about one open task | ▶ Start 5 min · ✓ Done |
+| Meeting reminder, evening review | none |
+
+- **Action buttons run without the LLM** (Start, Done, Later): they change the task and write a short
+  event in the chat (`[▶ Started 5 min: …]`). **Text buttons** (I'm stuck, Change it, What now?) send
+  their label as your reply, and the assistant answers.
+- **Later** is decided by code: +2 hours before 18:00, otherwise the next morning.
+- **▶ Start** gives you N minutes on the next action and checks in when they're up (5 from a
+  notification or button, 25 from the focus card). The timer screen comes in Phase 2.
+- Task check-ins carry **▶ Start 5 min** and **✓ Done** as notification buttons, so the two most common
+  actions work without opening the app.
+- **Taps count as activity**, like a typed reply: a user who only taps is never "ignoring" the app.
+
+### Today's 3
+Every morning the plan proposes up to three focus tasks (the LLM picks them with `set_focus`; if it
+can't, code picks: overdue, then due today, then priority) and **saves them right away: silence accepts
+the plan.** "Change it" / "swap 2 for the dentist" in the chat changes them. The **focus card** at the
+top of the chat shows them with their next action and ▶ Start; done ones get a tick.
+
+Fewer messages: during the day, check-ins go only to Today's 3, tasks due within 48 hours, reminders
+you asked for and meetings. Undated tasks outside Today's 3 aren't nudged; they compete for tomorrow's
+focus instead. Mid-day check-ins are skipped when you were active in the last hour.
 
 ### The chat is the product
 - Every proactive contact (task check-in, meeting reminder, morning plan, mid-day check-in, evening
@@ -28,15 +76,17 @@ writes the messages and can adjust follow-ups through tools, within those limits
   typing dots while the LLM works, and a status line for each action it takes ("📝 Writing a new
   task: Dentist"). `POST /chat` streams these as Server-Sent Events; the reply itself arrives whole.
   The turn runs on the server even if you close the app, and the reply shows up on the next refresh.
-- ✓ Done / ⏰ Snooze buttons appear when a message is about exactly one task. Done / Snooze from a
-  notification or the task list also writes a short event into the chat (`[Marked done: …]`).
+- Reply buttons appear under the latest message (see [Reply buttons](#reply-buttons-chips)). An action
+  from a button, a notification or the task list also writes a short event into the chat
+  (`[Marked done: …]`).
 - **Daily reset:** the assistant only sees today's chat (from `DAY_RESET_TIME`, default 04:00). Long-term
   memory lives on the tasks: each task's **description** is its current state (rewritten by the
   assistant whenever you tell it something new, editable in the task drawer), and its **history**
   (`task_events`) records postponed / committed / progress / stuck / blocked / ignored / done.
 
 ### Each tick (every 5 minutes)
-1. Tasks whose `remind_at` has passed are due for contact.
+1. Tasks whose `remind_at` has passed are due for contact, if they may get check-ins at all (Today's 3,
+   due within 48 hours, reminders you asked for, meetings; see [Today's 3](#todays-3)).
 2. Guardrails, in code, before any LLM call ([`logic.contact_decision`](backend/app/logic.py)):
    - Shabbat / holidays and quiet hours are never overruled, whatever the priority (meetings included)
    - `MIN_GAP_MIN` between proactive messages (meetings exempt)
@@ -45,11 +95,13 @@ writes the messages and can adjust follow-ups through tools, within those limits
    - blocked tasks wait until their follow-up time
    - when several rules apply, the latest postponement wins
 3. Everything due in the same tick becomes **one** message and **one** push.
-4. The coach writes it with the LLM from a compact context (description, steps, history, linked
-   messages, today's chat). It may call `schedule_followup`; otherwise the next check-in follows the
-   priority-based nag interval. Meeting times always come from code.
+4. The coach writes it with the LLM from a compact context (next action, description, steps, history,
+   linked messages, today's chat), with the playbook code chose and the buttons the message gets. It
+   may call `schedule_followup`; otherwise the next check-in follows the priority-based nag interval.
+   Meeting times always come from code.
 5. **Fallback:** if the LLM errors, times out (`LLM_TIMEOUT_S`), returns nothing, hits a 429 or the
-   daily cap, the old template text is sent instead. A reminder is never lost because of the LLM.
+   daily cap, a template is sent instead, leading with the next action ("▶ Find last year's PDF —
+   Taxes"). A reminder is never lost because of the LLM.
 6. The push is as loud as its most pressing task (see [Pushover](#pushover-alerts-that-get-your-attention)):
    normal → urgent → a repeating alarm for important tasks you keep ignoring.
 
@@ -66,7 +118,8 @@ also gets a **level**, decided by code ([`logic.alert_level`](backend/app/logic.
 | **Urgent** | meeting reminders, reminders you asked for ("remind me at 5"), important/critical tasks, and any check-in after one was ignored | the urgent sound (default *Persistent*, long), highlighted, ignores the Pushover app's own quiet hours |
 | **Alarm** | an important or critical task ignored twice in a row (if check-ins would stop sooner, the last one) | **repeats every 2 minutes** until you acknowledge it, for up to an hour |
 
-- "Ignored" means no message from you in the chat since that check-in. Replying resets the ladder.
+- "Ignored" means no message and no tap from you in the chat since that check-in. Replying or tapping
+  a button resets the ladder.
 - An alarm stops by itself as soon as you **write in the chat or tap ✓ / ⏰ / cancel** on any task: you've
   seen it. It also never repeats into quiet hours or Shabbat: it ends before they start, and if there
   isn't time for even one repeat, it's sent as urgent instead.
@@ -108,14 +161,20 @@ When you reply, the agent gets the last check-in (if recent) and up to 3 candida
 context, marked as a *guess*. The model decides what your message is about and may ask one short
 question if it's ambiguous. The turn is linked to the tasks the model actually acted on.
 
-### Tools (9, flat parameters for a mid-size model)
-`add_task`, `list_tasks`, `update_task` (also description / unblock), `complete_task`, `cancel_task`,
-`schedule_followup`, `add_subtask`, `log_interaction`, `mark_blocked`.
+### Tools (10, flat parameters for a mid-size model)
+`add_task` (with the inferred `next_action` and `estimate_min`), `list_tasks`, `update_task` (also
+description / next action / unblock), `complete_task`, `cancel_task`, `schedule_followup`,
+`add_subtask`, `log_interaction`, `mark_blocked`, `set_focus` (Today's 3). Each context gets only what
+it needs: the morning plan gets `set_focus` and `list_tasks`, check-ins `schedule_followup`, chat all.
 
-### Prompts are files
-[`backend/app/prompts/`](backend/app/prompts/): `system.md` (chat), `checkin.md`, `daily_*.md`, and
-`coach.md` — the "how to interact with me" skill that every other prompt includes via `{coach}`.
-Edit or replace `coach.md` to change the assistant's style everywhere, no code changes.
+### Prompts are files: a short core plus playbooks
+[`backend/app/prompts/`](backend/app/prompts/): `core.md` (who the assistant is and the communication
+rules, in every prompt) and [`playbooks/`](backend/app/prompts/playbooks/) (`planning`, `stuck`,
+`avoiding`, `overwhelmed`, `reentry`, `celebrate`, `sunday`). Code picks at most two per call
+([`logic.select_playbooks`](backend/app/logic.py)): the morning gets `planning`, an avoided task
+`avoiding`, an "I'm stuck" tap or a stuck event today `stuck`, and so on; with no signal, the core only.
+Smaller prompts get better behaviour from cheaper models. `system.md` (chat), `checkin.md` and
+`daily_*.md` say what each message is for. Edit the files to change the style, no code changes.
 
 ## Security: only you can use it
 
@@ -135,7 +194,9 @@ Edit or replace `coach.md` to change the assistant's style everywhere, no code c
 ### 1. Supabase
 1. Create a project (free plan).
 2. **SQL Editor** → paste [`db/schema.sql`](db/schema.sql) → Run. (Existing project: run the files in
-   [`db/migrations/`](db/migrations/) in order instead; they are idempotent.)
+   [`db/migrations/`](db/migrations/) in order instead; they are idempotent. After `006`, give your
+   existing tasks their first steps once: Render → api service → Shell →
+   `python scripts/backfill_next_actions.py`.)
 3. **Authentication → Sign In / Providers**: keep Email enabled, **turn off "Allow new users to sign up"**.
 4. **Authentication → Users → Add user → Create new user** with your email (tick auto-confirm). Copy its **User UID** → `OWNER_USER_ID`.
 5. **Authentication → Emails → Magic Link** template: add `Your code: {{ .Token }}` so you can log in with a code inside the installed app.
@@ -191,7 +252,7 @@ with the default caps the coach uses at most a few dozen calls a day.
 
 ## Using it
 
-Type in the chat box, for example:
+Type, or tap a button. For example:
 - `Meeting with Dani tomorrow 14:00`
 - `לשלם ארנונה עד יום ראשון, חשוב`
 - `Call mom every Friday 12:00`
@@ -200,8 +261,9 @@ Type in the chat box, for example:
 - `Later, I'll do it at 5` → it remembers the commitment and checks in at 17:00
 - `Waiting for the landlord to answer` → marked blocked, it asks again later
 - `What's left for today?`
+- `Swap 2 for the dentist` → changes Today's 3
 
-**⚙** opens the settings (times, delays, limits, Shabbat, Pushover). The ☑ Tasks drawer lists today's and all open tasks (✓ / ⏰ on each row). Tap a task to see and edit
+**⚙** opens the settings (times, delays, limits, Shabbat, Pushover). The ☑ Tasks drawer lists today's and all open tasks (✓ / ⏰ on each row), each with its next action. Tap a task to see and edit
 its description, steps and history.
 
 ## Settings
@@ -265,21 +327,24 @@ backend/app/
   jewish_calendar.py  Shabbat / holiday quiet periods (hdate library, pure)
   config.py      settings: env-only secrets + the editable behaviour settings (SPECS)
   user_settings.py    behaviour settings saved from the app (app_settings table)
-  agent.py       chat agent: likely-topic candidates, linking turns to tasks
-  tools.py       the 9 tools, validation, text tool-call parsing
+  agent.py       chat agent: likely-topic candidates, playbooks, linking turns to tasks, reply buttons
+  tools.py       the 10 tools, validation, text tool-call parsing
   llm_loop.py    tool-calling loop (one retry, one text-call recovery)
   context.py     compact plain-text context for the LLM
-  logic.py       pure scheduling logic, guardrails and alert levels (tested)
+  logic.py       pure logic (tested): scheduling, guardrails, alert levels, reply buttons, stages,
+                 playbook choice, Today's 3 pick, Later
   tasks.py       task storage, events (interaction log)
   thread.py      the chat thread, task links, guardrail counts
-  actions.py     Done / Snooze / Cancel + chat events
+  actions.py     Done / Start / Later / Snooze / Cancel (no LLM) + chat events
   prompting.py   loads prompts/*.md
-  prompts/       system, coach (the skill), checkin, daily_morning/checkin/evening
+  prompts/       core + playbooks/, system, checkin, daily_morning/checkin/evening
   llm.py         OpenRouter client: fallback models, daily cap, timeout, 429 → fallback
   notify.py      web push + Pushover (levels, alarms, cancelling them)
   auth.py        owner-only login check, cron secret
   tokens.py      signed notification-button tokens
 backend/tests/   unit + end-to-end tests (in-memory store, scripted LLM)
+backend/scripts/ simulate_tick (a simulated morning), metrics (success measures),
+                 backfill_next_actions (one-off after migration 006), gen_secrets
 db/schema.sql    full schema;  db/migrations/  idempotent upgrades
 web/             static web app (installable), service worker for push
 render.yaml      Render Blueprint

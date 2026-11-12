@@ -3,7 +3,7 @@ Annoying Reminder API.
 
 Public:   GET  /health, GET /config/push
 Cron:     POST /tick                (X-Cron-Secret header)
-Buttons:  POST /actions             (signed token from the notification)
+Buttons:  POST /actions             (signed token from the notification: ▶ Start / ✓ Done)
 Owner:    everything else           (Supabase login + OWNER_USER_ID check), incl. GET/PATCH /settings
 
 Writing in the chat or acting on a task stops any repeating Pushover alarm (you've seen it).
@@ -31,7 +31,7 @@ from . import actions, agent, db, httpclient, notify, prompting, scheduler, task
 from .auth import require_cron, require_owner
 from .config import SPECS, get_settings
 from .llm import LLMLimitReached, LLMUnavailable
-from .logic import ALARM, NORMAL, URGENT
+from .logic import ALARM, NORMAL, URGENT, focus_day
 from .tokens import verify_action_token
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -93,8 +93,8 @@ async def tick(background: BackgroundTasks):
 
 class ActionIn(BaseModel):
     token: str
-    action: str = Field(pattern="^(done|snooze)$")
-    minutes: int = Field(default=60, ge=5, le=24 * 60)
+    action: str = Field(pattern="^(done|start|snooze)$")   # snooze: notifications sent before ▶ Start existed
+    minutes: int | None = Field(default=None, ge=5, le=24 * 60)
 
 
 @app.post("/actions")
@@ -221,6 +221,17 @@ def tasks_overview(days: int = 7):
     }
 
 
+@app.get("/focus", dependencies=[Depends(require_owner)])
+def focus():
+    """Today's 3 for the focus card: each with its next action, and which are done (display only)."""
+    s = get_settings()
+    day = focus_day(tasks.now_utc().astimezone(s.tz), s.day_reset_time)
+    rows, done = tasks.focus_today(day)
+    return {"date": day.isoformat(),
+            "tasks": [{**tasks.to_public(t), "done": t["id"] in done} for t in rows],
+            "doneToday": len(done)}
+
+
 @app.get("/tasks/{task_id}", dependencies=[Depends(require_owner)])
 def get_task(task_id: int):
     task = tasks.get(task_id)
@@ -249,8 +260,8 @@ def patch_task(task_id: int, body: TaskPatch):
 
 
 class TaskAction(BaseModel):
-    action: str = Field(pattern="^(done|snooze|cancel)$")
-    minutes: int = Field(default=60, ge=5, le=7 * 24 * 60)
+    action: str = Field(pattern="^(done|snooze|cancel|start|later)$")
+    minutes: int | None = Field(default=None, ge=5, le=7 * 24 * 60)
 
 
 @app.post("/tasks/{task_id}/action", dependencies=[Depends(require_owner)])

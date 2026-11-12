@@ -52,6 +52,14 @@ def test_measures_from_rows():
     assert any("Nudge → action time: median 30 min" in line for line in r.lines())
 
 
+def test_focus_source_is_decided_per_day():
+    tasks = [task(1, focus_date=date(2026, 11, 9), status="done", completed_at=at(9, 15)),
+             task(2, due_at=at(8, 9), status="done", completed_at=at(8, 10))]
+    r = metrics.compute(messages=[], events=[], tasks=tasks, start=date(2026, 11, 8), end=date(2026, 11, 10), tz=TZ)
+    assert r.focus_days == [(date(2026, 11, 8), 1, 1), (date(2026, 11, 9), 1, 1)]
+    assert r.focus_source == "Today's 3 where set, else due today"
+
+
 def test_focus_date_is_used_once_it_exists():
     tasks = [task(1, focus_date=date(2026, 11, 8), status="done", completed_at=at(8, 15)),
              task(2, focus_date=date(2026, 11, 8)), task(3, focus_date=date(2026, 11, 8), status="done",

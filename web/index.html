@@ -59,10 +59,15 @@
       </div>
     </header>
 
-    <details id="plan" class="plan" hidden>
-      <summary><span class="plan-title">☀️ Today's plan</span> <span id="plan-preview" class="plan-preview" dir="auto"></span></summary>
-      <div id="plan-body" class="plan-body" dir="auto"></div>
-    </details>
+    <!-- Today's 3: display only, nothing to configure. Set every morning; silence accepts it. -->
+    <section id="focus" class="focus" hidden aria-label="Today's 3">
+      <div class="focus-head">
+        <span class="focus-title">🎯 Today's 3</span>
+        <span id="focus-done" class="focus-done"></span>
+        <button id="focus-what-now" type="button" class="small ghost">What now?</button>
+      </div>
+      <ol id="focus-list" class="focus-list"></ol>
+    </section>
 
     <main id="chat" class="chat">
       <button id="load-earlier" class="small ghost load-earlier" hidden>Load earlier messages</button>
@@ -103,6 +108,7 @@
     <div id="task-detail" class="drawer-body detail" hidden>
       <h3 id="detail-title" dir="auto"></h3>
       <div id="detail-meta" class="muted"></div>
+      <div id="detail-step" class="detail-step" dir="auto" hidden></div>
       <div id="detail-blocked" class="blocked" dir="auto" hidden></div>
       <label for="detail-desc" class="field-label">Description <span class="muted">— what the assistant knows about this task</span></label>
       <textarea id="detail-desc" dir="auto" rows="5" maxlength="800"></textarea>

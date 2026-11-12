@@ -51,12 +51,14 @@ def pushover_configured() -> bool:
 
 
 def send_push(title: str, body: str, *, task_id: int | None = None, message_id: int | None = None,
-              priority: int = 1, url: str | None = None, force: bool = False) -> int:
+              priority: int = 1, url: str | None = None, force: bool = False,
+              actions: list[dict[str, str]] | None = None) -> int:
     """
     Send to every subscribed browser. Returns how many deliveries succeeded (0 when browser push is off,
     unless force: the fallback when Pushover isn't set up).
     message_id: the chat message this notification shows; tapping it opens the chat there.
-    task_id: adds the ✓ Done / ⏰ Snooze buttons (with a signed token).
+    task_id + actions: notification buttons ([{action, title}], e.g. ▶ Start 5 min and ✓ Done) that work
+    without opening the app (a signed token for that task). Chrome shows at most Notification.maxActions.
     """
     s = get_settings()
     if not s.browser_push_available or not (force or s.browser_push):
@@ -68,7 +70,9 @@ def send_push(title: str, body: str, *, task_id: int | None = None, message_id: 
         payload["messageId"] = message_id
     if task_id is not None:
         payload["taskId"] = task_id
-        payload["token"] = make_action_token(task_id, s.action_secret)
+        if actions:
+            payload["actions"] = actions
+            payload["token"] = make_action_token(task_id, s.action_secret)
 
     sent = 0
     for sub in db.fetch_all("select id, endpoint, p256dh, auth from push_subscriptions"):
@@ -167,7 +171,8 @@ def cancel_alarms() -> None:
 
 
 def notify(title: str, body: str, *, level: int = NORMAL, expire_s: int = 3600,
-           task_id: int | None = None, message_id: int | None = None, priority: int = 1) -> None:
+           task_id: int | None = None, message_id: int | None = None, priority: int = 1,
+           actions: list[dict[str, str]] | None = None) -> None:
     """Send one message to the user's devices, following the Pushover mode (see the top of this file)."""
     s = get_settings()
     mode = pushover_mode()
@@ -176,7 +181,8 @@ def notify(title: str, body: str, *, level: int = NORMAL, expire_s: int = 3600,
     web_priority = max(priority, 2 if level >= URGENT else 1)
 
     def browser(force: bool = False) -> int:
-        return send_push(title, body, task_id=task_id, message_id=message_id, priority=web_priority, force=force)
+        return send_push(title, body, task_id=task_id, message_id=message_id, priority=web_priority, force=force,
+                         actions=actions)
 
     def pushover() -> bool:
         return send_pushover(title, body, level=level, url=link, expire_s=expire_s)

@@ -123,12 +123,12 @@ def compute(*, messages: list[dict[str, Any]], events: list[dict[str, Any]], tas
         if best is not None:
             minutes.append((best - m["created_at"]).total_seconds() / 60)
 
-    # 2. focus tasks finished, per day
-    has_focus = any(t.get("focus_date") for t in tasks)
+    # 2. focus tasks finished, per day: Today's 3 on days that had one (Phase 1 on), else "due today"
+    focus_dates = {t.get("focus_date") for t in tasks if t.get("focus_date")}
     focus_days = []
     d = start
     while d < end:
-        if has_focus:
+        if d in focus_dates:
             planned = [t for t in tasks if t.get("focus_date") == d]
         else:
             planned = [t for t in tasks if t["kind"] == "task" and t.get("due_at") is not None
@@ -173,7 +173,10 @@ def compute(*, messages: list[dict[str, Any]], events: list[dict[str, Any]], tas
 
     return Report(start=start, end=end, nudges=len(nudges), nudges_acted_on=len(minutes),
                   action_minutes_median=statistics.median(minutes) if minutes else None,
-                  focus_days=focus_days, focus_source="Today's 3" if has_focus else "due today",
+                  focus_days=focus_days,
+                  focus_source=("Today's 3" if all(d in focus_dates for d, _, p in focus_days if p) else
+                                "due today" if not focus_dates & {d for d, _, _ in focus_days} else
+                                "Today's 3 where set, else due today"),
                   ignored_per_week=ignored, postponed_tasks_per_week=postponed, overdue_per_week=overdue,
                   taps=taps, typed=typed, ratings=ratings)
 

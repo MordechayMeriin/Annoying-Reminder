@@ -355,3 +355,260 @@ def clip(text: str, limit: int) -> str:
         if space >= (limit * 2) // 3:
             cut = cut[:space]
     return cut.rstrip() + "…"
+
+
+# ================================================================ ADHD assistant (Phase 1)
+#
+# "Code decides WHEN, WHICH playbook and WHICH buttons. The LLM writes the words."
+# Decisions below are constants, not settings, to keep ⚙ from growing (see the brief).
+
+FOCUS_MAX = 3                   # Today's 3
+NEAR_DEADLINE_H = 48            # tasks due this soon are still checked in on outside Today's 3
+LATER_CUTOFF = time(18)         # "Later": +2 h before 18:00, otherwise the next morning
+LATER_HOURS = 2
+AVOIDED_MIN_EVENTS = 3          # postponed or ignored events in 7 days → the task is avoided
+ACTIVE_SKIPS_CHECKIN_MIN = 60   # a mid-day check-in is skipped when the user was active this recently
+START_MIN_NOTIFICATION = 5      # ▶ Start from a notification / chip
+START_MIN_APP = 25              # ▶ Start from the focus card
+OVERWHELMED_FROM = time(15)
+
+
+# ---------------------------------------------------------------- reply buttons ("chips")
+
+@dataclass(frozen=True)
+class Chip:
+    id: str
+    action: str | None = None   # action chips run without the LLM (actions.apply); None = a text chip
+    minutes: int | None = None  # ▶ Start: session length
+
+    def to_json(self, lang: str, task_id: int | None = None) -> dict[str, Any]:
+        out: dict[str, Any] = {"id": self.id, "label": chip_label(self.id, lang)}
+        if self.action:
+            out["action"] = self.action
+            if self.minutes:
+                out["minutes"] = self.minutes
+            if task_id is not None:
+                out["task_id"] = task_id
+        return out
+
+
+# Every chip in both languages. Text chips send their label as a user message.
+CHIP_LABELS: dict[str, tuple[str, str]] = {
+    "start5": ("▶ Start 5 min", "▶ להתחיל 5 דק׳"),
+    "done": ("✓ Done", "✓ בוצע"),
+    "later": ("Later", "אחר כך"),
+    "stuck": ("I'm stuck", "נתקעתי"),
+    "start_first": ("▶ Start the first one", "▶ להתחיל בראשונה"),
+    "change": ("Change it", "לשנות"),
+    "another": ("▶ Another round", "▶ עוד סבב"),
+    "stop": ("Stop", "לעצור"),
+    "too_big": ("Too big", "גדול מדי"),
+    "unclear": ("Unclear", "לא ברור"),
+    "boring": ("Boring", "משעמם"),
+    "not_now": ("Not now", "לא עכשיו"),
+    "pick_one": ("Pick one for me", "תבחר לי משהו"),
+    "move_overdue": ("Move overdue to next week", "להעביר את מה שבאיחור לשבוע הבא"),
+    "drop": ("Drop them", "לוותר עליהן"),
+    "keep": ("Keep", "להשאיר"),
+    "start_next": ("▶ Start next", "▶ להתחיל את הבאה"),
+    "what_now": ("What now?", "מה עכשיו?"),
+    "start": ("▶ Start", "▶ להתחיל"),
+    "low_energy": ("Low energy", "אין לי כוח"),
+    "something_else": ("Something else", "משהו אחר"),
+}
+
+_START5 = Chip("start5", "start", START_MIN_NOTIFICATION)
+_DONE = Chip("done", "done")
+
+# Message kind → its chips. "What now?" is a text chip until the code picker (F4, Phase 2) exists.
+CHIPS_BY_KIND: dict[str, tuple[Chip, ...]] = {
+    "checkin": (_START5, _DONE, Chip("later", "later"), Chip("stuck")),
+    "morning": (Chip("start_first", "start", START_MIN_NOTIFICATION), Chip("change")),
+    "session_end": (_DONE, Chip("another", "another"), Chip("stop", "stop")),
+    "avoided": (Chip("too_big"), Chip("unclear"), Chip("boring"), Chip("not_now", "not_now")),
+    "reentry": (Chip("pick_one"), Chip("move_overdue", "move_overdue")),
+    "sunday": (Chip("drop", "drop"), Chip("keep", "keep")),
+    "meeting": (),
+    "midday": (Chip("start_next", "start", START_MIN_NOTIFICATION), Chip("what_now")),
+    "what_now": (Chip("start", "start", START_MIN_NOTIFICATION), Chip("low_energy"), Chip("something_else")),
+    "chat_task": (_START5, _DONE),
+    "evening": (),
+}
+
+# Chips that need a task to act on: without one they're left out.
+_NEEDS_TASK = {"start", "done", "later", "another", "stop", "not_now"}
+
+_HEBREW = re.compile(r"[֐-׿]")
+
+
+def chip_lang(latest_user_text: str | None, fallback_text: str | None = None) -> str:
+    """'he' when the user's latest chat message (or, failing that, e.g. the task title) has Hebrew letters."""
+    text = latest_user_text if latest_user_text and latest_user_text.strip() else fallback_text
+    return "he" if text and _HEBREW.search(text) else "en"
+
+
+def chip_label(chip_id: str, lang: str) -> str:
+    en, he = CHIP_LABELS[chip_id]
+    return he if lang == "he" else en
+
+
+def chips_for(kind: str, stage: str | None, lang: str) -> list[Chip]:
+    """
+    The reply buttons for a message, from its kind and the stage of the task it's about. No LLM.
+    A done (or cancelled) task gets none: there's nothing left to start.
+    """
+    if stage in ("done", "cancelled"):
+        return []
+    return list(CHIPS_BY_KIND.get(kind, ()))
+
+
+def chips_json(chips: Iterable[Chip], lang: str, task_id: int | None) -> list[dict[str, Any]]:
+    """Chips as stored on the message: action chips are bound to their task (dropped if there is none)."""
+    return [c.to_json(lang, task_id) for c in chips if task_id is not None or c.action not in _NEEDS_TASK]
+
+
+def chip_id_for_text(text: str) -> str | None:
+    """Which text chip a user message is (a tap on it sends its label), in either language."""
+    t = (text or "").strip()
+    for chip_id, labels in CHIP_LABELS.items():
+        if t in labels:
+            return chip_id
+    return None
+
+
+def later_time(now_local: datetime, morning: time) -> datetime:
+    """'Later' is decided by code: +2 hours before 18:00, otherwise the next morning plan time."""
+    if now_local.time() < LATER_CUTOFF:
+        return now_local + timedelta(hours=LATER_HOURS)
+    return next_time_at(now_local, morning)
+
+
+# ---------------------------------------------------------------- stages
+
+def focus_day(now_local: datetime, reset: time) -> date:
+    """The day Today's 3 belongs to: the chat day (it starts at the day-reset time, not at midnight)."""
+    return day_start(now_local, reset).date()
+
+
+def task_stage(task: dict[str, Any], counts_7d: dict[str, int] | None, today: date) -> str:
+    """
+    captured → clarified (has a next action) → planned (in Today's 3) → done; avoided after
+    3+ postponed / ignored events in 7 days. (in_session and paused come with sessions, Phase 2.)
+    """
+    if task.get("status") in ("done", "cancelled"):
+        return task["status"]
+    counts = counts_7d or {}
+    if counts.get("postponed", 0) + counts.get("ignored", 0) >= AVOIDED_MIN_EVENTS:
+        return "avoided"
+    if task.get("focus_date") == today:
+        return "planned"
+    if task.get("next_action"):
+        return "clarified"
+    return "captured"
+
+
+# ---------------------------------------------------------------- playbooks
+
+PLAYBOOKS = ("planning", "stuck", "avoiding", "overwhelmed", "reentry", "celebrate", "sunday")
+
+
+def select_playbooks(job: str | None = None, stages: Iterable[str] = (),
+                     signals: Iterable[str] = ()) -> list[str]:
+    """
+    At most two situational playbooks for one LLM call; none = the core prompt only.
+      job:     morning → planning (Sunday morning, signal "sunday": + sunday); reentry → reentry
+      stages:  of the tasks the message is (probably) about; avoided → avoiding
+      signals: stuck (a stuck event today / the I'm stuck chip), avoid_reason (Too big / Unclear /
+               Boring chip), overwhelmed, completed (a task was just marked done)
+    """
+    sig = set(signals)
+    order: list[str] = []
+    if job == "reentry":
+        order.append("reentry")
+    elif job == "morning":
+        order.append("planning")
+        if "sunday" in sig:
+            order.append("sunday")
+    if "avoid_reason" in sig or "avoided" in set(stages):
+        order.append("avoiding")
+    if "stuck" in sig:
+        order.append("stuck")
+    if "overwhelmed" in sig:
+        order.append("overwhelmed")
+    if "completed" in sig:
+        order.append("celebrate")
+    return list(dict.fromkeys(order))[:2]
+
+
+_AVOID_CHIPS = {"too_big", "unclear", "boring"}
+
+
+def chat_signals(text: str, since_last_reply: Iterable[dict[str, Any]], stuck_today: bool,
+                 now_local: datetime, focus_open: int) -> set[str]:
+    """
+    Playbook signals for a chat turn, from plain facts:
+      text            the user's message (a chip tap sends the chip's label)
+      since_last_reply messages after the assistant's last one (events from taps)
+      stuck_today     a likely task got a stuck event today
+      focus_open      Today's 3 still open (3 = none done yet)
+    """
+    out: set[str] = set()
+    chip = chip_id_for_text(text)
+    if stuck_today or chip == "stuck":
+        out.add("stuck")
+    if chip in _AVOID_CHIPS:
+        out.add("avoid_reason")
+    if now_local.time() >= OVERWHELMED_FROM and focus_open >= FOCUS_MAX:
+        out.add("overwhelmed")
+    if any(m.get("kind") == "event" and m.get("content", "").startswith("[Marked done") for m in since_last_reply):
+        out.add("completed")
+    return out
+
+
+# ---------------------------------------------------------------- Today's 3 and who gets check-ins
+
+def pick_focus(tasks: Iterable[dict[str, Any]], now_local: datetime, limit: int = FOCUS_MAX) -> list[int]:
+    """
+    The code's pick for Today's 3 (when the LLM can't): overdue, then due today, then by priority,
+    then oldest. Only open top-level tasks that aren't blocked; never meetings or fences.
+    now_local: local time (it decides where "today" ends).
+    """
+    now = now_local
+    midnight = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    d = (midnight + timedelta(days=1)).date()
+    end_of_day = datetime(d.year, d.month, d.day, tzinfo=now_local.tzinfo)
+    far = datetime.max.replace(tzinfo=now_local.tzinfo)
+
+    def bucket(t: dict[str, Any]) -> int:
+        due = t.get("due_at")
+        if due is not None and due < now:
+            return 0
+        if due is not None and due < end_of_day:
+            return 1
+        return 2
+
+    rows = [t for t in tasks
+            if t.get("status", "open") == "open" and t.get("kind", "task") == "task" and not t.get("parent_id")
+            and not (t.get("blocked_until") and t["blocked_until"] > now)]
+    rows.sort(key=lambda t: (bucket(t), -t.get("priority", 1), t.get("due_at") or far,
+                             t.get("created_at") or far, t["id"]))
+    return [t["id"] for t in rows[:limit]]
+
+
+def may_check_in(task: dict[str, Any], now: datetime, today: date) -> bool:
+    """
+    Check-ins during the day only for: meetings and fences, reminders the user asked for, Today's 3,
+    and tasks due within 48 hours (overdue included). Undated tasks outside Today's 3 stay quiet and
+    compete for tomorrow's focus instead. (tasks.due_for_contact applies the same rule in SQL.)
+    """
+    if task["kind"] in ("meeting", "fence") or task.get("remind_requested"):
+        return True
+    if task.get("focus_date") == today:
+        return True
+    due = task.get("due_at")
+    return due is not None and due < now + timedelta(hours=NEAR_DEADLINE_H)
+
+
+def user_active_recently(last_activity: datetime | None, now: datetime,
+                         minutes: int = ACTIVE_SKIPS_CHECKIN_MIN) -> bool:
+    return last_activity is not None and now - last_activity < timedelta(minutes=minutes)

@@ -3,11 +3,13 @@ chat with the user. It is also shown as a phone notification.
 
 Now: {now} ({weekday}).
 
-{coach}
+{core}
+
+{playbooks}
 
 # The evening review
-- Max 80 words: what got done today (acknowledge it briefly), what's still open and will carry over
-  to tomorrow, and anything that keeps getting pushed off (high postponed / ignored counts).
-- If something keeps slipping, suggest one small change for tomorrow (a time, a first step, splitting it).
+- Max 80 words. Lead with what got done today (acknowledge it briefly, no streaks), then what
+  carries over to tomorrow in one line. No counting failures back at them.
+- If something keeps slipping, suggest one small change for tomorrow (a smaller first step, splitting it).
 - Language: the user's latest message today, otherwise the task titles.
 - Output only the message.

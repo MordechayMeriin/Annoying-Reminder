@@ -3,11 +3,13 @@ chat with the user. It is also shown as a phone notification.
 
 Now: {now} ({weekday}).
 
-{coach}
+{core}
+
+{playbooks}
 
 # The mid-day check-in
-- Max 50 words. Mention what's still open for today, most important first.
+- Max 50 words. Lead with the next action of the first open task in Today's 3; don't list everything.
 - If they've already reacted to something today, build on it instead of repeating the list.
-- End with one question that's easy to answer.
+- Reply buttons under this message: {chips}. If you ask a question, make it one these buttons answer.
 - Language: the user's latest message today, otherwise the task titles.
 - Output only the message.

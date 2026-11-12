@@ -4,7 +4,8 @@ Compact, plain-text context for the LLM (easier for a mid-size model than JSON d
 The format_* functions are pure; task_context() fetches what they need.
 """
 
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import date, datetime
 from typing import Any
 
 from . import tasks, thread
@@ -23,10 +24,12 @@ def fmt_when(dt: datetime | None, now_local: datetime) -> str:
 
 def format_task(task: dict[str, Any], now_local: datetime, *, subtasks: list[dict] = (),
                 events: list[dict] = (), counts: dict[str, int] | None = None,
-                contacts_today: int = 0) -> str:
+                contacts_today: int = 0, today: date | None = None) -> str:
     head = [f'#{task["id"]} "{task["title"]}"']
     if task["kind"] == "meeting":
         head.append("meeting")
+    if today is not None and task.get("focus_date") == today:
+        head.append(f"in Today's 3 (#{task.get('focus_rank') or '?'})")
     if PRIORITY.get(task["priority"]):
         head.append(PRIORITY[task["priority"]])
     if task.get("due_at"):
@@ -39,6 +42,11 @@ def format_task(task: dict[str, Any], now_local: datetime, *, subtasks: list[dic
     if contacts_today:
         head.append(f"checked in {contacts_today}x today")
     lines = [" · ".join(head)]
+    if task.get("next_action"):
+        est = f" (whole task ~{task['estimate_min']} min)" if task.get("estimate_min") else ""
+        lines.append(f"  Next action: {task['next_action']}{est}")
+    elif task["kind"] == "task":
+        lines.append("  Next action: (none yet: infer one and save it with update_task)")
     if task.get("description"):
         lines.append(f"  Description: {task['description']}")
     if task.get("blocked_reason"):
@@ -76,23 +84,41 @@ def format_open_items(items: list[dict[str, Any]], now_local: datetime, exclude:
         return "(nothing else)"
     return "\n".join(
         f'- #{t["id"]} {t["title"]}' + (f" ({fmt_when(t['due_at'], now_local)})" if t.get("due_at") else "")
+        + (f" → {t['next_action']}" if t.get("next_action") else "")
         for t in rows
     )
 
 
+@dataclass
+class Facts:
+    """Subtasks, recent events and 7-day event counts per task (three queries in all)."""
+    subtasks: dict[int, list[dict]] = field(default_factory=dict)
+    events: dict[int, list[dict]] = field(default_factory=dict)
+    counts: dict[int, dict[str, int]] = field(default_factory=dict)
+
+    def stuck_since(self, task_ids: list[int], start: datetime) -> bool:
+        return any(e["kind"] == "stuck" and e["created_at"] >= start
+                   for i in task_ids for e in self.events.get(i, []))
+
+
+def load_facts(items: list[dict[str, Any]]) -> Facts:
+    if not items:
+        return Facts()
+    ids = [t["id"] for t in items]
+    return Facts(tasks.subtasks_many(ids), tasks.recent_events_many(ids, 8), tasks.event_counts_many(ids, 7))
+
+
 def task_contexts(items: list[dict[str, Any]], now_local: datetime,
-                  contacts_today: dict[int, int] | None = None) -> list[str]:
-    """Each task with its subtasks, recent history and 7-day counts (three queries in all)."""
+                  contacts_today: dict[int, int] | None = None, facts: Facts | None = None,
+                  today: date | None = None) -> list[str]:
+    """Each task with its subtasks, recent history and 7-day counts (loads them unless `facts` is given)."""
     if not items:
         return []
-    ids = [t["id"] for t in items]
-    subs = tasks.subtasks_many(ids)
-    events = tasks.recent_events_many(ids, 8)
-    counts = tasks.event_counts_many(ids, 7)
+    f = facts or load_facts(items)
     contacts_today = contacts_today or {}
     return [
-        format_task(t, now_local, subtasks=subs.get(t["id"], []), events=events.get(t["id"], []),
-                    counts=counts.get(t["id"], {}), contacts_today=contacts_today.get(t["id"], 0))
+        format_task(t, now_local, subtasks=f.subtasks.get(t["id"], []), events=f.events.get(t["id"], []),
+                    counts=f.counts.get(t["id"], {}), contacts_today=contacts_today.get(t["id"], 0), today=today)
         for t in items
     ]
 

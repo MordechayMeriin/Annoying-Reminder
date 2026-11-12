@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 from app import llm, llm_loop, coach, notify, tasks, thread
 from app.config import get_settings
-from app.logic import ContactState, next_occurrence
+from app.logic import FOCUS_MAX, ContactState, focus_day, may_check_in, next_occurrence
 
 
 class FakeStore:
@@ -27,12 +27,20 @@ class FakeStore:
 
     # ------------------------------------------------------------ setup helpers
 
-    def add_task(self, title: str, **kw: Any) -> dict[str, Any]:
+    def focus_day(self):
+        s = get_settings()
+        return focus_day(self.now.astimezone(s.tz), s.day_reset_time)
+
+    def add_task(self, title: str, *, focus: bool = False, **kw: Any) -> dict[str, Any]:
+        """focus=True: in Today's 3 (undated tasks outside it get no check-ins)."""
+        if focus:
+            kw.setdefault("focus_date", self.focus_day())
         self._ids["task"] += 1
         t = {"id": self._ids["task"], "parent_id": None, "title": title, "description": None, "kind": "task",
              "priority": 1, "status": "open", "due_at": None, "remind_at": None, "remind_requested": False,
              "recurrence": None, "nag_count": 0, "escalated": False, "blocked_reason": None,
-             "blocked_until": None, "last_notified_at": None, "created_at": self.now, "completed_at": None}
+             "blocked_until": None, "last_notified_at": None, "created_at": self.now, "completed_at": None,
+             "next_action": None, "estimate_min": None, "focus_date": None, "focus_rank": None}
         t.update(kw)
         self.tasks[t["id"]] = t
         return dict(t)
@@ -47,10 +55,10 @@ class FakeStore:
                      "subtasks_many", "recent_events_many", "event_counts_many",
                      "create", "update", "complete", "set_followup", "snooze", "block", "unblock", "cancel",
                      "close_finished_meetings", "due_for_contact", "meetings_between", "defer", "lease", "finish_contact",
-                     "list_tasks"):
+                     "list_tasks", "set_focus", "focus_today"):
             setattr_(tasks, name, self._counted("tasks." + name, getattr(self, "t_" + name), name != "now_utc"))
         for name in ("add", "add_event", "link", "since", "for_tasks", "last_proactive", "recent_task_ids",
-                     "user_replied_since", "last_user_reply_at", "contact_state", "page", "by_ids"):
+                     "user_replied_since", "last_user_reply_at", "last_user_text", "contact_state", "page", "by_ids"):
             setattr_(thread, name, self._counted("thread." + name, getattr(self, "m_" + name)))
         setattr_(notify, "send_push", self.send_push)
         setattr_(notify, "send_pushover", self.send_pushover)
@@ -69,8 +77,10 @@ class FakeStore:
 
     # ------------------------------------------------------------ notify
 
-    def send_push(self, title, body, *, task_id=None, message_id=None, priority=1, url=None, force=False) -> int:
+    def send_push(self, title, body, *, task_id=None, message_id=None, priority=1, url=None, force=False,
+                  actions=None) -> int:
         self.pushes.append({"title": title, "body": notify.push_body(body), "task_id": task_id,
+                            "actions": list(actions or []) if task_id is not None else [],
                             "message_id": message_id, "priority": priority,
                             "url": url or (f"/?m={message_id}" if message_id else "/")})
         return 1
@@ -119,12 +129,13 @@ class FakeStore:
         return {i: self.t_event_counts(i, days) for i in ids}
 
     def t_create(self, title, *, kind="task", priority=1, description=None, due_at=None, remind_at=None,
-                 recurrence=None, parent_id=None):
+                 recurrence=None, parent_id=None, next_action=None, estimate_min=None):
         if remind_at is None and due_at is not None:
             remind_at = due_at - timedelta(minutes=get_settings().meeting_lead_min if kind == "meeting" else 0)
         return self.add_task(title, kind=kind, priority=priority, description=description, due_at=due_at,
                              remind_at=remind_at, remind_requested=remind_at is not None,
-                             recurrence=recurrence, parent_id=parent_id)
+                             recurrence=recurrence, parent_id=parent_id, next_action=next_action,
+                             estimate_min=estimate_min)
 
     def t_update(self, task_id, **fields):
         t = self.tasks.get(task_id)
@@ -186,9 +197,31 @@ class FakeStore:
                     and t["due_at"] and t["due_at"] < self.now - timedelta(hours=2)):
                 t.update(status="done", completed_at=self.now, remind_at=None)
 
-    def t_due_for_contact(self, limit=20):
-        due = [t for t in self.tasks.values() if t["status"] == "open" and t["remind_at"] and t["remind_at"] <= self.now]
+    def t_due_for_contact(self, today, limit=20):
+        due = [t for t in self.tasks.values() if t["status"] == "open" and t["remind_at"] and t["remind_at"] <= self.now
+               and may_check_in(t, self.now, today)]
         return [dict(t) for t in sorted(due, key=lambda t: t["remind_at"])][:limit]
+
+    def t_set_focus(self, task_ids, today):
+        ids = list(dict.fromkeys(task_ids))[:FOCUS_MAX]
+        for t in self.tasks.values():
+            if t["focus_date"] == today and t["id"] not in ids:
+                t.update(focus_date=None, focus_rank=None)
+        out = []
+        for rank, i in enumerate(ids, 1):
+            t = self.tasks.get(i)
+            if t and t["status"] == "open" and t["kind"] == "task":
+                t.update(focus_date=today, focus_rank=rank)
+                out.append(dict(t))
+        return out
+
+    def t_focus_today(self, today):
+        rows = sorted((t for t in self.tasks.values() if t["focus_date"] == today and t["status"] != "cancelled"),
+                      key=lambda t: (t["focus_rank"] or 99, t["id"]))
+        start = datetime.combine(today, datetime.min.time(), get_settings().tz)
+        done = {t["id"] for t in rows if t["status"] == "done" or any(
+            e["task_id"] == t["id"] and e["kind"] == "done" and e["created_at"] >= start for e in self.events)}
+        return [dict(t) for t in rows], done
 
     def t_meetings_between(self, start, end):
         rows = [t for t in self.tasks.values() if t["status"] == "open" and t["kind"] == "meeting"
@@ -235,11 +268,11 @@ class FakeStore:
 
     # ------------------------------------------------------------ thread.*
 
-    def m_add(self, role, content, kind="chat", task_ids=()):
+    def m_add(self, role, content, kind="chat", task_ids=(), chips=None):
         self._ids["msg"] += 1
         ids = list(dict.fromkeys(task_ids))
         m = {"id": self._ids["msg"], "role": role, "content": content, "kind": kind,
-             "task_id": ids[0] if ids else None, "task_ids": ids, "created_at": self.now}
+             "task_id": ids[0] if ids else None, "task_ids": ids, "chips": list(chips or []), "created_at": self.now}
         self.messages.append(m)
         return dict(m)
 
@@ -271,11 +304,16 @@ class FakeStore:
         return out
 
     def m_user_replied_since(self, t):
-        return any(m["role"] == "user" and m["kind"] == "chat" and m["created_at"] > t for m in self.messages)
+        return any(m["role"] == "user" and m["kind"] in thread.ACTIVITY_KINDS and m["created_at"] > t
+                   for m in self.messages)
 
     def m_last_user_reply_at(self):
-        rows = [m for m in self.messages if m["role"] == "user" and m["kind"] == "chat"]
+        rows = [m for m in self.messages if m["role"] == "user" and m["kind"] in thread.ACTIVITY_KINDS]
         return rows[-1]["created_at"] if rows else None
+
+    def m_last_user_text(self):
+        rows = [m for m in self.messages if m["role"] == "user" and m["kind"] == "chat"]
+        return rows[-1]["content"] if rows else None
 
     def m_contact_state(self, day_start):
         pro = [m for m in self.messages if m["kind"] in thread.PROACTIVE_KINDS]

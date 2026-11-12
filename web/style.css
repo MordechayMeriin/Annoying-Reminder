@@ -71,17 +71,36 @@ header {
   background: var(--accent); color: #111; font-size: .75rem; line-height: 18px; text-align: center;
 }
 
-/* Today's plan, pinned under the header */
-.plan {
-  position: sticky; top: 57px; z-index: 4; margin: 0; padding: 10px 16px;
+/* Today's 3, pinned under the header (display only; tap the head to fold it) */
+.focus {
+  position: sticky; top: 57px; z-index: 4; margin: 0; padding: 8px 16px 10px;
   background: var(--card); border-bottom: 1px solid var(--line); border-left: 4px solid var(--accent);
 }
-.plan summary { cursor: pointer; list-style: none; display: flex; gap: 8px; align-items: baseline; min-width: 0; }
-.plan summary::-webkit-details-marker { display: none; }
-.plan .plan-title { font-weight: 700; white-space: nowrap; }
-.plan .plan-preview { color: var(--muted); font-size: .9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.plan[open] .plan-preview { display: none; }
-.plan .plan-body { white-space: pre-wrap; margin-top: 8px; max-height: 50vh; overflow-y: auto; }
+.focus-head { display: flex; align-items: center; gap: 8px; min-height: 36px; cursor: pointer; }
+.focus-title { font-weight: 700; white-space: nowrap; }
+.focus-done { color: var(--muted); font-size: .85rem; flex: 1; }
+.focus-list { list-style: none; margin: 4px 0 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
+.focus.folded .focus-list { display: none; }
+.focus-row { display: flex; align-items: center; gap: 10px; min-height: 44px; min-width: 0; }
+.focus-row .num { color: var(--muted); font-weight: 700; width: 1.2em; text-align: center; flex: none; }
+.focus-row .text {
+  flex: 1; min-width: 0; background: none; color: inherit; padding: 0; text-align: start; font-weight: normal;
+  border-radius: 0;
+}
+.focus-row .row-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.focus-row .row-step { color: var(--muted); font-size: .85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.focus-row .start { min-width: 44px; min-height: 44px; padding: 6px 12px; flex: none; }
+.focus-row.done .row-title { text-decoration: line-through; color: var(--muted); }
+.focus-row.done .num { color: var(--ok); }
+
+/* Reply buttons under the latest assistant message */
+.chips { display: flex; flex-wrap: wrap; gap: 8px; align-self: flex-start; max-width: 100%; margin-top: -2px; }
+.chip {
+  background: transparent; color: var(--accent); border: 1px solid var(--accent); border-radius: 18px;
+  padding: 8px 14px; min-height: 40px; font-size: .9rem; font-weight: 600;
+}
+.chip.primary { background: var(--accent); color: #111; }
+.chip:disabled { opacity: .45; }
 
 /* Chat */
 .chat { flex: 1; }
@@ -178,6 +197,8 @@ header {
 }
 .task .title { font-weight: 600; overflow-wrap: anywhere; }
 .task .meta { color: var(--muted); font-size: .85rem; }
+.task .step { font-size: .9rem; overflow-wrap: anywhere; }
+.detail-step { margin-top: 8px; font-weight: 600; }
 .task .meta.overdue { color: var(--danger); }
 .task .btns { display: flex; gap: 12px; }
 .task .btns button { min-width: 44px; min-height: 44px; padding: 8px 10px; font-size: 1rem; }

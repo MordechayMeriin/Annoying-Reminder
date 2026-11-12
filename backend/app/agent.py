@@ -16,7 +16,8 @@ from typing import Any, Callable
 from . import context, tasks, thread
 from .config import get_settings
 from .llm_loop import run as run_tools
-from .logic import day_start, link_task_ids, select_candidate_tasks
+from .logic import (chat_signals, chip_label, chip_lang, chips_for, chips_json, day_start, focus_day,
+                    link_task_ids, select_candidate_tasks, select_playbooks, task_stage)
 from .prompting import render
 from .tools import CHAT_TOOLS, ToolContext
 
@@ -55,12 +56,13 @@ def normalize_roles(history: list[dict[str, Any]]) -> list[dict[str, str]]:
     return out
 
 
-def likely_topic(candidates: list[dict[str, Any]], checkin: dict[str, Any] | None, now_local) -> str:
+def likely_topic(candidates: list[dict[str, Any]], checkin: dict[str, Any] | None, now_local,
+                 facts: context.Facts | None = None, today=None) -> str:
     parts = []
     if checkin:
         parts.append(f"Your last check-in ({context.fmt_when(checkin['created_at'], now_local)}): "
                      f"\"{checkin['content'][:400]}\"")
-    blocks = context.task_contexts(candidates, now_local)
+    blocks = context.task_contexts(candidates, now_local, facts=facts, today=today)
     if blocks:
         parts.append("Tasks it may be about (a guess from recent messages, not certain):\n" + "\n".join(blocks))
         parts.append("Earlier messages about these:\n"
@@ -111,6 +113,7 @@ class _Turn:
     checkin_ids: list[int]
     system: str
     titles: dict[int, str]
+    open_kinds: dict[int, str]   # open tasks at the start of the turn: id → kind
 
 
 def _start_turn(text: str, now, on_saved: Callable[[dict[str, Any]], None]) -> _Turn:
@@ -122,6 +125,7 @@ def _start_turn(text: str, now, on_saved: Callable[[dict[str, Any]], None]) -> _
     history = thread.since(start, 40)
     user_msg = thread.add("user", text)
     on_saved(user_msg)
+    today = focus_day(now_local, s.day_reset_time)
 
     last = thread.last_proactive()
     recent = last if last and now - last["created_at"] <= timedelta(hours=s.reply_link_hours) else None
@@ -133,10 +137,32 @@ def _start_turn(text: str, now, on_saved: Callable[[dict[str, Any]], None]) -> _
     by_id.update({t["id"]: t for t in tasks.get_many(missing)})
     candidates = [by_id[i] for i in candidate_ids if i in by_id]
 
-    system = render("system", now=f"{now_local:%Y-%m-%d %H:%M}", weekday=f"{now_local:%A}", tz=s.tz.key,
-                    likely_topic=likely_topic(candidates, recent, now_local))
+    # Which playbooks (code decides): the likely tasks' stages, plus simple signals from this turn.
+    facts = context.load_facts(candidates)
+    last_reply = max((i for i, m in enumerate(history) if m["role"] == "assistant"), default=-1)
+    signals = chat_signals(text, history[last_reply + 1:], facts.stuck_since(candidate_ids, start), now_local,
+                           sum(1 for t in open_tasks if t.get("focus_date") == today))
+    stages = [task_stage(t, facts.counts.get(t["id"]), today) for t in candidates]
+    lang = chip_lang(text)
+    system = render("system", playbooks=select_playbooks(None, stages, signals),
+                    chips=[{"label": chip_label(c.id, lang)} for c in chips_for("chat_task", None, lang)],
+                    now=f"{now_local:%Y-%m-%d %H:%M}", weekday=f"{now_local:%A}", tz=s.tz.key,
+                    likely_topic=likely_topic(candidates, recent, now_local, facts, today))
     return _Turn(history=history, user_msg=user_msg, checkin_ids=list(recent["task_ids"]) if recent else [],
-                 system=system, titles={i: t["title"] for i, t in by_id.items()})
+                 system=system, titles={i: t["title"] for i, t in by_id.items()},
+                 open_kinds={t["id"]: t["kind"] for t in open_tasks})
+
+
+def reply_chips(linked: list[int], ctx: ToolContext, open_kinds: dict[int, str], text: str,
+                titles: dict[int, str]) -> list[dict[str, Any]]:
+    """▶ Start 5 min · ✓ Done under a reply about exactly one open task (none once it's done)."""
+    if len(linked) != 1 or linked[0] in ctx.closed:
+        return []
+    task_id = linked[0]
+    if open_kinds.get(task_id, ctx.created.get(task_id)) != "task":
+        return []
+    lang = chip_lang(text, titles.get(task_id))
+    return chips_json(chips_for("chat_task", None, lang), lang, task_id)
 
 
 async def handle_user_message(text: str, on_progress: Progress | None = None) -> ChatResult:
@@ -182,7 +208,8 @@ async def handle_user_message(text: str, on_progress: Progress | None = None) ->
     if not reply:
         reply = "Done." if ctx.changed else "Sorry, I couldn't process that. Try again?"
 
-    reply_msg = await asyncio.to_thread(thread.add, "assistant", reply, "chat", linked)
+    chips = reply_chips(linked, ctx, turn.open_kinds, text, titles)
+    reply_msg = await asyncio.to_thread(thread.add, "assistant", reply, "chat", linked, chips)
     user_msg = {**turn.user_msg, "task_ids": linked, "task_id": linked[0] if linked else None}
     return ChatResult(reply=reply, changed=ctx.changed, user_message_id=user_msg["id"],
                       reply_message_id=reply_msg["id"], task_ids=linked,

@@ -39,7 +39,7 @@ def use_llm(monkeypatch, *steps) -> ScriptedLLM:
 
 
 def test_due_task_gives_one_llm_message_and_one_push(store, monkeypatch):
-    t = store.add_task("Send the invoice", remind_at=local(9, 10), description="Client: Dana, amount 3,000")
+    t = store.add_task("Send the invoice", remind_at=local(9, 10), focus=True, description="Client: Dana, amount 3,000")
     llm = use_llm(monkeypatch, "How's the invoice for Dana going? Want to do it now?")
 
     assert tick(store) == [t["id"]]
@@ -55,8 +55,8 @@ def test_due_task_gives_one_llm_message_and_one_push(store, monkeypatch):
 
 
 def test_two_due_tasks_give_one_combined_message(store, monkeypatch):
-    a = store.add_task("Call the bank", remind_at=local(9, 9, 50))
-    b = store.add_task("Book flights", remind_at=local(9, 9, 55), priority=2)
+    a = store.add_task("Call the bank", remind_at=local(9, 9, 50), focus=True)
+    b = store.add_task("Book flights", remind_at=local(9, 9, 55), focus=True, priority=2)
     use_llm(monkeypatch, "Flights first, then a quick call to the bank — which one now?")
 
     tick(store)
@@ -78,7 +78,7 @@ def test_llm_failure_falls_back_to_template(store, monkeypatch, failure):
 
 
 def test_llm_timeout_falls_back(store, monkeypatch):
-    store.add_task("Renew passport", remind_at=local(9, 10))
+    store.add_task("Renew passport", remind_at=local(9, 10), focus=True)
 
     async def slow(*a, **k):
         await asyncio.sleep(5)
@@ -97,7 +97,7 @@ def _fast_settings():
 
 
 def test_coach_can_schedule_followup_clamped(store, monkeypatch):
-    t = store.add_task("Write the report", remind_at=local(9, 10))
+    t = store.add_task("Write the report", remind_at=local(9, 10), focus=True)
     use_llm(monkeypatch,
             {"tool": "schedule_followup", "args": {"task_id": t["id"], "minutes_from_now": 2, "reason": "soon"}},
             "Start with the outline — 15 minutes?")
@@ -107,7 +107,7 @@ def test_coach_can_schedule_followup_clamped(store, monkeypatch):
 
 
 def test_text_form_tool_call_is_parsed_once(store, monkeypatch):
-    t = store.add_task("Fix the bike", remind_at=local(9, 10))
+    t = store.add_task("Fix the bike", remind_at=local(9, 10), focus=True)
     use_llm(monkeypatch,
             f'```tool_code\nschedule_followup(task_id={t["id"]}, at_local_iso="2026-11-09T18:00", reason="evening")\n```',
             "Bike tonight after work?")
@@ -127,8 +127,8 @@ def test_meeting_facts_come_from_code(store, monkeypatch):
 
 
 def test_min_gap_holds_the_next_check_in(store, monkeypatch):
-    store.add_task("A", remind_at=local(9, 10))
-    b = store.add_task("B", remind_at=local(9, 10, 10))
+    store.add_task("A", remind_at=local(9, 10), focus=True)
+    b = store.add_task("B", remind_at=local(9, 10, 10), focus=True)
     use_llm(monkeypatch, "About A?", "About B?")
     tick(store)
     store.advance(10)
@@ -141,7 +141,7 @@ def test_min_gap_holds_the_next_check_in(store, monkeypatch):
 
 def test_quiet_hours_hold_even_critical(store, monkeypatch):
     store.now = local(9, 23, 30).astimezone(store.now.tzinfo)
-    t = store.add_task("Critical thing", priority=3, remind_at=local(9, 23, 20))
+    t = store.add_task("Critical thing", priority=3, remind_at=local(9, 23, 20), focus=True)
     use_llm(monkeypatch, "x")
     assert tick(store) == []
     assert store.tasks[t["id"]]["remind_at"] == local(10, 7)
@@ -151,14 +151,14 @@ def test_quiet_hours_hold_even_critical(store, monkeypatch):
 def test_daily_cap_never_exceeded(store, monkeypatch):
     use_llm(monkeypatch, *(["msg"] * 40))
     for i in range(30):
-        store.add_task(f"task {i}", remind_at=store.now)
+        store.add_task(f"task {i}", remind_at=store.now, focus=True)
         tick(store)
         store.advance(25)
-    assert len(store.pushes) <= 20
+    assert 10 < len(store.pushes) <= 20
 
 
 def test_ignored_check_in_is_logged(store, monkeypatch):
-    t = store.add_task("Clean the garage", remind_at=local(9, 10))
+    t = store.add_task("Clean the garage", remind_at=local(9, 10), focus=True)
     use_llm(monkeypatch, "Garage?", "Still the garage?")
     tick(store)
     store.advance(30)
@@ -175,7 +175,7 @@ def test_done_from_notification_appears_in_chat(store):
 
 
 def test_snoozed_reminder_is_requested_and_skips_per_task_cap(store, monkeypatch):
-    t = store.add_task("Stretch", remind_at=local(9, 10))
+    t = store.add_task("Stretch", remind_at=local(9, 10), focus=True)
     use_llm(monkeypatch, *(["msg"] * 10))
     for _ in range(4):           # four unrequested check-ins use up the per-task cap
         tick(store)

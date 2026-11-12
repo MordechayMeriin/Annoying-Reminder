@@ -20,7 +20,7 @@ from . import coach, db, notify, tasks, thread
 from .config import get_settings
 from .jewish_calendar import next_period, rest_config, rest_until
 from .logic import (ALARM, URGENT, AlertPolicy, ContactState, Guardrails, alarm_window_s, alert_level,
-                    day_start, job_is_due, next_reminder_after_nag, plan_contacts)
+                    day_start, focus_day, job_is_due, next_reminder_after_nag, plan_contacts, user_active_recently)
 
 log = logging.getLogger("scheduler")
 
@@ -95,11 +95,11 @@ def plan_tick() -> list[int]:
     if _delivery_running():
         return []  # the previous message isn't out yet; the gap rule needs its timestamp
     tasks.close_finished_meetings()
-    due = tasks.due_for_contact()
-    if not due:
-        return []
     s = get_settings()
     now_local = tasks.now_utc().astimezone(s.tz)
+    due = tasks.due_for_contact(focus_day(now_local, s.day_reset_time))  # with the focus filter
+    if not due:
+        return []
     state = thread.contact_state(day_start(now_local, s.day_reset_time))
     plan = plan_contacts(due, state, now_local, guardrails())
     for task_id, until in plan.defer.items():
@@ -145,14 +145,15 @@ def _load_group(task_ids: list[int], now: datetime) -> tuple[list[dict], Contact
 
 
 def _send(group: list[dict], composed: "coach.Composed", now: datetime) -> None:
-    msg = thread.add("assistant", composed.text, composed.kind, [t["id"] for t in group])
+    msg = thread.add("assistant", composed.text, composed.kind, [t["id"] for t in group], composed.chips)
     single = group[0] if len(group) == 1 else None
     last_reply = thread.last_user_reply_at()
     level, alarm_s = message_level(group, now, last_reply)
     notify.notify(
         composed.title, composed.text,
         level=level, expire_s=alarm_s,
-        task_id=single["id"] if single else None,            # ✓ / ⏰ only for exactly one task
+        task_id=single["id"] if single and composed.push_actions else None,  # ▶ Start / ✓ Done: one task
+        actions=composed.push_actions,
         message_id=msg["id"],
         priority=max(t["priority"] for t in group),
     )
@@ -228,17 +229,26 @@ async def run_daily_job(job: str) -> None:
     if job in coach.MEETING_JOBS:
         return await asyncio.to_thread(run_meeting_digest, job)
     try:
-        text = await coach.compose_daily(job, tasks.now_utc())
-        if text is None:
+        now = tasks.now_utc()
+        if job == "checkin" and await asyncio.to_thread(_active_recently, now):
+            log.info("Mid-day check-in skipped: the user was active in the last hour")
             return
-        await asyncio.to_thread(_post_daily, job, text)
+        daily = await coach.compose_daily(job, now)
+        if daily is None:
+            return
+        await asyncio.to_thread(_post_daily, job, daily)
     except Exception:
         log.exception("Daily job %s failed", job)
 
 
-def _post_daily(job: str, text: str) -> None:
-    msg = thread.add("assistant", text, job)
-    notify.notify(coach.JOB_TITLES[job], text, message_id=msg["id"], priority=1)
+def _active_recently(now: datetime) -> bool:
+    """A chat message or a tap in the last hour (a tap on ▶ Start counts too: it writes an event)."""
+    return user_active_recently(thread.last_user_reply_at(), now)
+
+
+def _post_daily(job: str, daily: "coach.Daily") -> None:
+    msg = thread.add("assistant", daily.text, job, daily.task_ids, daily.chips)
+    notify.notify(coach.JOB_TITLES[job], daily.text, message_id=msg["id"], priority=1)
 
 
 def run_meeting_digest(job: str) -> None:

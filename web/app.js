@@ -14,9 +14,12 @@ const KIND_LABEL = {
   nudge: "💬 Check-in",
   reminder: "⏰ Reminder",
   meeting: "📅 Meeting",
+  session: "⏱ Session",
+  reentry: "👋 Welcome back",
 };
-let dayReset = [4, 0]; // the server's "new chat day starts at" setting (plan card only)
 const PAGE = 50;
+const START_MIN_APP = 25;   // ▶ Start on the focus card (from a notification or a chip: 5)
+const HEBREW = /[\u0590-\u05FF]/;
 
 // Opened from a notification? (?m=<message id>, or ?task=<id> from older links / Pushover)
 const params = new URLSearchParams(location.search);
@@ -126,11 +129,10 @@ function fmtDay(d) {
   return d.toLocaleDateString([], { weekday: "long", day: "numeric", month: "long" });
 }
 
-function chatDayStart(now = new Date()) {
-  const s = new Date(now);
-  s.setHours(dayReset[0], dayReset[1], 0, 0);
-  if (s > now) s.setDate(s.getDate() - 1);
-  return s;
+/** The user's language (for text the app sends for them, e.g. "What now?"): their latest typed message. */
+function userLang() {
+  const last = [...messages].reverse().find((m) => m.role === "user" && m.kind === "chat");
+  return last && HEBREW.test(last.content) ? "he" : "en";
 }
 
 // ------------------------------------------------------------------ auth
@@ -253,17 +255,121 @@ function renderMessages() {
   renderedOn = today;
   keep.forEach((b) => box.appendChild(b));
   $("load-earlier").hidden = !hasMore;
-  renderPlan();
+  renderChips();
 }
 
-function renderPlan() {
-  const start = chatDayStart();
-  const plan = [...messages].reverse().find((m) => m.kind === "morning" && new Date(m.created_at) >= start);
-  $("plan").hidden = !plan;
-  if (!plan) return;
-  $("plan-preview").textContent = plan.content.split("\n").find((l) => l.trim()) || "";
-  $("plan-body").textContent = plan.content;
+// ---- reply buttons ("chips"): chosen by the server, shown only under the latest message while it's
+// the assistant's. Any reply (typed, or a tap that writes an event) makes them disappear.
+
+let chipsBusy = false;
+
+function renderChips() {
+  const box = $("messages");
+  box.querySelectorAll(".chips").forEach((c) => c.remove());
+  const last = messages[messages.length - 1];
+  if (!last || last.role !== "assistant" || !last.chips?.length || outgoing || box.querySelector(".msg.outgoing")) return;
+  const row = el("div", "chips");
+  row.dataset.forId = last.id;
+  last.chips.forEach((c, i) => {
+    const b = el("button", "chip" + (i === 0 && c.action ? " primary" : ""), c.label);
+    b.type = "button";
+    b.dir = "auto";
+    b.onclick = () => onChip(c, row);
+    row.appendChild(b);
+  });
+  box.appendChild(row);
 }
+
+async function onChip(chip, row) {
+  if (chipsBusy) return;
+  if (!chip.action) {
+    row.remove();
+    return sendMessage(chip.label); // a text chip is just a reply in the user's words
+  }
+  chipsBusy = true;
+  row.querySelectorAll("button").forEach((b) => (b.disabled = true));
+  try {
+    await runAction(chip.task_id, chip.action, chip.minutes);
+  } finally {
+    chipsBusy = false;
+  }
+}
+
+const ACTION_TOAST = {
+  done: "Done ✓", snooze: "Snoozed for 1 hour", cancel: "Cancelled", later: "OK, later", start: "▶ Started",
+};
+
+/** A task action without the LLM (chips, the focus card, the task list); refreshes what it changed. */
+async function runAction(id, action, minutes, { quiet = false } = {}) {
+  try {
+    const body = { action };
+    if (minutes) body.minutes = minutes;
+    await api(`/tasks/${id}/action`, { method: "POST", body: JSON.stringify(body) });
+    if (!quiet) toast(action === "start" && minutes ? `▶ ${minutes} min — go` : ACTION_TOAST[action]);
+    await Promise.all([loadTasks(), loadNewer(), loadFocus()]);
+    if (detailTaskId === id) openTask(id);
+  } catch (e) {
+    toast(e.message);
+    Promise.all([loadTasks(), loadNewer()]).catch(() => {});
+  }
+}
+
+// ---- Today's 3 (the focus card): display only
+
+let focusFolded = false;
+try {
+  focusFolded = localStorage.getItem("focusFolded") === "1";
+} catch {}
+
+async function loadFocus() {
+  const data = await api("/focus");
+  renderFocus(data);
+}
+
+function renderFocus(data) {
+  const card = $("focus");
+  card.hidden = !data.tasks.length;
+  card.classList.toggle("folded", focusFolded);
+  if (!data.tasks.length) return;
+  $("focus-done").textContent = data.doneToday ? `Done today: ${data.doneToday}` : "";
+  const list = $("focus-list");
+  list.textContent = "";
+  data.tasks.forEach((t, i) => {
+    const li = el("li", "focus-row" + (t.done ? " done" : ""));
+    li.appendChild(el("span", "num", t.done ? "✓" : String(i + 1)));
+    const text = el("button", "text");
+    text.type = "button";
+    const title = el("div", "row-title", t.title);
+    title.dir = "auto";
+    text.appendChild(title);
+    if (t.next_action && !t.done) {
+      const step = el("div", "row-step", "▶ " + t.next_action);
+      step.dir = "auto";
+      text.appendChild(step);
+    }
+    text.onclick = () => openTask(t.id);
+    li.appendChild(text);
+    if (!t.done) {
+      const start = el("button", "small start", "▶");
+      start.type = "button";
+      start.title = `Start ${START_MIN_APP} min`;
+      start.setAttribute("aria-label", start.title);
+      start.onclick = () => runAction(t.id, "start", START_MIN_APP);
+      li.appendChild(start);
+    }
+    list.appendChild(li);
+  });
+}
+
+$("focus").querySelector(".focus-head").addEventListener("click", (e) => {
+  if (e.target.closest("button")) return;
+  focusFolded = !focusFolded;
+  $("focus").classList.toggle("folded", focusFolded);
+  try {
+    localStorage.setItem("focusFolded", focusFolded ? "1" : "0");
+  } catch {}
+});
+$("focus-what-now").onclick = () => sendMessage(userLang() === "he" ? "מה עכשיו?" : "What now?");
 
 function mergeMessages(rows) {
   const byId = new Map(messages.map((m) => [m.id, m]));
@@ -410,6 +516,7 @@ const TOOL_LABEL = {
   add_subtask: (t) => ["➕ Adding a step", t.title],
   log_interaction: (t) => ["🗒 Making a note", t.taskTitle],
   mark_blocked: (t) => ["⛔ Marking as blocked", t.taskTitle],
+  set_focus: () => ["🎯 Setting Today's 3"],
 };
 
 function toolLabel(t) {
@@ -454,7 +561,7 @@ function setDelivery(bubble, text, cls) {
   d.className = "msg-delivery " + (cls || "");
 }
 
-$("chat-form").addEventListener("submit", async (e) => {
+$("chat-form").addEventListener("submit", (e) => {
   e.preventDefault();
   if (outgoing) return; // one at a time
   const input = $("chat-input");
@@ -462,7 +569,13 @@ $("chat-form").addEventListener("submit", async (e) => {
   if (!text) return;
   input.value = "";
   autosize();
+  sendMessage(text);
+});
 
+/** Sends one chat message (typed, a text chip, "What now?") and shows its progress and the reply. */
+async function sendMessage(text) {
+  if (outgoing) return; // one at a time
+  const input = $("chat-input");
   $("messages").querySelectorAll(".msg.outgoing.failed").forEach((b) => b.remove()); // old "Not sent"
   const bubble = messageEl({ role: "user", content: text, kind: "chat" });
   bubble.classList.add("outgoing");
@@ -471,6 +584,7 @@ $("chat-form").addEventListener("submit", async (e) => {
   const sending = { el: bubble, id: null }; // stays readable after `outgoing` is cleared
   outgoing = sending;
   $("messages").appendChild(bubble);
+  renderChips(); // a reply hides the buttons
   status.reset();
   scrollToBottom();
   $("chat-send").disabled = true;
@@ -503,7 +617,7 @@ $("chat-form").addEventListener("submit", async (e) => {
     } else {
       loadLatest().catch(() => {});
     }
-    if (res.tasksChanged) loadTasks().catch(() => {});
+    if (res.tasksChanged) Promise.all([loadTasks(), loadFocus()]).catch(() => {});
   } catch (err) {
     const saved = sending.id !== null; // the server has the message (the reply may still come)
     outgoing = null;
@@ -521,10 +635,11 @@ $("chat-form").addEventListener("submit", async (e) => {
       }
     }
     follow();
+    renderChips();
   } finally {
     $("chat-send").disabled = false;
   }
-});
+}
 
 // ------------------------------------------------------------------ Back button
 //
@@ -655,7 +770,13 @@ function taskItem(t) {
   const title = el("div", "title", prio + icon + t.title);
   title.dir = "auto";
   const { text, overdue } = taskMeta(t);
-  info.append(title, el("div", "meta" + (overdue ? " overdue" : ""), text));
+  info.appendChild(title);
+  if (t.next_action && t.status !== "done") {
+    const step = el("div", "step", "▶ " + t.next_action);
+    step.dir = "auto";
+    info.appendChild(step);
+  }
+  info.appendChild(el("div", "meta" + (overdue ? " overdue" : ""), text));
   info.onclick = () => openTask(t.id);
 
   const btns = el("div", "btns");
@@ -697,16 +818,8 @@ function updateBadge() {
   badge.hidden = !n;
 }
 
-async function taskAction(id, action, { quiet = false } = {}) {
-  try {
-    await api(`/tasks/${id}/action`, { method: "POST", body: JSON.stringify({ action, minutes: 60 }) });
-    if (!quiet) toast({ done: "Done ✓", snooze: "Snoozed for 1 hour", cancel: "Cancelled" }[action]);
-    await Promise.all([loadTasks(), loadNewer()]);
-    if (detailTaskId === id) openTask(id);
-  } catch (e) {
-    toast(e.message);
-    loadTasks().catch(() => {});
-  }
+function taskAction(id, action, { quiet = false } = {}) {
+  return runAction(id, action, action === "snooze" ? 60 : undefined, { quiet });
 }
 
 // ✓ Done is easy to hit by accident, so it waits UNDO_MS before reaching the server; until then the
@@ -769,6 +882,9 @@ async function openTask(id) {
   const status = t.status !== "open" ? ` · ${t.status}` : "";
   $("detail-meta").textContent = taskMeta(t).text + status +
     (t.remind_at ? ` · next check-in ${fmtTime(t.remind_at)}` : "");
+  $("detail-step").hidden = !t.next_action;
+  $("detail-step").textContent = t.next_action ? `▶ First step: ${t.next_action}` +
+    (t.estimate_min ? ` · whole task ~${t.estimate_min} min` : "") : "";
   $("detail-blocked").hidden = !t.blocked_reason;
   $("detail-blocked").textContent = t.blocked_reason
     ? `⛔ Waiting: ${t.blocked_reason}` + (t.blocked_until ? ` (check again ${fmtTime(t.blocked_until)})` : "")
@@ -840,9 +956,6 @@ const settingControls = new Map();     // key → { get, set, row, error }
 
 function applySettings(data) {
   settingsFields = data.fields;
-  const reset = settingsFields.find((f) => f.key === "day_reset_time")?.value;
-  if (reset) dayReset = reset.split(":").map(Number);
-  renderPlan();
   return data;
 }
 
@@ -1143,7 +1256,7 @@ async function setupPush() {
 navigator.serviceWorker?.addEventListener("message", async (e) => {
   const msg = e.data || {};
   if (msg.type === "tasks-changed") {
-    Promise.all([loadTasks(), loadNewer()]).catch(() => {});
+    Promise.all([loadTasks(), loadNewer(), loadFocus()]).catch(() => {});
   } else if (msg.type === "open-message" && msg.messageId) {
     requestCloseDrawer();
     await loadLatest({ stickToBottom: false }).catch(() => {});
@@ -1156,7 +1269,7 @@ navigator.serviceWorker?.addEventListener("message", async (e) => {
 // ------------------------------------------------------------------ start
 
 async function refreshAll() {
-  await Promise.all([loadTasks(), loadLatest()]);
+  await Promise.all([loadTasks(), loadLatest(), loadFocus()]);
 }
 
 // Registered once (startApp runs again after every login).
@@ -1182,9 +1295,8 @@ async function startApp() {
     if (document.visibilityState === "visible") loadNewer().catch(() => {});
   }, 60_000);
 
-  api("/settings").then(applySettings).catch(() => {}); // day-reset time for the plan card
   try {
-    await Promise.all([loadTasks(), loadLatest()]);
+    await Promise.all([loadTasks(), loadLatest(), loadFocus()]);
   } catch (e) {
     toast(e.message);
   }
