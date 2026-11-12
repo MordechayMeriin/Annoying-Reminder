@@ -64,6 +64,12 @@ header {
   padding: 12px 16px; border-bottom: 1px solid var(--line);
 }
 .header-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.brand { display: flex; flex-direction: column; min-width: 0; }
+/* The model behind the latest reply: one quiet line, never wider than the title area */
+.model-tag {
+  font-size: .72rem; line-height: 1.2; color: var(--muted); max-width: 45vw;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 /* Touch targets of at least 44 px */
 .header-actions button { min-height: 44px; min-width: 44px; }
 .badge {

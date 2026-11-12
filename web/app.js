@@ -284,6 +284,19 @@ function renderMessages() {
   keep.forEach((b) => box.appendChild(b));
   $("load-earlier").hidden = !hasMore;
   renderChips();
+  renderModelTag();
+}
+
+// ⚙ "Show which AI model replied": the server sends `model` only when it's on, and only on messages
+// an LLM wrote. The header shows the latest reply's model ("gemini-2.5-flash"; the full id on hover),
+// and nothing when code wrote it (a template, a button's answer).
+function renderModelTag() {
+  const tag = $("model-tag");
+  const last = [...messages].reverse().find((m) => m.role === "assistant");
+  const model = last?.model || "";
+  tag.hidden = !model;
+  tag.textContent = model.split("/").pop();
+  tag.title = model ? `Latest reply by ${model}` : "";
 }
 
 // ---- reply buttons ("chips"): chosen by the server, shown only under the latest message while it's
@@ -1586,6 +1599,7 @@ $("settings-save").onclick = async () => {
   const btn = $("settings-save");
   btn.disabled = true;
   const pushChanged = pendingSettings.has("browser_push");
+  const modelTagChanged = pendingSettings.has("show_model");
   try {
     const data = applySettings(await api("/settings", {
       method: "PATCH",
@@ -1595,6 +1609,8 @@ $("settings-save").onclick = async () => {
     renderPreferences(data.preferences || []);
     toast("Settings saved");
     if (pushChanged) setupPush().catch(() => {});
+    // Messages carry their model only while it's on: reload them so the header follows at once.
+    if (modelTagChanged) loadLatest({ stickToBottom: false }).catch(() => {});
   } catch (e) {
     for (const [key, msg] of Object.entries(e.errors || {})) {
       const c = settingControls.get(key);

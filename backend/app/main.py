@@ -156,11 +156,13 @@ def _sse(event: dict) -> str:
 
 
 def _public_messages(rows: list[dict]) -> list[dict]:
-    tz = get_settings().tz
+    s = get_settings()
     out = []
     for r in rows:
         r = dict(r)
-        r["created_at"] = r["created_at"].astimezone(tz).isoformat(timespec="minutes")
+        r["created_at"] = r["created_at"].astimezone(s.tz).isoformat(timespec="minutes")
+        if not s.show_model:
+            r["model"] = None  # ⚙ "Show which AI model replied" is off: the app shows nothing
         out.append(r)
     return out
 

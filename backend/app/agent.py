@@ -15,6 +15,7 @@ from typing import Any, Callable
 
 from . import context, tasks, thread
 from .config import get_settings
+from .llm import last_model, track_models
 from .llm_loop import run as run_tools
 from .logic import (AVOID_CHIPS, chat_signals, chip_id_for_text, chip_label, chip_lang, chips_for, chips_json,
                     day_start, focus_day, link_task_ids, select_candidate_tasks, select_playbooks, task_stage)
@@ -216,22 +217,24 @@ async def handle_user_message(text: str, on_progress: Progress | None = None) ->
     ]
 
     ctx = ToolContext(mode="chat", now=now)
-    try:
-        reply = await asyncio.wait_for(
-            run_tools(messages, CHAT_TOOLS, ctx, max_rounds=MAX_TOOL_ROUNDS, timeout=s.llm_timeout_s,
-                      on_event=progress),
-            timeout=s.chat_turn_timeout_s)
-    except asyncio.TimeoutError:
-        log.warning("Chat turn stopped after %ss", s.chat_turn_timeout_s)
-        reply = TIMEOUT_REPLY
-    finally:
-        linked = link_task_ids(ctx.acted_on, turn.checkin_ids)
-        await asyncio.to_thread(thread.link, [turn.user_msg["id"]], linked)
+    with track_models() as models:
+        try:
+            reply = await asyncio.wait_for(
+                run_tools(messages, CHAT_TOOLS, ctx, max_rounds=MAX_TOOL_ROUNDS, timeout=s.llm_timeout_s,
+                          on_event=progress),
+                timeout=s.chat_turn_timeout_s)
+        except asyncio.TimeoutError:
+            log.warning("Chat turn stopped after %ss", s.chat_turn_timeout_s)
+            reply = TIMEOUT_REPLY
+        finally:
+            linked = link_task_ids(ctx.acted_on, turn.checkin_ids)
+            await asyncio.to_thread(thread.link, [turn.user_msg["id"]], linked)
     if not reply:
         reply = "Done." if ctx.changed else "Sorry, I couldn't process that. Try again?"
 
     chips = reply_chips(linked, ctx, turn.open_kinds, text, titles)
-    reply_msg = await asyncio.to_thread(thread.add, "assistant", reply, "chat", linked, chips)
+    # The model that answered last, also under "Done." and the timeout reply: it's the one that was working.
+    reply_msg = await asyncio.to_thread(thread.add, "assistant", reply, "chat", linked, chips, last_model(models))
     user_msg = {**turn.user_msg, "task_ids": linked, "task_id": linked[0] if linked else None}
     return ChatResult(reply=reply, changed=ctx.changed, user_message_id=user_msg["id"],
                       reply_message_id=reply_msg["id"], task_ids=linked,

@@ -364,11 +364,12 @@ class FakeStore:
 
     # ------------------------------------------------------------ thread.*
 
-    def m_add(self, role, content, kind="chat", task_ids=(), chips=None):
+    def m_add(self, role, content, kind="chat", task_ids=(), chips=None, model=None):
         self._ids["msg"] += 1
         ids = list(dict.fromkeys(task_ids))
         m = {"id": self._ids["msg"], "role": role, "content": content, "kind": kind,
-             "task_id": ids[0] if ids else None, "task_ids": ids, "chips": list(chips or []), "created_at": self.now}
+             "task_id": ids[0] if ids else None, "task_ids": ids, "chips": list(chips or []), "model": model,
+             "created_at": self.now}
         self.messages.append(m)
         return dict(m)
 
@@ -523,20 +524,24 @@ class ScriptedLLM:
       - a str (assistant text),
       - a dict {"tool": name, "args": {...}} (a proper tool call),
       - an Exception instance (raised, e.g. llm.LLMUnavailable("429")).
-    Records every request it received.
+    Records every request it received. Every answer reports `model` as the model that answered,
+    like OpenRouter does (llm.track_models sees it).
     """
 
-    def __init__(self, steps: list[Any]):
+    def __init__(self, steps: list[Any], model: str = "test/model"):
         self.steps = list(steps)
+        self.model = model
         self.requests: list[dict[str, Any]] = []
 
     async def __call__(self, messages, tools=None, temperature=0.3, max_tokens=None, timeout=None):
         self.requests.append({"messages": [dict(m) for m in messages], "tools": tools})
         if not self.steps:
+            llm.record_model(self.model)
             return {"role": "assistant", "content": ""}
         step = self.steps.pop(0)
         if isinstance(step, BaseException):
             raise step
+        llm.record_model(self.model)
         if isinstance(step, dict):
             return {"role": "assistant", "content": "", "tool_calls": [{
                 "id": f"call_{len(self.requests)}", "type": "function",

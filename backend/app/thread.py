@@ -14,17 +14,20 @@ PROACTIVE_KINDS = ("nudge", "reminder", "meeting", "morning", "checkin", "evenin
 # What the user does in the chat: typed messages and taps (a tap writes an event, e.g. "[Marked done: …]").
 ACTIVITY_KINDS = ("chat", "event")
 
-_COLS = "id, role, content, kind, task_id, task_ids, chips, created_at"
+_COLS = "id, role, content, kind, task_id, task_ids, chips, model, created_at"
 
 
 def add(role: str, content: str, kind: str = "chat", task_ids: list[int] | tuple = (),
-        chips: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    """chips: the reply buttons under this message (logic.chips_json), chosen by code."""
+        chips: list[dict[str, Any]] | None = None, model: str | None = None) -> dict[str, Any]:
+    """
+    chips: the reply buttons under this message (logic.chips_json), chosen by code.
+    model: the LLM that wrote it (None when code wrote it: templates, events, button answers).
+    """
     ids = list(dict.fromkeys(task_ids))
     return db.fetch_one(
-        f"""insert into messages (role, content, kind, task_id, task_ids, chips)
-            values (%s, %s, %s, %s, %s::bigint[], %s::jsonb) returning {_COLS}""",
-        (role, content, kind, ids[0] if ids else None, ids, json.dumps(chips or [], ensure_ascii=False)),
+        f"""insert into messages (role, content, kind, task_id, task_ids, chips, model)
+            values (%s, %s, %s, %s, %s::bigint[], %s::jsonb, %s) returning {_COLS}""",
+        (role, content, kind, ids[0] if ids else None, ids, json.dumps(chips or [], ensure_ascii=False), model),
     )
 
 
@@ -131,7 +134,7 @@ def contact_state(day_start: datetime) -> ContactState:
 
 
 # For the UI: each message with its main task's title and status, and the titles of every linked task.
-_PUBLIC = """select m.id, m.role, m.content, m.kind, m.task_id, m.task_ids, m.chips, m.created_at,
+_PUBLIC = """select m.id, m.role, m.content, m.kind, m.task_id, m.task_ids, m.chips, m.model, m.created_at,
                     t.title as task_title, t.status as task_status,
                     (select coalesce(jsonb_object_agg(x.id::text, x.title), '{}'::jsonb)
                      from tasks x where x.id = any(m.task_ids)) as task_titles

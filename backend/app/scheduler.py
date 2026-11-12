@@ -208,7 +208,8 @@ def _load_group(task_ids: list[int], now: datetime) -> tuple[list[dict], Contact
 
 
 def _send(group: list[dict], composed: "coach.Composed", now: datetime, avoided: bool = False) -> None:
-    msg = thread.add("assistant", composed.text, composed.kind, [t["id"] for t in group], composed.chips)
+    msg = thread.add("assistant", composed.text, composed.kind, [t["id"] for t in group], composed.chips,
+                     composed.model)
     single = group[0] if len(group) == 1 else None
     last_reply = thread.last_user_reply_at()
     # The reason message about an avoided task is never loud, whatever the task is.
@@ -366,7 +367,7 @@ def _active_recently(now: datetime) -> bool:
 
 def _post_daily(job: str, daily: "coach.Daily") -> None:
     kind = daily.kind or job
-    msg = thread.add("assistant", daily.text, kind, daily.task_ids, daily.chips)
+    msg = thread.add("assistant", daily.text, kind, daily.task_ids, daily.chips, daily.model)
     notify.notify(coach.JOB_TITLES[kind], daily.text, message_id=msg["id"], priority=1)
 
 
