@@ -10,10 +10,13 @@ every 5 minutes. Supabase keeps the login and becomes the backup, synced daily. 
 phone still needs the internet for is the LLM, which goes through a small AWS Lambda function so your
 OpenRouter key never sits on the phone. The app is installed from the Play Store (internal testing
 track), runs on your Galaxy S9 (Android 10), and is built and tested in the cloud, so your laptop needs
-nothing but a browser. Render, cron-job.org, browser push and Pushover all go away.
+nothing but a browser. Render, cron-job.org, the web app, browser push and Pushover all go away.
 
-Decisions so far: Kotlin; AWS Lambda for the server part; installed through Google Play; native alarms
-replace Pushover; contacts and addresses later, maybe; no Android Studio; Galaxy S9.
+Decisions so far: Kotlin; AWS Lambda (the account this session is connected to) for the server part;
+installed through Google Play (personal account, internal testing); native alarms replace Pushover;
+contacts and addresses later, maybe; no Android Studio; Galaxy S9; **one app at a time**: the old app is
+switched off when the phone takes over your data, and stays off while the Android app is built; after
+that the web app is deleted.
 
 ---
 
@@ -103,9 +106,8 @@ Supabase Edge Functions and AWS Lambda both do this well. Lambda wins for us:
 - **It runs Python**, so `llm.py` (OpenRouter, model fallback, timeouts) and parts of `config.py` move
   over almost unchanged. Edge Functions are TypeScript only.
 - **Up to 15 minutes per call** (Edge Functions stop at about 2.5), so a slow model never cuts off.
-- **A scheduled job** (EventBridge) for the "is the phone still alive?" check (see Phase F).
+- **A scheduled job** (EventBridge) for the "is the phone still alive?" check (see Phase C).
 - **Cost: nothing.** The free tier is 1 million calls a month, forever; we'll use a few hundred a day.
-  We still set a $1 budget alert, so a mistake can't surprise you.
 
 What it costs in effort: a bit more setup than an Edge Function (a function URL, permissions, logs in
 CloudWatch). It's deployed by GitHub Actions, with no AWS keys stored in GitHub (OIDC).
@@ -143,6 +145,10 @@ the last sync to `/sync`. The phone's copy always wins. Two small additions make
 The same job also runs, cheaply, when the app goes to the background on Wi-Fi. A lost phone then loses
 minutes, not a day. **Restore** (new phone, reinstall) is the reverse: download everything into an
 empty database.
+
+While the app is being built, sync runs a few minutes after every change, not just daily: a new build
+sometimes has to rebuild the phone's database, and it does that by restoring from Supabase. So restore
+has to work from the first day the phone holds your data, and the backup has to be fresh.
 
 **The scheduler (AlarmManager).** Today the server checks every 5 minutes whether anything is due.
 A phone that wakes up every 5 minutes drains the battery, and Android's **Doze** mode (deep sleep when
@@ -230,14 +236,30 @@ Your laptop needs a browser and nothing else.
 
 ## 7. Phases
 
-Each phase ends with something you can install and use. The web app keeps working, untouched, until
-the cutover in Phase F, so you're never without reminders.
+Each phase ends with something you can install and use.
 
-**Before the cutover, the phone never sends reminders on its own, and anything you do in it is
-practice.** The server is still the one sending you real reminders. If the phone sent its own too,
-you'd get everything twice, and the two would each keep a separate chat that disagree from then on. So
-until Phase F the phone works on a copy of your data that is refreshed from Supabase (overwriting
-practice changes), and you can chat with it, tap buttons and run sessions as much as you like.
+**One app at a time.** There's no period where the old and the new app both run. The handover is at the
+start of Phase B, the day the phone takes your data: the server is switched off, and from then on the
+phone is the only app, everything you do in it is real, and every conversation is saved and backed up
+to Supabase. Until then (Phase A has no data yet) the old app keeps running, since it costs nothing.
+If you'd rather switch it off right away, that's one click on cron-job.org.
+
+Why not copy the tables, so the old app can keep running on its own copy? Because two copies of your
+tasks and chat start to drift apart the moment both are used, which is the dual life we're avoiding.
+
+**What works when**, after the handover:
+
+| From | You have |
+|---|---|
+| Phase B | Your tasks, chat history and Today's 3 on the phone; add, edit, finish and postpone tasks by hand. No reminders yet. |
+| Phase C | Reminders are back: check-ins, meetings, hard stops, daily messages, at the right volume, with template wording. |
+| Phase D | The assistant is back: chat, and LLM-written check-ins and daily messages. |
+| Phase E | Focus sessions and the full-screen alarm. Everything the web app did. |
+
+**How we check the ported logic without the old app to compare against:** the Python tests, ported
+one for one; and the Diagnostics screen, which records every tick: what was due, what the guardrails
+decided and why ("skipped: quiet hours", "skipped: min gap, 12 of 20 min"). When something feels off,
+you share that log and the real conversation, and we see exactly what happened.
 
 ### Phase A: hello, Android (and Google Play)
 - You: create the Play developer account; switch on internal app sharing on the phone.
@@ -251,27 +273,29 @@ practice changes), and you can chat with it, tap buttons and run sessions as muc
 *Done when:* the app comes from the Play Store, and a test alarm rings on time after the phone has sat
 untouched with the screen off for an hour (that's the Doze test).
 
-### Phase B: your data on the phone
+### Phase B: the handover — your data moves to the phone
 - Room schema mirroring `db/schema.sql`.
-- Supabase: migration `010` adds `updated_at` to every table. Additive: the current server keeps working.
-- AWS: the Lambda with `/sync` (download only for now), deployed from GitHub Actions; the $1 budget alert.
-- Screens: the task list, task details (description, steps, history), the chat history, Today's 3, settings.
+- Supabase: migration `010` adds `updated_at` to every table. Additive, so the old server could still
+  read the data in an emergency.
+- AWS: the Lambda with `/sync` (upload and restore), deployed from GitHub Actions.
+- Screens: the task list, task details (description, steps, history), the chat history, Today's 3,
+  settings; add, edit, ✓ done, ⏰ later and cancel by hand.
+- **The handover:** turn off the cron-job.org job, the phone downloads everything once, and from then on
+  it uploads changes. The web app stops being used.
 
-*Done when:* the app shows your real tasks and chat in airplane mode.
+*Done when:* the app shows your real tasks and chat in airplane mode, and reinstalling it restores them.
 
-### Phase C: the brain, in shadow mode
+### Phase C: reminders
 - Port `logic.py` (pure functions, ~1,000 lines) and its tests first. The tests are the spec: a test that
   passes in Python must pass in Kotlin.
 - Port the Shabbat and holiday logic to KosherJava Zmanim, checked against `test_shabbat.py`.
 - Port the tick: `scheduler.py`, the guardrails, alert levels, gentler pressure, the template messages.
-- The scheduler (exact alarm and safety nets) and notification buttons.
-- **Shadow mode:** the phone downloads fresh data every 15 minutes, works out what it *would* send and
-  when (which tasks, how loud, which buttons), and logs it on the Diagnostics screen next to what the
-  server actually sent. We compare **decisions**, not messages, because decisions are code and must
-  match exactly, while the LLM's wording is different every time anyway. Wording gets tested for real
-  in Phase D.
+- The scheduler (exact alarm and safety nets), notification buttons, and the Diagnostics tick log.
+- **"Is the phone still alive?"**: once a day, the Lambda checks when the phone last synced. If it's been
+  over two days, you get an email. With the phone as the only brain, nobody else would notice if it
+  stopped.
 
-*Done when:* for a week, the phone's decisions match what the server sent.
+*Done when:* a week of real reminders arrives when it should, and the tick log explains every skip.
 
 ### Phase D: chat and the coach
 - `/llm` in the Lambda: the key, model fallback, daily cap, rate limit, timeouts.
@@ -283,7 +307,7 @@ untouched with the screen off for an hour (that's the Doze test).
 - The coach (morning plan, check-ins, evening review, Sunday, re-entry) writes through `/llm`.
 - Reply from a notification.
 
-*Done when:* practice conversations on the phone feel like the web app's.
+*Done when:* talking to the assistant on the phone feels like it did in the web app.
 
 ### Phase E: focus sessions and alarms
 - Focus sessions: the countdown notification, the full-screen ring, "where did you stop?".
@@ -292,19 +316,11 @@ untouched with the screen off for an hour (that's the Doze test).
 
 *Done when:* everything in the README works on the phone.
 
-### Phase F: cutover
-1. Final download from Supabase, so the phone starts from the latest state.
-2. Turn off the cron-job.org job. From this moment the phone is the brain and sends real reminders.
-3. `/sync` switches direction: the phone uploads, daily plus the cheap "when convenient" run.
-4. **"Is the phone still alive?"**: once a day, the Lambda checks when the phone last synced. If it's
-   been over two days, you get an email. Now that the phone is the brain, nobody else would notice if
-   it stopped.
-5. A week later, if all is well: delete the Render services and the cron-job.org account, remove
-   Pushover and browser push from the code, and decide what to do with the web app (see
-   [Open questions](#9-open-questions)).
-
-**Rollback:** sync once from the phone, turn cron-job.org back on, and the server picks up from there.
-The Python code stays in the repo until you're sure.
+### Phase F: clean up
+1. Sync relaxes from "a few minutes after every change" to daily plus the cheap "when convenient" run.
+2. Delete the Render services and the cron-job.org job, and cancel Pushover.
+3. Remove `web/` and the parts of `backend/` the Lambda doesn't use. The Python code stays in the repo's
+   history.
 
 ### Phase G: things only a phone can do
 One at a time, roughly in order of value for effort:
@@ -330,7 +346,8 @@ address gets Navigate).
 
 | Risk | Handling |
 |---|---|
-| **The port is big:** ~5,000 lines of Python plus ~1,750 of UI. Bugs creep in. | Tests ported first, logic before UI, a week of shadow mode before the cutover. |
+| **The port is big:** ~5,000 lines of Python plus ~1,750 of UI. Bugs creep in. | Tests ported first, logic before UI, and a tick log that explains every decision on the real phone. |
+| **No reminders between the handover and Phase C**, no assistant until Phase D | Accepted. Phase B is kept short so the gap is too. |
 | Samsung's battery saver stops the app | Exact alarms, the 15-minute safety net, the first-run checklist, a "last tick" time on the Diagnostics screen, and the daily "is the phone alive?" email. |
 | Play rejects a permission | Each policy-sensitive feature has a fallback (see [Google Play](#5-google-play-doing-it-properly)). |
 | Phone lost or reset between syncs | The "when convenient" sync on top of the daily one. |
@@ -340,11 +357,9 @@ address gets Navigate).
 | You're new to Android | Small phases, each installable. Each PR explains what's new and why, like the phase docs do now. |
 
 ## 9. Open questions
-1. **After the cutover, what happens to the web app?** Retire it, or keep a read-only page that shows the
-   Supabase backup (useful on a computer, but up to a day old)?
-2. **Google Play account:** do you already have one? Personal or organization?
-3. **AWS:** which account and region? This session has an AWS connection, so when we get to Phase B I
-   can deploy the Lambda for you (after you confirm), or GitHub Actions can.
+None right now. Settled: the web app is deleted after the handover; Google Play is a personal account,
+internal testing track; the Lambda goes in the AWS account this session is connected to, in the region
+closest to the Supabase database.
 
 ## Glossary
 - **App bundle (AAB)**: the file uploaded to Google Play; Play turns it into the app your phone installs.
