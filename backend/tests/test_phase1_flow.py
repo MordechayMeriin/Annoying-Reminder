@@ -89,13 +89,14 @@ def test_done_from_the_notification_makes_no_llm_call(store, monkeypatch):
     assert store.messages[-1]["content"] == "[Marked done: Water the plants]"
 
 
-def test_start_sets_a_check_in_when_the_time_is_up(store):
-    t = store.add_task("Taxes", next_action="Open the form")
+def test_start_opens_a_session_with_a_check_in_when_the_time_is_up(store):
+    # Phase 2: ▶ Start opens a focus session; its end check-in replaces the task's own (test_phase2_flow.py)
+    t = store.add_task("Taxes", next_action="Open the form", remind_at=store.now + timedelta(minutes=3))
     actions.apply(t["id"], "start", 5)
-    task = store.tasks[t["id"]]
-    assert task["remind_at"] == store.now + timedelta(minutes=5) and task["remind_requested"]
+    assert store.sessions[-1]["task_id"] == t["id"] and store.sessions[-1]["planned_min"] == 5
+    assert store.tasks[t["id"]]["remind_at"] is None   # inside the session: the end check-in covers it
     assert store.events[-1]["kind"] == "session_started"
-    assert store.messages[-1]["content"] == "[▶ Started 5 min: Open the form (Taxes)]"
+    assert store.messages[-1]["content"] == "[▶ 5 min: Open the form (Taxes)]"
 
 
 def test_later_is_decided_by_code(store):
@@ -336,8 +337,8 @@ def test_messages_carry_chips_and_chip_actions_work(client, store):
                                                              "task_id": t["id"]}])
     assert client.get("/messages").json()[-1]["chips"][0]["action"] == "later"
     assert client.post(f"/tasks/{t['id']}/action", json={"action": "later"}).status_code == 200
-    assert client.post(f"/tasks/{t['id']}/action", json={"action": "start", "minutes": 25}).status_code == 200
-    assert store.tasks[t["id"]]["remind_at"] == store.now + timedelta(minutes=25)
+    r = client.post(f"/tasks/{t['id']}/action", json={"action": "start", "minutes": 25})
+    assert r.status_code == 200 and r.json()["session"]["planned_min"] == 25
     assert client.post(f"/tasks/{t['id']}/action", json={"action": "explode"}).status_code == 422
 
 

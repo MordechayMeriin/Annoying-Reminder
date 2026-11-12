@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
-from . import context, tasks, thread
+from . import context, sessions, tasks, thread
 from .config import get_settings
 from .llm import LLMUnavailable, chat_completion
 from .llm_loop import run as run_tools
@@ -79,7 +79,8 @@ def template_line(task: dict[str, Any], now: datetime) -> str:
     elif task.get("due_at"):
         when = f"due {task['due_at'].astimezone(tz):%a %H:%M}"
     if task.get("next_action"):
-        return f"▶ {task['next_action']} — {title}" + (f" ({when})" if when else "")
+        line = f"▶ {task['next_action']} — {title}" + (f" ({when})" if when else "")
+        return line + (f"\n  You stopped at: {task['resume_note']}" if task.get("resume_note") else "")
     if when:
         return f"{title} — {when}."
     if task.get("nag_count", 0) > 0:
@@ -225,6 +226,8 @@ class Daily:
 class _DailyFacts:
     snapshot: str
     open_count: int
+    done_count: int                       # finished today (steps and recurring tasks too)
+    sessions: tuple[int, int]             # focus sessions today: (count, minutes)
     today_msgs: list[dict[str, Any]]
     lang: str
     focus: list[dict[str, Any]]           # Today's 3 (already set: mid-day / evening)
@@ -251,8 +254,14 @@ def _daily_facts(job: str, now: datetime) -> _DailyFacts:
         counts = tasks.event_counts_many([t["id"] for t in shown], 7)
         parts.append("Open for today (incl. overdue):\n" + "\n".join(
             context.format_task(t, now_local, counts=counts.get(t["id"], {}), today=today_d) for t in shown))
-    done = tasks.list_tasks("done_today")
-    parts.append("Done today:\n" + ("\n".join(f"- {t['title']}" for t in done) or "(nothing yet)"))
+    since = day_start(now_local, s.day_reset_time)
+    done = tasks.done_since(since)
+    n_sessions, session_min = sessions.stats_since(since, now)
+    parts.append("Done today (steps count too):\n"
+                 + ("\n".join(f"- {t['title']}" + (" (a step)" if t.get("parent_id") else "") for t in done)
+                    or "(nothing yet)"))
+    if n_sessions:
+        parts.append(f"Focus sessions today: {n_sessions} ({session_min} min)")
     upcoming = tasks.list_tasks("upcoming", 7)
     if upcoming:
         parts.append("Next 7 days:\n" + context.format_open_items(upcoming, now_local, set()))
@@ -280,7 +289,8 @@ def _daily_facts(job: str, now: datetime) -> _DailyFacts:
     today_msgs = thread.since(day_start(now_local, s.day_reset_time), 12)
     titles = " ".join(t["title"] for t in (today or open_all)[:5])
     lang = chip_lang(thread.last_user_text(), titles)
-    return _DailyFacts(snapshot="\n\n".join(parts), open_count=len(today), today_msgs=today_msgs, lang=lang,
+    return _DailyFacts(snapshot="\n\n".join(parts), open_count=len(today), done_count=len(done),
+                       sessions=(n_sessions, session_min), today_msgs=today_msgs, lang=lang,
                        focus=focus, focus_done=focus_done, suggested=suggested, meetings=meetings)
 
 
@@ -314,9 +324,19 @@ async def compose_daily(job: str, now: datetime) -> Daily | None:
     if job == "checkin" and first_open:
         step = first_open.get("next_action") or first_open["title"]
         return Daily(f"Next from Today's 3: ▶ {step} ({first_open['title']})", chips)
+    if job == "evening":
+        return Daily(evening_template(f), chips)
     if f.open_count == 0:
         return Daily("Nothing open for today." if job != "evening" else "Nothing left open today. 👍", chips)
     return Daily(f"{f.open_count} open item(s) for today. Open the app to see them.", chips)
+
+
+def evening_template(f: _DailyFacts) -> str:
+    """The evening review without the LLM: wins first (steps and sessions count), then what carries over."""
+    n, minutes = f.sessions
+    wins = f"Done today: {f.done_count}" + (f" · {n} focus session{'s' if n != 1 else ''} ({minutes} min)" if n else "")
+    rest = f"{f.open_count} open item(s) carry over to tomorrow." if f.open_count else "Nothing left open today."
+    return f"🌙 {wins}. {rest}"
 
 
 def morning_template(focus: list[dict[str, Any]], meetings: list[tuple[datetime, dict[str, Any]]]) -> str:

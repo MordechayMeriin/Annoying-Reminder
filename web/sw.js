@@ -1,10 +1,13 @@
-// Service worker: shows push notifications, handles their buttons (▶ Start 5 min / ✓ Done) without
-// opening the app, and opens the chat at the right message when a notification is tapped.
+// Service worker: shows push notifications and handles their buttons. ✓ Done works without opening
+// the app; ▶ Start 5 min (a check-in) and ▶ Another round (a session's end) start a focus session and
+// open its timer. Tapping a notification opens the chat at the right message.
 //
 // Push payload: { title, body, url, priority, api, messageId?, taskId?, token?, actions?: [{action, title}] }
 // The server chooses the buttons and their labels (Hebrew or English).
 
-const BUTTON_ACTIONS = new Set(["start", "done", "snooze"]); // snooze: notifications sent before ▶ Start
+// snooze: notifications sent before ▶ Start existed
+const BUTTON_ACTIONS = new Set(["start", "done", "snooze", "another"]);
+const OPENS_TIMER = new Set(["start", "another"]);
 const START_MIN = 5;
 
 self.addEventListener("install", () => self.skipWaiting());
@@ -52,6 +55,8 @@ self.addEventListener("notificationclick", (event) => {
       })
         .then((r) => {
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          // A session started: show its running timer (allowed: this is still the notification click).
+          if (OPENS_TIMER.has(event.action)) return openApp("/?session=1", { session: true });
           return broadcast({ type: "tasks-changed" });
         })
         .catch(() =>
@@ -81,8 +86,9 @@ async function openApp(url, data) {
   const client = clients.find((c) => new URL(c.url).origin === self.location.origin);
   if (client) {
     await client.focus();
-    // The app is already open: jump to the message without reloading.
-    if (data.messageId) client.postMessage({ type: "open-message", messageId: data.messageId });
+    // The app is already open: jump to the message (or the timer) without reloading.
+    if (data.session) client.postMessage({ type: "open-session" });
+    else if (data.messageId) client.postMessage({ type: "open-message", messageId: data.messageId });
     else if (data.taskId) client.postMessage({ type: "open-task", taskId: data.taskId });
     else if ("navigate" in client) await client.navigate(url);
     return;

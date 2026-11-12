@@ -3,8 +3,10 @@ Annoying Reminder API.
 
 Public:   GET  /health, GET /config/push
 Cron:     POST /tick                (X-Cron-Secret header)
-Buttons:  POST /actions             (signed token from the notification: ▶ Start / ✓ Done)
-Owner:    everything else           (Supabase login + OWNER_USER_ID check), incl. GET/PATCH /settings
+Buttons:  POST /actions             (signed token from the notification: ▶ Start / ✓ Done / ▶ Another round)
+Owner:    everything else           (Supabase login + OWNER_USER_ID check), incl. GET/PATCH /settings,
+          POST /what-now, POST /tasks/{id}/start, POST /sessions/{id}/end, PATCH /sessions/{id},
+          POST /sessions/{id}/note
 
 Writing in the chat or acting on a task stops any repeating Pushover alarm (you've seen it).
 
@@ -27,11 +29,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import actions, agent, db, httpclient, notify, prompting, scheduler, tasks, thread, user_settings
+from . import actions, agent, db, httpclient, notify, prompting, scheduler, sessions, tasks, thread, user_settings
 from .auth import require_cron, require_owner
 from .config import SPECS, get_settings
 from .llm import LLMLimitReached, LLMUnavailable
-from .logic import ALARM, NORMAL, URGENT, focus_day
+from .logic import (ALARM, NORMAL, SESSION_CHOICES, SESSION_MAX_MIN, URGENT, WHAT_NOW_CHIPS, day_start, focus_day,
+                    wants_breadcrumb)
 from .tokens import verify_action_token
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -83,18 +86,28 @@ async def tick(background: BackgroundTasks):
     task_ids = await run_in_threadpool(scheduler.plan_tick)
     if task_ids:
         background.add_task(scheduler.deliver, task_ids)
+    session_ids = await run_in_threadpool(scheduler.plan_sessions)
+    if session_ids:
+        background.add_task(scheduler.deliver_session_ends, session_ids)
     jobs = await run_in_threadpool(scheduler.due_daily_jobs)
     for job in jobs:
         background.add_task(scheduler.run_daily_job, job)
-    return {"contacting": task_ids, "jobs": jobs}
+    return {"contacting": task_ids, "sessionEnds": session_ids, "jobs": jobs}
 
 
 # ---------------------------------------------------------------- notification buttons
 
 class ActionIn(BaseModel):
     token: str
-    action: str = Field(pattern="^(done|start|snooze)$")   # snooze: notifications sent before ▶ Start existed
+    # snooze: notifications sent before ▶ Start existed; another: the session end check-in
+    action: str = Field(pattern="^(done|start|snooze|another)$")
     minutes: int | None = Field(default=None, ge=5, le=24 * 60)
+
+
+def _session_now() -> dict | None:
+    """The open session for the app's session screen (with its task), or None."""
+    session, task = actions.current_session()
+    return sessions.to_public(session, task)
 
 
 @app.post("/actions")
@@ -106,7 +119,10 @@ def action(body: ActionIn, background: BackgroundTasks):
     task = actions.apply(task_id, body.action, body.minutes)
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
-    return {"ok": True, "task": tasks.to_public(task)}
+    out = {"ok": True, "task": tasks.to_public(task)}
+    if body.action in ("start", "another"):
+        out["session"] = _session_now()   # the service worker opens the session screen
+    return out
 
 
 # ---------------------------------------------------------------- owner only
@@ -223,13 +239,99 @@ def tasks_overview(days: int = 7):
 
 @app.get("/focus", dependencies=[Depends(require_owner)])
 def focus():
-    """Today's 3 for the focus card: each with its next action, and which are done (display only)."""
+    """
+    Everything the top of the chat shows, display only: Today's 3 (each with its next action, done
+    ones ticked), the wins of the day, the running session (the timer) and, after a stopped or
+    unanswered session, the optional "Where did you stop?" field.
+    """
     s = get_settings()
-    day = focus_day(tasks.now_utc().astimezone(s.tz), s.day_reset_time)
+    now = tasks.now_utc()
+    now_local = now.astimezone(s.tz)
+    day = focus_day(now_local, s.day_reset_time)
     rows, done = tasks.focus_today(day)
+    since = day_start(now_local, s.day_reset_time)
+    finished = tasks.done_since(since)
+    n_sessions, minutes = sessions.stats_since(since, now)
+    # At most one session is open, and it's the latest one (starting a session closes the others).
+    latest = sessions.latest()
+    session = latest if latest and latest["ended_at"] is None else None
+    offer = session is None and wants_breadcrumb(latest, now)
+    task = tasks.get(latest["task_id"]) if session or offer else None
+    resume = None
+    if offer and task and task["status"] == "open":
+        resume = {"session_id": latest["id"], "task_id": task["id"], "title": task["title"]}
     return {"date": day.isoformat(),
             "tasks": [{**tasks.to_public(t), "done": t["id"] in done} for t in rows],
-            "doneToday": len(done)}
+            "doneToday": len(finished),
+            "wins": {"done": len(finished), "sessions": n_sessions, "minutes": minutes},
+            "session": sessions.to_public(session, task) if session else None,
+            "resume": resume,
+            "now": now_local.isoformat(timespec="seconds")}
+
+
+class WhatNowIn(BaseModel):
+    low_energy: bool = False
+    exclude: list[int] = Field(default_factory=list, max_length=50)   # already offered (Something else)
+    chip: str = Field(default="what_now", pattern="^(" + "|".join(WHAT_NOW_CHIPS) + ")$")
+
+
+@app.post("/what-now", dependencies=[Depends(require_owner)])
+def what_now(body: WhatNowIn):
+    """One thing to do now, decided by code (no LLM): the tap's event and the answer, as chat messages."""
+    rows = actions.what_now(body.low_energy, body.exclude, body.chip)
+    return {"messages": _public_messages(thread.by_ids([m["id"] for m in rows]))}
+
+
+class StartIn(BaseModel):
+    minutes: int | None = Field(default=None, ge=5, le=SESSION_MAX_MIN)
+
+
+@app.post("/tasks/{task_id}/start", dependencies=[Depends(require_owner)])
+def start_task(task_id: int, body: StartIn, background: BackgroundTasks):
+    """▶ Start: a focus session (25 minutes from the app unless given) on the task's next action."""
+    background.add_task(notify.cancel_alarms)
+    session = actions.start_session(task_id, body.minutes or SESSION_CHOICES[2])
+    if session is None:
+        raise HTTPException(status_code=404, detail="No open task with that id")
+    return {"session": sessions.to_public(session, tasks.get(task_id))}
+
+
+class SessionEnd(BaseModel):
+    outcome: str = Field(pattern="^(done|another|stopped)$")
+
+
+@app.post("/sessions/{session_id}/end", dependencies=[Depends(require_owner)])
+def end_session(session_id: int, body: SessionEnd, background: BackgroundTasks):
+    background.add_task(notify.cancel_alarms)
+    result = actions.end_session(session_id, body.outcome)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"session": _session_now()}
+
+
+class SessionPatch(BaseModel):
+    planned_min: int = Field(ge=5, le=SESSION_MAX_MIN, multiple_of=5)
+
+
+@app.patch("/sessions/{session_id}", dependencies=[Depends(require_owner)])
+def patch_session(session_id: int, body: SessionPatch):
+    """A new length for the running session (5 / 15 / 25 / 45, or +5)."""
+    if actions.set_session_length(session_id, body.planned_min) is None:
+        raise HTTPException(status_code=409, detail="That session has already ended")
+    return {"session": _session_now()}
+
+
+class NoteIn(BaseModel):
+    text: str | None = Field(default=None, max_length=tasks.RESUME_NOTE_MAX)   # null = dismiss
+
+
+@app.post("/sessions/{session_id}/note", dependencies=[Depends(require_owner)])
+def session_note(session_id: int, body: NoteIn):
+    """ "Where did you stop?" (optional): saved as the task's resume note; null just closes the field."""
+    task = actions.save_breadcrumb(session_id, body.text)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return tasks.to_public(task)
 
 
 @app.get("/tasks/{task_id}", dependencies=[Depends(require_owner)])
@@ -260,7 +362,7 @@ def patch_task(task_id: int, body: TaskPatch):
 
 
 class TaskAction(BaseModel):
-    action: str = Field(pattern="^(done|snooze|cancel|start|later)$")
+    action: str = Field(pattern="^(" + "|".join(actions.ACTIONS) + ")$")
     minutes: int | None = Field(default=None, ge=5, le=7 * 24 * 60)
 
 
@@ -270,7 +372,10 @@ def task_action(task_id: int, body: TaskAction, background: BackgroundTasks):
     task = actions.apply(task_id, body.action, body.minutes)
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
-    return tasks.to_public(task)
+    out = tasks.to_public(task)
+    if body.action in ("start", "another"):
+        out["session"] = _session_now()
+    return out
 
 
 @app.get("/settings", dependencies=[Depends(require_owner)])

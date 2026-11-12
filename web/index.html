@@ -57,6 +57,8 @@
         <button id="open-settings" class="small ghost" title="Settings" aria-label="Settings">⚙</button>
         <button id="logout" class="small ghost" title="Log out">⎋</button>
       </div>
+      <!-- A focus session is running and its screen is closed: tap to open the timer again -->
+      <button id="session-bar" type="button" class="session-bar" hidden></button>
     </header>
 
     <!-- Today's 3: display only, nothing to configure. Set every morning; silence accepts it. -->
@@ -73,13 +75,52 @@
       <button id="load-earlier" class="small ghost load-earlier" hidden>Load earlier messages</button>
       <div id="messages" class="messages"></div>
       <div id="chat-status" class="chat-status" aria-live="polite" hidden></div>
+      <!-- After a stopped or unanswered session: optional, never blocking. Ignoring it changes nothing. -->
+      <form id="breadcrumb" class="breadcrumb" hidden>
+        <label for="breadcrumb-input" id="breadcrumb-label">Where did you stop? (optional)</label>
+        <div class="breadcrumb-row">
+          <input id="breadcrumb-input" dir="auto" maxlength="300" autocomplete="off" enterkeyhint="done">
+          <button type="button" id="breadcrumb-mic" class="mic small ghost" aria-label="Dictate" hidden>🎤</button>
+          <button type="submit" class="small">Save</button>
+          <button type="button" id="breadcrumb-skip" class="small ghost" aria-label="Skip">✕</button>
+        </div>
+      </form>
     </main>
 
     <form id="chat-form" class="chat-form">
       <textarea id="chat-input" dir="auto" rows="1" autocomplete="off"
                 placeholder="Reply or add a task…"></textarea>
+      <button type="button" id="chat-mic" class="mic" aria-label="Dictate" hidden>🎤</button>
       <button type="submit" id="chat-send" aria-label="Send">➤</button>
     </form>
+  </section>
+
+  <!-- Focus session: the timer. Display only (nothing to fill in); ✕ hides it, the timer keeps running. -->
+  <section id="session" class="session-screen" hidden aria-label="Focus session">
+    <div class="session-top">
+      <span id="session-title" class="session-title" dir="auto"></span>
+      <button id="session-close" type="button" class="small ghost" aria-label="Hide the timer">✕</button>
+    </div>
+    <div class="session-ring-wrap">
+      <svg class="session-ring" viewBox="0 0 120 120" aria-hidden="true">
+        <circle class="ring-bg" cx="60" cy="60" r="52"></circle>
+        <circle id="ring-fg" class="ring-fg" cx="60" cy="60" r="52"></circle>
+      </svg>
+      <div id="session-time" class="session-time" role="timer" aria-live="off">25:00</div>
+    </div>
+    <div id="session-step" class="session-step" dir="auto"></div>
+    <div id="session-note" class="session-note" dir="auto" hidden></div>
+    <div id="session-lengths" class="session-lengths" role="group" aria-label="Session length"></div>
+    <div id="session-run" class="session-actions">
+      <button id="session-done" type="button" class="done">✓ Done</button>
+      <button id="session-plus" type="button" class="ghost">+5</button>
+      <button id="session-stop" type="button" class="ghost">Stop</button>
+    </div>
+    <div id="session-over" class="session-actions" hidden>
+      <button id="session-over-done" type="button" class="done">✓ Done</button>
+      <button id="session-another" type="button">▶ Another round</button>
+      <button id="session-over-stop" type="button" class="ghost">Stop</button>
+    </div>
   </section>
 
   <!-- Tasks drawer -->

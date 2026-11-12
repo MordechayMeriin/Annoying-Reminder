@@ -9,18 +9,24 @@ The /tick logic, called every 5 minutes by cron-job.org.
    pressing task: normal / urgent / alarm, see logic.alert_level) → next check-in times.
 3. Daily jobs: morning plan, mid-day check-ins, evening review (background, once per day each),
    plus the meeting digests: the week's meetings at the start of the week, tomorrow's in the evening.
+4. Focus sessions: plan_sessions() (sync) records silence as paused and claims due end check-ins;
+   deliver_session_ends() (background) sends them: a template with ✓ Done · ▶ Another round · Stop.
+   While a session runs, other check-ins wait (the focus hold, in logic.contact_decision).
 """
 
 import asyncio
 import logging
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta
 
-from . import coach, db, notify, tasks, thread
+from . import actions, coach, db, notify, sessions, tasks, thread
 from .config import get_settings
 from .jewish_calendar import next_period, rest_config, rest_until
 from .logic import (ALARM, URGENT, AlertPolicy, ContactState, Guardrails, alarm_window_s, alert_level,
-                    day_start, focus_day, job_is_due, next_reminder_after_nag, plan_contacts, user_active_recently)
+                    chip_label, contact_decision, day_start, focus_day, focus_hold_until, job_is_due,
+                    next_reminder_after_nag, plan_contacts, session_end_due, session_end_at, session_last_active,
+                    session_silent, user_active_recently)
 
 log = logging.getLogger("scheduler")
 
@@ -100,7 +106,8 @@ def plan_tick() -> list[int]:
     due = tasks.due_for_contact(focus_day(now_local, s.day_reset_time))  # with the focus filter
     if not due:
         return []
-    state = thread.contact_state(day_start(now_local, s.day_reset_time))
+    state = replace(thread.contact_state(day_start(now_local, s.day_reset_time)),
+                    focus_hold_until=focus_hold_until(sessions.latest()))
     plan = plan_contacts(due, state, now_local, guardrails())
     for task_id, until in plan.defer.items():
         tasks.defer(task_id, until)
@@ -242,8 +249,9 @@ async def run_daily_job(job: str) -> None:
 
 
 def _active_recently(now: datetime) -> bool:
-    """A chat message or a tap in the last hour (a tap on ▶ Start counts too: it writes an event)."""
-    return user_active_recently(thread.last_user_reply_at(), now)
+    """A chat message or a tap in the last hour, or a focus session that ran in the last hour."""
+    times = [t for t in (thread.last_user_reply_at(), session_last_active(sessions.latest(), now)) if t]
+    return user_active_recently(max(times) if times else None, now)
 
 
 def _post_daily(job: str, daily: "coach.Daily") -> None:
@@ -261,3 +269,59 @@ def run_meeting_digest(job: str) -> None:
         notify.notify(digest.title, digest.text, message_id=msg["id"], priority=1)
     except Exception:
         log.exception("Meeting digest %s failed", job)
+
+
+# ---------------------------------------------------------------- 4. focus sessions
+
+def plan_sessions() -> list[int]:
+    """
+    Sync, no LLM. Silence first: a session nobody answered 15 minutes after its end check-in (or after
+    its end, if the check-in couldn't go out) is recorded as paused, and nothing more is sent. Then the
+    sessions whose time is up get their end check-in, if the guardrails allow (quiet hours, Shabbat and
+    the daily cap; not the gap or the per-task cap: the user asked for it). Returns the claimed ids.
+    """
+    s = get_settings()
+    now = tasks.now_utc()
+    now_local = now.astimezone(s.tz)
+    open_ = sessions.open_sessions()
+    due = []
+    for sess in open_:
+        if session_silent(sess, now):
+            actions.close_session(sess, "paused", session_end_at(sess))
+            log.info("Session %s on task %s: no answer, paused", sess["id"], sess["task_id"])
+        elif session_end_due(sess, now):
+            due.append(sess)
+    if not due:
+        return []
+    state = thread.contact_state(day_start(now_local, s.day_reset_time))
+    g = guardrails()
+    claimed = []
+    for sess in due:
+        as_contact = {"id": sess["task_id"], "kind": "session", "remind_requested": True, "blocked_until": None}
+        if contact_decision(as_contact, state, now_local, g) is None and sessions.claim_end(sess["id"]):
+            claimed.append(sess["id"])
+    return claimed
+
+
+async def deliver_session_ends(session_ids: list[int]) -> None:
+    for session_id in session_ids:
+        try:
+            await asyncio.to_thread(_send_session_end, session_id)
+        except Exception:
+            log.exception("Session end check-in %s failed (silence will record it as paused)", session_id)
+
+
+def _send_session_end(session_id: int) -> None:
+    """The check-in at the end of a session: a template (no LLM), one message, one push."""
+    sess = sessions.get(session_id)
+    task = tasks.get(sess["task_id"]) if sess else None
+    if sess is None or sess["ended_at"] is not None or task is None or task["status"] != "open":
+        return
+    text, chips, lang = actions.session_end_message(sess, task)
+    msg = thread.add("assistant", text, "session", [task["id"]], chips)
+    notify.notify(
+        f"⏱ {task['title']}", text, level=URGENT, task_id=task["id"], message_id=msg["id"], priority=task["priority"],
+        actions=[{"action": "done", "title": chip_label("done", lang)},
+                 {"action": "another", "title": chip_label("another", lang)}],
+    )
+    log.info("Session %s ended: check-in sent as message %s", session_id, msg["id"])

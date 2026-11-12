@@ -47,6 +47,8 @@ def format_task(task: dict[str, Any], now_local: datetime, *, subtasks: list[dic
         lines.append(f"  Next action: {task['next_action']}{est}")
     elif task["kind"] == "task":
         lines.append("  Next action: (none yet: infer one and save it with update_task)")
+    if task.get("resume_note"):
+        lines.append(f"  Where they stopped last time: {task['resume_note']}")
     if task.get("description"):
         lines.append(f"  Description: {task['description']}")
     if task.get("blocked_reason"):

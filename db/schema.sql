@@ -112,9 +112,13 @@ create table if not exists sessions (
     planned_min integer     not null check (planned_min > 0 and planned_min % 5 = 0),
     ended_at    timestamptz,
     outcome     text        check (outcome in ('done', 'another', 'stopped', 'paused')),
+    end_sent_at    timestamptz,  -- the end check-in went out (silence → paused counts from it)
+    note_closed_at timestamptz,  -- "Where did you stop?" answered or dismissed
     user_id     uuid        -- unused: keeps a later multi-user step cheap
 );
-create index if not exists sessions_open_idx on sessions (started_at) where ended_at is null;
+create index if not exists sessions_open_idx    on sessions (started_at) where ended_at is null;
+create index if not exists sessions_task_idx    on sessions (task_id, started_at desc);
+create index if not exists sessions_started_idx on sessions (started_at desc);
 
 -- Preferences stated in chat ("shorter messages please"), injected into every prompt
 create table if not exists preferences (

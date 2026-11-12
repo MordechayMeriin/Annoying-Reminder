@@ -8,8 +8,9 @@ one-tap reply buttons, and decides sensibly when to follow up.
 **The one rule: the app does the work.** Nothing asks you to fill in fields, sort lists or answer
 questions just to keep it running. Every question comes with buttons, silence means "accept the
 default", starting and finishing work from the notification, and new features replace messages
-rather than add to them. (The plan is in [the implementation brief](<Annoying Reminder → ADHD Assistant Implementation Brief.md>);
-Phase 1 is in: reply buttons, the silent first step, Today's 3 and playbooks.)
+rather than add to them. (The plan is in [the implementation brief](<Annoying Reminder → ADHD Assistant Implementation Brief.md>).
+Phase 1 is in: reply buttons, the silent first step, Today's 3 and playbooks. Phase 2 is in: What now?,
+focus sessions with a timer, "where did you stop?", sharing / dictating tasks, and the day's wins.)
 
 ## How it works
 
@@ -19,6 +20,7 @@ Phase 1 is in: reply buttons, the silent first step, Today's 3 and playbooks.)
  │ chat (main screen)   │ ────────▶ │ FastAPI                  │ ───────▶ │ Postgres     │
  │ Today's 3 · tasks    │ ◀──push── │  • agent  (OpenRouter)   │          │ (RLS on)     │
  │ [▶ Start] [✓ Done]   │           │  • /tick → coach         │          └──────────────┘
+ │ ⏱ timer · What now?  │           │  • sessions, What now?   │
  └──────────────────────┘           └──────────────────────────┘
                                         ▲ every 5 min          └──▶ Pushover (loud, alarms)
                                   cron-job.org (X-Cron-Secret)
@@ -31,8 +33,10 @@ the messages and can adjust follow-ups through tools, within those limits.
 ### Task stages
 Every task has a stage ([`logic.task_stage`](backend/app/logic.py)), and the app's move depends on it:
 **captured** (you said it) → **clarified** (it has a next action, filled in silently in the same turn) →
-**planned** (in Today's 3) → **done**. A task postponed or ignored 3+ times in 7 days is **avoided**: the
-coach switches to the avoiding playbook instead of pushing harder.
+**planned** (in Today's 3) → **in session** (you tapped ▶ Start: a timer runs) → **done**. A session you
+stop, or don't answer at its end, leaves the task **paused**, with an optional "where did you stop?". A
+task postponed or ignored 3+ times in 7 days is **avoided**: the coach switches to the avoiding
+playbook instead of pushing harder.
 
 ### Reply buttons ("chips")
 Every proactive message, and every chat reply about exactly one open task, comes with 2–4 buttons,
@@ -45,17 +49,20 @@ and disappear once you reply.
 | Task check-in | ▶ Start 5 min · ✓ Done · Later · I'm stuck |
 | Morning plan | ▶ Start the first one · Change it |
 | Mid-day check-in | ▶ Start next · What now? |
+| Session end | ✓ Done · ▶ Another round · Stop |
+| What now? answer | ▶ Start · Low energy · Something else |
 | Chat reply about one open task | ▶ Start 5 min · ✓ Done |
 | Meeting reminder, evening review | none |
 
-- **Action buttons run without the LLM** (Start, Done, Later): they change the task and write a short
-  event in the chat (`[▶ Started 5 min: …]`). **Text buttons** (I'm stuck, Change it, What now?) send
-  their label as your reply, and the assistant answers.
+- **Action buttons run without the LLM** (Start, Done, Later, Another round, Stop, What now?, Low
+  energy, Something else): they change the task or ask the code picker, and write a short event in the
+  chat (`[▶ 5 min: …]`, `[What now?]`). **Text buttons** (I'm stuck, Change it) send their label as
+  your reply, and the assistant answers.
 - **Later** is decided by code: +2 hours before 18:00, otherwise the next morning.
-- **▶ Start** gives you N minutes on the next action and checks in when they're up (5 from a
-  notification or button, 25 from the focus card). The timer screen comes in Phase 2.
-- Task check-ins carry **▶ Start 5 min** and **✓ Done** as notification buttons, so the two most common
-  actions work without opening the app.
+- **▶ Start** opens a [focus session](#focus-sessions) on the next action: 5 minutes from a
+  notification or a button, 25 from the focus card.
+- Task check-ins carry **▶ Start 5 min** and **✓ Done** as notification buttons, a session's end
+  carries **✓ Done** and **▶ Another round**, so the most common actions work from the notification.
 - **Taps count as activity**, like a typed reply: a user who only taps is never "ignoring" the app.
 
 ### Today's 3
@@ -66,7 +73,47 @@ top of the chat shows them with their next action and ▶ Start; done ones get a
 
 Fewer messages: during the day, check-ins go only to Today's 3, tasks due within 48 hours, reminders
 you asked for and meetings. Undated tasks outside Today's 3 aren't nudged; they compete for tomorrow's
-focus instead. Mid-day check-ins are skipped when you were active in the last hour.
+focus instead. Mid-day check-ins are skipped when you were active, or a session ran, in the last hour.
+
+The card's head shows the day's **wins**: "Done today: 4 · ⏱ 2 sessions" (finished steps and recurring
+tasks count; no streaks, no zeros). The evening review leads with them too.
+
+### What now?
+Tap **What now?** (on the focus card or the mid-day check-in) and code picks **one** thing, in under a
+second, with no LLM ([`logic.pick_next`](backend/app/logic.py)): the first of Today's 3 not done yet, if
+its estimate × 1.5 fits before your next meeting; otherwise the shortest one that fits; if nothing fits,
+5 minutes of the first. The answer is "Do this: {first step} ({n} min)" with ▶ Start · Low energy ·
+Something else. **Low energy** picks the smallest task estimated at 15 minutes or less (or 5 minutes of
+the top one); **Something else** gives the next candidate. With no focus tasks, it picks by due date,
+then priority, then age; when all of Today's 3 are done, it says so and offers one bonus task.
+
+### Focus sessions
+**▶ Start** turns a nudge into a timer: a full-screen ring with the next action, where you stopped last
+time, ✓ Done · Stop · +5, and one tap to switch between 5 / 15 / 25 / 45 minutes. ✕ hides it (a bar in
+the header keeps counting). From a notification, ▶ Start opens the running timer right away.
+- At the end, one check-in arrives at the first tick (within 5 minutes): a template, so it costs
+  nothing and never fails, with ✓ Done · ▶ Another round · Stop. If the app is open, the ring also ends
+  on time with a sound.
+- **Silence is an answer:** no reply 15 minutes after the end check-in records the session as
+  *paused*; nothing more is sent and the task stays in Today's 3.
+- **Focus mode:** while a session runs, other check-ins wait until it ends + 10 minutes. Meetings still
+  come through. The task's own check-in inside the session is replaced by the end check-in.
+- Session messages count toward the daily total but skip the minimum gap and the per-task cap (you
+  asked for them). Quiet hours and Shabbat still hold: an end that falls inside them isn't sent.
+- Each session records planned and actual minutes (until the ✓ / Stop tap; the planned time when
+  silent), for the success measures and, later, for learning how long things really take.
+
+### Where did you stop?
+After you tap Stop, or don't answer a session's end, a small optional field appears in the chat:
+"Where did you stop? (optional)", with a mic. Doing nothing skips it (it goes away after a few hours).
+You can also just say it in the chat ("I stopped at page 3"). The line is shown on the next session
+screen and used by the next check-in ("You stopped at row 40"), and it's cleared when the task is done.
+
+### Capture without typing
+- **Share** text from any app (WhatsApp, email, a link) to *Reminder*: it goes into the chat and the
+  assistant saves it as a task, with its first step. (The installed app is a share target.)
+- **🎤** next to the reply box dictates, in Hebrew or English (the language of your latest message).
+- Long-press the app icon → **New task** opens the chat ready to type or dictate.
 
 ### The chat is the product
 - Every proactive contact (task check-in, meeting reminder, morning plan, mid-day check-in, evening
@@ -89,6 +136,7 @@ focus instead. Mid-day check-ins are skipped when you were active in the last ho
    due within 48 hours, reminders you asked for, meetings; see [Today's 3](#todays-3)).
 2. Guardrails, in code, before any LLM call ([`logic.contact_decision`](backend/app/logic.py)):
    - Shabbat / holidays and quiet hours are never overruled, whatever the priority (meetings included)
+   - while a focus session runs (until it ends + 10 min) only meetings and its own end check-in are sent
    - `MIN_GAP_MIN` between proactive messages (meetings exempt)
    - `MAX_PROACTIVE_PER_DAY` messages per day (meetings skip it but count toward it)
    - `MAX_PER_TASK_PER_DAY` assistant check-ins per task (reminders you asked for don't count)
@@ -104,6 +152,8 @@ focus instead. Mid-day check-ins are skipped when you were active in the last ho
    Taxes"). A reminder is never lost because of the LLM.
 6. The push is as loud as its most pressing task (see [Pushover](#pushover-alerts-that-get-your-attention)):
    normal → urgent → a repeating alarm for important tasks you keep ignoring.
+7. Focus sessions whose time is up get their end check-in (urgent, like a reminder you asked for);
+   those nobody answered for 15 minutes are recorded as paused.
 
 The `/tick` request itself only decides and returns; the LLM work runs in a background task.
 
@@ -163,7 +213,7 @@ question if it's ambiguous. The turn is linked to the tasks the model actually a
 
 ### Tools (10, flat parameters for a mid-size model)
 `add_task` (with the inferred `next_action` and `estimate_min`), `list_tasks`, `update_task` (also
-description / next action / unblock), `complete_task`, `cancel_task`, `schedule_followup`,
+description / next action / where you stopped / unblock), `complete_task`, `cancel_task`, `schedule_followup`,
 `add_subtask`, `log_interaction`, `mark_blocked`, `set_focus` (Today's 3). Each context gets only what
 it needs: the morning plan gets `set_focus` and `list_tasks`, check-ins `schedule_followup`, chat all.
 
@@ -196,7 +246,7 @@ Smaller prompts get better behaviour from cheaper models. `system.md` (chat), `c
 2. **SQL Editor** → paste [`db/schema.sql`](db/schema.sql) → Run. (Existing project: run the files in
    [`db/migrations/`](db/migrations/) in order instead; they are idempotent. After `006`, give your
    existing tasks their first steps once: Render → api service → Shell →
-   `python scripts/backfill_next_actions.py`.)
+   `python scripts/backfill_next_actions.py`. `007` adds two columns for focus sessions.)
 3. **Authentication → Sign In / Providers**: keep Email enabled, **turn off "Allow new users to sign up"**.
 4. **Authentication → Users → Add user → Create new user** with your email (tick auto-confirm). Copy its **User UID** → `OWNER_USER_ID`.
 5. **Authentication → Emails → Magic Link** template: add `Your code: {{ .Token }}` so you can log in with a code inside the installed app.
@@ -262,6 +312,8 @@ Type, or tap a button. For example:
 - `Waiting for the landlord to answer` → marked blocked, it asks again later
 - `What's left for today?`
 - `Swap 2 for the dentist` → changes Today's 3
+- `I stopped at page 3` → remembered for the next session on that task
+- Or don't type at all: share a WhatsApp message to the app, or tap 🎤
 
 **⚙** opens the settings (times, delays, limits, Shabbat, Pushover). The ☑ Tasks drawer lists today's and all open tasks (✓ / ⏰ on each row), each with its next action. Tap a task to see and edit
 its description, steps and history.
@@ -303,7 +355,7 @@ cd backend
 python -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt pytest
 python -m pytest -q                          # no DB or network needed
-python scripts/simulate_tick.py              # a simulated morning: ticks, grouping, a reply, a meeting
+python scripts/simulate_tick.py              # a simulated morning: ticks, a reply, What now?, a session, a meeting
 python scripts/simulate_tick.py --llm-down   # same with OpenRouter "unreachable" → templates
 DATABASE_URL=... python scripts/metrics.py   # success measures for the last 28 days (read-only)
                                              #   --from 2026-10-01 --to 2026-11-01 for a range
@@ -332,10 +384,12 @@ backend/app/
   llm_loop.py    tool-calling loop (one retry, one text-call recovery)
   context.py     compact plain-text context for the LLM
   logic.py       pure logic (tested): scheduling, guardrails, alert levels, reply buttons, stages,
-                 playbook choice, Today's 3 pick, Later
+                 playbook choice, Today's 3 pick, Later, What now? pick, session timing, focus hold
   tasks.py       task storage, events (interaction log)
   thread.py      the chat thread, task links, guardrail counts
-  actions.py     Done / Start / Later / Snooze / Cancel (no LLM) + chat events
+  sessions.py    focus sessions storage (the timer, its end check-in, breadcrumbs)
+  actions.py     Done / Start / Another round / Stop / Later / Snooze / Cancel and What now? (no LLM)
+                 + chat events
   prompting.py   loads prompts/*.md
   prompts/       core + playbooks/, system, checkin, daily_morning/checkin/evening
   llm.py         OpenRouter client: fallback models, daily cap, timeout, 429 → fallback
@@ -346,6 +400,6 @@ backend/tests/   unit + end-to-end tests (in-memory store, scripted LLM)
 backend/scripts/ simulate_tick (a simulated morning), metrics (success measures),
                  backfill_next_actions (one-off after migration 006), gen_secrets
 db/schema.sql    full schema;  db/migrations/  idempotent upgrades
-web/             static web app (installable), service worker for push
+web/             static web app (installable, a share target), service worker for push
 render.yaml      Render Blueprint
 ```

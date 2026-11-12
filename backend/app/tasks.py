@@ -9,11 +9,12 @@ from .logic import FOCUS_MAX, NEAR_DEADLINE_H, next_occurrence
 
 COLUMNS = ("id, parent_id, title, description, kind, priority, status, due_at, remind_at, "
            "remind_requested, recurrence, nag_count, escalated, blocked_reason, blocked_until, "
-           "last_notified_at, created_at, completed_at, next_action, estimate_min, focus_date, focus_rank")
+           "last_notified_at, created_at, completed_at, next_action, estimate_min, focus_date, focus_rank, resume_note")
 
 TIME_KEYS = ("due_at", "remind_at", "blocked_until", "last_notified_at", "created_at", "completed_at")
 DESCRIPTION_MAX = 800
 NEXT_ACTION_MAX = 200
+RESUME_NOTE_MAX = 300
 EVENT_KINDS = {"postponed", "committed", "progress", "stuck", "blocked", "unblocked", "ignored", "done",
                "description_changed", "session_started", "session_ended", "paused", "parked"}
 
@@ -140,7 +141,7 @@ def create(title: str, *, kind: str = "task", priority: int = 1, description: st
 
 
 UPDATABLE = {"title", "description", "kind", "priority", "due_at", "remind_at", "recurrence", "status",
-             "blocked_reason", "blocked_until", "next_action", "estimate_min"}
+             "blocked_reason", "blocked_until", "next_action", "estimate_min", "resume_note"}
 
 
 def update(task_id: int, **fields: Any) -> dict[str, Any] | None:
@@ -149,6 +150,8 @@ def update(task_id: int, **fields: Any) -> dict[str, Any] | None:
         return get(task_id)
     if "next_action" in fields:
         fields["next_action"] = _clip(fields["next_action"], NEXT_ACTION_MAX)
+    if "resume_note" in fields:
+        fields["resume_note"] = _clip(fields["resume_note"], RESUME_NOTE_MAX) or None
     if "description" in fields:
         fields["description"] = _clip(fields["description"])
         old = get(task_id)
@@ -177,7 +180,7 @@ def _clip(text: str | None, limit: int = DESCRIPTION_MAX) -> str | None:
 # ---------------------------------------------------------------- lifecycle
 
 def complete(task_id: int) -> dict[str, Any] | None:
-    """Mark done. Recurring tasks roll forward to the next occurrence instead."""
+    """Mark done (the resume note is cleared). Recurring tasks roll forward to the next occurrence instead."""
     task = get(task_id)
     if task is None or task["status"] != "open":
         return task
@@ -190,14 +193,14 @@ def complete(task_id: int) -> dict[str, Any] | None:
         lead = (task["due_at"] - task["remind_at"]) if task["remind_at"] else timedelta(0)
         return db.fetch_one(
             f"""update tasks set due_at = %s, remind_at = %s, remind_requested = true, nag_count = 0,
-                escalated = false, last_notified_at = null, blocked_reason = null, blocked_until = null
-                where id = %s returning {COLUMNS}""",
+                escalated = false, last_notified_at = null, blocked_reason = null, blocked_until = null,
+                resume_note = null where id = %s returning {COLUMNS}""",
             (nxt, nxt - lead, task_id),
         )
     db.execute("update tasks set status = 'done', completed_at = now(), remind_at = null "
                "where parent_id = %s and status = 'open'", (task_id,))
     return db.fetch_one(
-        f"""update tasks set status = 'done', completed_at = now(), remind_at = null
+        f"""update tasks set status = 'done', completed_at = now(), remind_at = null, resume_note = null
             where id = %s returning {COLUMNS}""",
         (task_id,),
     )
@@ -343,6 +346,20 @@ def focus_today(today: date) -> tuple[list[dict[str, Any]], set[int]]:
     )
     done = {r["id"] for r in rows if r.pop("done_today") or r["status"] == "done"}
     return rows, done
+
+
+def done_since(start: datetime) -> list[dict[str, Any]]:
+    """
+    Everything finished since `start`, from the done events: steps and recurring tasks (which roll on
+    instead of closing) count too. The wins strip and the evening review use it. Oldest first.
+    """
+    return db.fetch_all(
+        """select t.id, t.title, t.parent_id, max(e.created_at) as done_at
+           from task_events e join tasks t on t.id = e.task_id
+           where e.kind = 'done' and e.created_at >= %s and t.status <> 'cancelled'
+           group by t.id, t.title, t.parent_id order by done_at""",
+        (start,),
+    )
 
 
 # ---------------------------------------------------------------- lists

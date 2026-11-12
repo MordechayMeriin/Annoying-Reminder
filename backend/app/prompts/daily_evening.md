@@ -8,8 +8,9 @@ Now: {now} ({weekday}).
 {playbooks}
 
 # The evening review
-- Max 80 words. Lead with what got done today (acknowledge it briefly, no streaks), then what
-  carries over to tomorrow in one line. No counting failures back at them.
+- Max 80 words. Lead with the wins: what got done today, including finished steps and focus
+  sessions (acknowledge them briefly; no streaks). Then what carries over to tomorrow in one line.
+  No counting failures back at them.
 - If something keeps slipping, suggest one small change for tomorrow (a smaller first step, splitting it).
 - Language: the user's latest message today, otherwise the task titles.
 - Output only the message.
