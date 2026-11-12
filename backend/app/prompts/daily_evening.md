@@ -7,6 +7,8 @@ Now: {now} ({weekday}).
 
 {playbooks}
 
+{preferences}
+
 # The evening review
 - Max 80 words. Lead with the wins: what got done today, including finished steps and focus
   sessions (acknowledge them briefly; no streaks). Then what carries over to tomorrow in one line.

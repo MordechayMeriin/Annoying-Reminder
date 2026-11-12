@@ -5,18 +5,23 @@ from typing import Any
 
 from . import db
 from .config import get_settings
-from .logic import FOCUS_MAX, NEAR_DEADLINE_H, next_occurrence
+from .logic import (AVOID_REASONS, FOCUS_MAX, NEAR_DEADLINE_H, STALE_COOLDOWN_DAYS, STALE_DAYS, STALE_MAX,
+                    next_occurrence)
 
 COLUMNS = ("id, parent_id, title, description, kind, priority, status, due_at, remind_at, "
            "remind_requested, recurrence, nag_count, escalated, blocked_reason, blocked_until, "
-           "last_notified_at, created_at, completed_at, next_action, estimate_min, focus_date, focus_rank, resume_note")
+           "last_notified_at, created_at, completed_at, next_action, estimate_min, focus_date, focus_rank, resume_note, "
+           "parked_until, stale_offered_at, avoid_asked_at, avoid_asks, avoid_reset_at")
 
-TIME_KEYS = ("due_at", "remind_at", "blocked_until", "last_notified_at", "created_at", "completed_at")
+TIME_KEYS = ("due_at", "remind_at", "blocked_until", "last_notified_at", "created_at", "completed_at",
+             "parked_until", "stale_offered_at", "avoid_asked_at", "avoid_reset_at")
 DESCRIPTION_MAX = 800
 NEXT_ACTION_MAX = 200
 RESUME_NOTE_MAX = 300
 EVENT_KINDS = {"postponed", "committed", "progress", "stuck", "blocked", "unblocked", "ignored", "done",
-               "description_changed", "session_started", "session_ended", "paused", "parked"}
+               "description_changed", "session_started", "session_ended", "paused", "parked", "avoided"}
+# Events that show the task is moving: they end "avoided", and a task with one isn't stale.
+PROGRESS_KINDS = ("progress", "done", "committed", "session_started", "session_ended")
 
 
 def now_utc() -> datetime:
@@ -52,11 +57,14 @@ def subtasks(task_id: int) -> list[dict[str, Any]]:
 
 # ---------------------------------------------------------------- task events (interaction log)
 
-def add_event(task_id: int, kind: str, note: str | None = None) -> None:
+def add_event(task_id: int, kind: str, note: str | None = None, avoid_reason: str | None = None) -> None:
+    """avoid_reason: why the user avoids the task (a reason button, or noticed by the agent)."""
     if kind not in EVENT_KINDS:
         raise ValueError(f"Unknown event kind: {kind}")
-    db.execute("insert into task_events (task_id, kind, note) values (%s, %s, %s)",
-               (task_id, kind, (note or "")[:500] or None))
+    if avoid_reason is not None and avoid_reason not in AVOID_REASONS:
+        raise ValueError(f"Unknown avoid reason: {avoid_reason}")
+    db.execute("insert into task_events (task_id, kind, note, avoid_reason) values (%s, %s, %s, %s)",
+               (task_id, kind, (note or "")[:500] or None, avoid_reason))
 
 
 def recent_events(task_id: int, limit: int = 8) -> list[dict[str, Any]]:
@@ -67,12 +75,7 @@ def recent_events(task_id: int, limit: int = 8) -> list[dict[str, Any]]:
 
 
 def event_counts(task_id: int, days: int = 7) -> dict[str, int]:
-    rows = db.fetch_all(
-        """select kind, count(*) as n from task_events
-           where task_id = %s and created_at > now() - make_interval(days => %s) group by kind""",
-        (task_id, days),
-    )
-    return {r["kind"]: r["n"] for r in rows}
+    return event_counts_many([task_id], days)[task_id]
 
 
 # Batch versions for several tasks at once (one query each instead of one per task).
@@ -112,9 +115,11 @@ def event_counts_many(ids: list[int], days: int = 7) -> dict[int, dict[str, int]
     if not ids:
         return out
     for row in db.fetch_all(
-        """select task_id, kind, count(*) as n from task_events
-           where task_id = any(%s::bigint[]) and created_at > now() - make_interval(days => %s)
-           group by task_id, kind""",
+        # Counted from the task's last fresh start (a park, a reason given, a session: reset_avoidance).
+        """select e.task_id, e.kind, count(*) as n from task_events e join tasks t on t.id = e.task_id
+           where e.task_id = any(%s::bigint[]) and e.created_at > now() - make_interval(days => %s)
+             and (t.avoid_reset_at is null or e.created_at > t.avoid_reset_at)
+           group by e.task_id, e.kind""",
         (list(ids), days),
     ):
         out.setdefault(row["task_id"], {})[row["kind"]] = row["n"]
@@ -129,7 +134,7 @@ def create(title: str, *, kind: str = "task", priority: int = 1, description: st
            next_action: str | None = None, estimate_min: int | None = None) -> dict[str, Any]:
     s = get_settings()
     if remind_at is None and due_at is not None:
-        lead = s.meeting_lead_min if kind == "meeting" else 0
+        lead = s.meeting_lead_min if kind == "meeting" else 0   # a fence fires at its time
         remind_at = due_at - timedelta(minutes=lead)
     return db.fetch_one(
         f"""insert into tasks (title, kind, priority, description, due_at, remind_at, remind_requested,
@@ -165,6 +170,7 @@ def update(task_id: int, **fields: Any) -> dict[str, Any] | None:
             lead = get_settings().meeting_lead_min if (current and current["kind"] == "meeting") else 0
             fields["remind_at"] = fields["due_at"] - timedelta(minutes=lead)
         fields["remind_requested"] = fields.get("remind_at") is not None
+        fields["parked_until"] = None  # a new time from the user ends a park
     sets = ", ".join(f"{k} = %({k})s" for k in fields)
     fields["id"] = task_id
     return db.fetch_one(f"update tasks set {sets} where id = %(id)s returning {COLUMNS}", fields)
@@ -209,8 +215,8 @@ def complete(task_id: int) -> dict[str, Any] | None:
 def set_followup(task_id: int, when: datetime, requested: bool) -> dict[str, Any] | None:
     """Next contact time. requested=True: the user asked for it (doesn't use up the per-task cap)."""
     return db.fetch_one(
-        f"""update tasks set remind_at = %s, remind_requested = %s, nag_count = 0, escalated = false
-            where id = %s and status = 'open' returning {COLUMNS}""",
+        f"""update tasks set remind_at = %s, remind_requested = %s, nag_count = 0, escalated = false,
+            parked_until = null where id = %s and status = 'open' returning {COLUMNS}""",
         (when, requested, task_id),
     )
 
@@ -264,28 +270,34 @@ def close_finished_meetings() -> None:
     )
 
 
-def due_for_contact(today: date, limit: int = 20) -> list[dict[str, Any]]:
+def due_for_contact(today: date, lapsed: bool = False, limit: int = 20) -> list[dict[str, Any]]:
     """
     Tasks due for a check-in, with the focus filter (logic.may_check_in, here in SQL so quiet tasks
     can't crowd out the rest): meetings and fences, reminders the user asked for, Today's 3 (today =
-    logic.focus_day), and tasks due within 48 hours. Undated tasks outside Today's 3 stay quiet.
+    logic.focus_day), tasks due within 48 hours, and an avoided task waiting for its last reason message.
+    Undated tasks outside Today's 3 stay quiet; parked tasks too. lapsed (the user has been away for 48
+    hours): only meetings, fences and reminders the user asked for.
     """
     return db.fetch_all(
         f"""select {COLUMNS} from tasks where status = 'open' and remind_at <= now()
-            and (kind in ('meeting', 'fence') or remind_requested or focus_date = %s
-                 or due_at < now() + make_interval(hours => %s))
+            and (kind in ('meeting', 'fence')
+                 or ((parked_until is null or parked_until <= now())
+                     and (remind_requested
+                          or (not %s and (focus_date = %s or avoid_asks > 0
+                                          or due_at < now() + make_interval(hours => %s))))))
             order by remind_at limit %s""",
-        (today, NEAR_DEADLINE_H, limit),
+        (lapsed, today, NEAR_DEADLINE_H, limit),
     )
 
 
-def meetings_between(start: datetime, end: datetime) -> list[dict[str, Any]]:
+def meetings_between(start: datetime, end: datetime, kinds: tuple[str, ...] = ("meeting",)) -> list[dict[str, Any]]:
     """Open meetings that may start in [start, end): one-off ones in the window, and every recurring
-    one that started before its end (logic.meeting_occurrences expands those)."""
+    one that started before its end (logic.meeting_occurrences expands those).
+    kinds=("meeting", "fence"): every fixed event (What now? never picks something longer)."""
     return db.fetch_all(
-        f"""select {COLUMNS} from tasks where status = 'open' and kind = 'meeting' and due_at < %s
+        f"""select {COLUMNS} from tasks where status = 'open' and kind = any(%s) and due_at < %s
             and (due_at >= %s or recurrence is not null) order by due_at""",
-        (end, start),
+        (list(kinds), end, start),
     )
 
 
@@ -314,6 +326,90 @@ def finish_contact(task_id: int, nag_count: int, next_at: datetime | None, reque
            escalated = escalated or %s where id = %s""",
         (nag_count, next_at, requested, escalate, task_id),
     )
+
+
+def fence_fired(task_id: int) -> dict[str, Any] | None:
+    """
+    A fence (hard stop) was sent, or its time passed while nothing could be sent: a recurring one moves
+    to its next time, a one-off is closed. No done event: a hard stop isn't a win.
+    """
+    task = get(task_id)
+    if task is None or task["status"] != "open" or task["kind"] != "fence":
+        return task
+    if task["recurrence"] and task["due_at"]:
+        tz = get_settings().tz
+        nxt = next_occurrence(task["due_at"], task["recurrence"], tz)
+        while nxt <= now_utc():
+            nxt = next_occurrence(nxt, task["recurrence"], tz)
+        return db.fetch_one(
+            f"""update tasks set due_at = %s, remind_at = %s, remind_requested = true, nag_count = 0,
+                last_notified_at = now() where id = %s returning {COLUMNS}""",
+            (nxt, nxt, task_id))
+    return db.fetch_one(
+        f"""update tasks set status = 'done', completed_at = now(), remind_at = null, last_notified_at = now()
+            where id = %s returning {COLUMNS}""",
+        (task_id,))
+
+
+# ---------------------------------------------------------------- avoidance, parking, cleanup (Phase 3)
+
+def avoid_asked(task_id: int, next_at: datetime) -> None:
+    """The reason message ("what's in the way?") went out: count it, and look again at next_at."""
+    db.execute(
+        """update tasks set avoid_asks = avoid_asks + 1, avoid_asked_at = now(), remind_at = %s,
+           remind_requested = false, last_notified_at = now() where id = %s""",
+        (next_at, task_id))
+
+
+def reset_avoidance(task_id: int) -> None:
+    """
+    A fresh start for a task: the user gave a reason, started a session or made progress. Earlier
+    postponed / ignored events no longer count toward "avoided", and a park ends.
+    """
+    db.execute(
+        """update tasks set avoid_reset_at = now(), avoid_asks = 0, avoid_asked_at = null, parked_until = null
+           where id = %s""",
+        (task_id,))
+
+
+def park(task_id: int, until: datetime) -> dict[str, Any] | None:
+    """
+    Not now: no check-ins until `until`, and out of Today's 3. When the park ends the task is simply
+    open again (counting toward "avoided" starts over from now).
+    """
+    task = db.fetch_one(
+        f"""update tasks set parked_until = %s, remind_at = %s, remind_requested = false, nag_count = 0,
+            escalated = false, focus_date = null, focus_rank = null,
+            avoid_reset_at = now(), avoid_asks = 0, avoid_asked_at = null
+            where id = %s and status = 'open' returning {COLUMNS}""",
+        (until, until, task_id))
+    if task:
+        add_event(task_id, "parked", f"until {until.astimezone(get_settings().tz):%Y-%m-%d}")
+    return task
+
+
+def stale_tasks(limit: int = STALE_MAX) -> list[dict[str, Any]]:
+    """
+    Sunday cleanup candidates, oldest first: top-level tasks open 21+ days with nothing moving in that
+    time, not waiting on a future date, a blocker or a park, and not offered in the last 4 weeks.
+    """
+    return db.fetch_all(
+        f"""select {COLUMNS} from tasks t where status = 'open' and kind = 'task' and parent_id is null
+            and recurrence is null and created_at < now() - make_interval(days => %s)
+            and (due_at is null or due_at < now())
+            and (blocked_until is null or blocked_until <= now())
+            and (parked_until is null or parked_until <= now())
+            and (stale_offered_at is null or stale_offered_at < now() - make_interval(days => %s))
+            and not exists (select 1 from task_events e where e.task_id = t.id and e.kind = any(%s)
+                            and e.created_at > now() - make_interval(days => %s))
+            order by created_at, id limit %s""",
+        (STALE_DAYS, STALE_COOLDOWN_DAYS, list(PROGRESS_KINDS), STALE_DAYS, limit))
+
+
+def mark_stale_offered(ids: list[int]) -> None:
+    """Offered in the Sunday cleanup: whatever the answer (silence keeps them), not again for 4 weeks."""
+    if ids:
+        db.execute("update tasks set stale_offered_at = now() where id = any(%s::bigint[])", (list(ids),))
 
 
 # ---------------------------------------------------------------- Today's 3

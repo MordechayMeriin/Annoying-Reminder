@@ -205,7 +205,7 @@ def test_stop_offers_the_breadcrumb_and_the_next_check_in_uses_it(store, monkeyp
     llm = use_llm(monkeypatch, "Row 40 next: column F?")
     tick()
     assert "Where they stopped last time: row 40" in llm.requests[0]["messages"][1]["content"]
-    store.tasks[t["id"]]["remind_at"] = store.now + timedelta(minutes=30)
+    store.tasks[t["id"]].update(remind_at=store.now + timedelta(minutes=30), remind_requested=True)
     store.advance(30)
     use_llm(monkeypatch, LLMUnavailable("down"))
     tick()

@@ -17,8 +17,9 @@ from . import context, sessions, tasks, thread
 from .config import get_settings
 from .llm import LLMUnavailable, chat_completion
 from .llm_loop import run as run_tools
-from .logic import (chip_label, chip_lang, chips_for, chips_json, clip, day_start, focus_day, meeting_occurrences,
-                    pick_focus, select_playbooks, task_stage)
+from .logic import (WEEK_WINS_DAYS, chip_label, chip_lang, chips_for, chips_json, clip, day_start, focus_day,
+                    meeting_occurrences, pick_focus, select_playbooks, task_stage)
+from .logic import text as fixed_text
 from .prompting import render
 from .tools import COACH_TOOLS, MORNING_TOOLS, ToolContext
 
@@ -45,13 +46,13 @@ class Composed:
 def message_kind(group: list[dict[str, Any]]) -> str:
     """
     meeting  — only meetings
-    reminder — only reminders the user asked for (and meetings)
+    reminder — only reminders the user asked for (and meetings, and fences: the user asked for those too)
     nudge    — anything else. A mixed group counts as a nudge for every task in it: that can only
                make the per-task cap stricter, never let it be exceeded.
     """
     if all(t["kind"] == "meeting" for t in group):
         return "meeting"
-    if all(t["kind"] == "meeting" or t.get("remind_requested") for t in group):
+    if all(t["kind"] in ("meeting", "fence") or t.get("remind_requested") for t in group):
         return "reminder"
     return "nudge"
 
@@ -67,11 +68,19 @@ def meeting_line(task: dict[str, Any], now: datetime) -> str:
     return f"📅 {task['title']} — {start.astimezone(tz):%H:%M} ({when})"
 
 
+def fence_line(task: dict[str, Any], lang: str = "en") -> str:
+    """A hard stop, written by code like a meeting line: "⛔ 17:00 — Pick up the kids. Time to stop." """
+    at = f"{task['due_at'].astimezone(get_settings().tz):%H:%M}" if task.get("due_at") else ""
+    return fixed_text("fence", lang, at=at, title=task["title"])
+
+
 def template_line(task: dict[str, Any], now: datetime) -> str:
     """The fixed text when the LLM can't help: the next action first, no counting failures."""
     tz = get_settings().tz
     if task["kind"] == "meeting" and task.get("due_at"):
         return meeting_line(task, now)
+    if task["kind"] == "fence":
+        return fence_line(task)
     title = PRIORITY_PREFIX.get(task["priority"], "") + task["title"]
     when = ""
     if task.get("due_at") and task["due_at"] < now:
@@ -94,9 +103,9 @@ def fallback_text(group: list[dict[str, Any]], now: datetime) -> str:
 
 def push_title(group: list[dict[str, Any]]) -> str:
     first = group[0]
-    icon = "📅 " if first["kind"] == "meeting" else PRIORITY_PREFIX.get(first["priority"], "")
+    icon = {"meeting": "📅 ", "fence": "⛔ "}.get(first["kind"]) or PRIORITY_PREFIX.get(first["priority"], "")
     title = icon + first["title"]
-    if first["kind"] != "meeting" and first.get("next_action"):
+    if first["kind"] == "task" and first.get("next_action"):
         title += f": {first['next_action']}"
     title = clip(title, PUSH_TITLE_MAX)
     return title if len(group) == 1 else f"{title} (+{len(group) - 1})"
@@ -110,15 +119,25 @@ def push_actions(group: list[dict[str, Any]], lang: str) -> list[dict[str, str]]
             {"action": "done", "title": chip_label("done", lang)}]
 
 
-def checkin_chips(group: list[dict[str, Any]], stage: str | None, lang: str) -> list[dict[str, Any]]:
-    """Chips about the message's first task (the most important one); none for meetings only."""
+def checkin_chips(group: list[dict[str, Any]], stage: str | None, lang: str,
+                  avoided: bool = False) -> list[dict[str, Any]]:
+    """
+    Chips about the message's first task (the most important one); none for meetings and fences only.
+    avoided: the reason message gets Too big · Unclear · Boring · Not now instead.
+    """
     first = next((t for t in group if t["kind"] == "task"), None)
     if first is None:
         return []
-    return chips_json(chips_for("checkin", stage, lang), lang, first["id"])
+    return chips_json(chips_for("avoided" if avoided else "checkin", stage, lang), lang, first["id"])
 
 
 # ================================================================ task check-ins
+
+# The reason message about an avoided task (F7): sent once, instead of more check-ins.
+AVOID_ASK = ("This task keeps getting postponed or ignored, so this is NOT an ordinary check-in. Write one "
+             "short, kind line: say plainly that it keeps slipping and that's fine, and ask what's in the way. "
+             "Don't name a next action, don't push, don't count how often. The reply buttons carry the answers.")
+
 
 @dataclass
 class _CheckinPrep:
@@ -129,31 +148,44 @@ class _CheckinPrep:
 
 
 async def compose(group: list[dict[str, Any]], now: datetime,
-                  contacts_today: dict[int, int] | None = None) -> Composed:
-    """One message for everything due in this tick (meetings first, as ordered by the planner)."""
+                  contacts_today: dict[int, int] | None = None, avoided: bool = False) -> Composed:
+    """
+    One message for everything due in this tick (meetings and fences first, as ordered by the planner).
+    avoided: the group is one avoided task and this is its reason message, not an ordinary check-in:
+    one kind line, with Too big · Unclear · Boring · Not now (scheduler.plan_tick decides).
+    Fences are written by code alone (no LLM call for a message with only fences).
+    """
     s = get_settings()
     meetings = [t for t in group if t["kind"] == "meeting" and t.get("due_at")]
-    head = "\n".join(meeting_line(m, now) for m in meetings)
+    fences = [t for t in group if t["kind"] == "fence"]
+    others = [t for t in group if t not in meetings and t not in fences]
     kind, title = message_kind(group), push_title(group)
     first_task = next((t for t in group if t["kind"] == "task"), None)
-    lang = chip_lang(None, first_task["title"] if first_task else None)
-    chips = checkin_chips(group, None, lang)
+    lang = chip_lang(None, (first_task or group[0])["title"])
+    chips = checkin_chips(group, None, lang, avoided)
 
     body, followups, used = "", {}, False
-    try:
-        prep = await asyncio.to_thread(_checkin_prep, group, now, contacts_today or {})
-        chips, lang = prep.chips, prep.lang
-        ctx = ToolContext(mode="coach", now=now)
-        body = await asyncio.wait_for(_llm_body(group, now, prep, ctx), timeout=s.llm_timeout_s)
-        followups, used = dict(ctx.followups), bool(body.strip())
-    except (LLMUnavailable, asyncio.TimeoutError) as e:
-        log.warning("Check-in falls back to template: %s", e or type(e).__name__)
-    except Exception:
-        log.exception("Check-in LLM path failed; using template")
+    if meetings or others:
+        try:
+            prep = await asyncio.to_thread(_checkin_prep, group, now, contacts_today or {}, avoided)
+            chips, lang = prep.chips, prep.lang
+            ctx = ToolContext(mode="coach", now=now)
+            body = await asyncio.wait_for(_llm_body(group, now, prep, ctx), timeout=s.llm_timeout_s)
+            followups, used = dict(ctx.followups), bool(body.strip())
+        except (LLMUnavailable, asyncio.TimeoutError) as e:
+            log.warning("Check-in falls back to template: %s", e or type(e).__name__)
+        except Exception:
+            log.exception("Check-in LLM path failed; using template")
 
     if not used:
-        others = [t for t in group if t not in meetings]
-        body, followups = "\n".join(template_line(t, now) for t in others), {}
+        followups = {}
+        if avoided and first_task:
+            body = fixed_text("avoid_ask", lang, title=first_task["title"])
+        else:
+            body = "\n".join(template_line(t, now) for t in others)
+    if avoided:
+        followups = {}  # the next look at an avoided task is decided by code (3 days)
+    head = "\n".join([meeting_line(m, now) for m in meetings] + [fence_line(f, lang) for f in fences])
     text = clip("\n".join(x for x in (head, body.strip()) if x), MAX_TEXT)
     return Composed(text=text, kind=kind, title=title, followups=followups, used_llm=used, chips=chips,
                     push_actions=push_actions(group, lang))
@@ -167,12 +199,13 @@ async def _llm_body(group: list[dict[str, Any]], now: datetime, prep: _CheckinPr
                                              now=f"{now_local:%Y-%m-%d %H:%M}", weekday=f"{now_local:%A}")},
         {"role": "user", "content": prep.user},
     ]
-    has_tasks = any(t["kind"] != "meeting" for t in group)
+    has_tasks = any(t["kind"] == "task" for t in group)
     return await run_tools(messages, COACH_TOOLS if has_tasks else [], ctx, max_rounds=3,
                            timeout=s.llm_timeout_s)
 
 
-def _checkin_prep(group: list[dict[str, Any]], now: datetime, contacts_today: dict[int, int]) -> _CheckinPrep:
+def _checkin_prep(group: list[dict[str, Any]], now: datetime, contacts_today: dict[int, int],
+                  avoided: bool = False) -> _CheckinPrep:
     """Blocking: the check-in prompt's facts, its playbooks and reply buttons, read from the database."""
     s = get_settings()
     now_local = now.astimezone(s.tz)
@@ -183,13 +216,18 @@ def _checkin_prep(group: list[dict[str, Any]], now: datetime, contacts_today: di
     stages = {t["id"]: task_stage(t, facts.counts.get(t["id"]), today) for t in group if t["kind"] == "task"}
     first_task = next((t for t in group if t["kind"] == "task"), None)
     lang = chip_lang(thread.last_user_text(), first_task["title"] if first_task else None)
-    chips = checkin_chips(group, stages.get(first_task["id"]) if first_task else None, lang)
-    playbooks = select_playbooks(None, stages.values(), {"stuck"} if facts.stuck_since(ids, start) else ())
+    chips = checkin_chips(group, stages.get(first_task["id"]) if first_task else None, lang, avoided)
+    if avoided:
+        playbooks = ["avoiding"]
+    else:
+        playbooks = select_playbooks(None, stages.values(), {"stuck"} if facts.stuck_since(ids, start) else ())
 
     blocks = []
     for t, block in zip(group, context.task_contexts(group, now_local, contacts_today, facts, today)):
         if t["kind"] == "meeting" and t.get("due_at"):
             block += f"\n  (Shown above your text by the system: {meeting_line(t, now)})"
+        elif t["kind"] == "fence":
+            block += f"\n  (A hard stop. Shown above your text by the system: {fence_line(t, lang)})"
         elif t.get("remind_requested"):
             block += "\n  (The user asked to be reminded now.)"
         blocks.append(block)
@@ -202,7 +240,7 @@ def _checkin_prep(group: list[dict[str, Any]], now: datetime, contacts_today: di
         "Today's conversation so far (latest last):\n"
         + (context.format_messages(today_msgs, now_local) or "(nothing yet)"),
         "Other open items today:\n" + context.format_open_items(open_today, now_local, set(ids)),
-        "Write the check-in message now.",
+        AVOID_ASK if avoided else "Write the check-in message now.",
     ])
     return _CheckinPrep(user=user, chips=chips, playbooks=playbooks, lang=lang)
 
@@ -210,7 +248,8 @@ def _checkin_prep(group: list[dict[str, Any]], now: datetime, contacts_today: di
 # ================================================================ daily jobs
 
 JOB_PROMPTS = {"morning": "daily_morning", "checkin": "daily_checkin", "evening": "daily_evening"}
-JOB_TITLES = {"morning": "☀️ Morning plan", "checkin": "⏰ Check-in", "evening": "🌙 Evening review"}
+JOB_TITLES = {"morning": "☀️ Morning plan", "checkin": "⏰ Check-in", "evening": "🌙 Evening review",
+              "reentry": "👋 Good to see you", "meeting": "📅 This week's meetings"}
 JOB_CHIPS = {"morning": "morning", "checkin": "midday", "evening": "evening"}
 
 
@@ -220,6 +259,7 @@ class Daily:
     chips: list[dict[str, Any]] = field(default_factory=list)
     task_ids: list[int] = field(default_factory=list)   # the morning plan is linked to Today's 3
     used_llm: bool = False
+    kind: str | None = None        # the message kind when it isn't the job's name ('reentry', 'meeting')
 
 
 @dataclass
@@ -234,6 +274,8 @@ class _DailyFacts:
     focus_done: set[int]
     suggested: list[dict[str, Any]]       # morning: the code's pick for Today's 3
     meetings: list[tuple[datetime, dict[str, Any]]]
+    stale: list[dict[str, Any]] = field(default_factory=list)   # Sunday cleanup: old tasks to drop or keep
+    week_wins: int = 0                                          # Sunday: things finished in the last 7 days
 
 
 def _focus_lines(focus: list[dict[str, Any]], done: set[int]) -> str:
@@ -242,8 +284,8 @@ def _focus_lines(focus: list[dict[str, Any]], done: set[int]) -> str:
                      for i, t in enumerate(focus, 1))
 
 
-def _daily_facts(job: str, now: datetime) -> _DailyFacts:
-    """Blocking: the task snapshot, Today's 3, meetings and today's messages."""
+def _daily_facts(job: str, now: datetime, sunday: bool = False) -> _DailyFacts:
+    """Blocking: the task snapshot, Today's 3, meetings and today's messages (sunday: + the cleanup facts)."""
     s = get_settings()
     now_local = now.astimezone(s.tz)
     today_d = focus_day(now_local, s.day_reset_time)
@@ -289,20 +331,29 @@ def _daily_facts(job: str, now: datetime) -> _DailyFacts:
     today_msgs = thread.since(day_start(now_local, s.day_reset_time), 12)
     titles = " ".join(t["title"] for t in (today or open_all)[:5])
     lang = chip_lang(thread.last_user_text(), titles)
+    stale, week_wins = [], 0
+    if sunday and job == "morning":
+        picked = {t["id"] for t in suggested}
+        stale = [t for t in tasks.stale_tasks() if t["id"] not in picked]  # not "do it today" and "drop it?" at once
+        week_wins = len(tasks.done_since(now - timedelta(days=WEEK_WINS_DAYS)))
     return _DailyFacts(snapshot="\n\n".join(parts), open_count=len(today), done_count=len(done),
                        sessions=(n_sessions, session_min), today_msgs=today_msgs, lang=lang,
-                       focus=focus, focus_done=focus_done, suggested=suggested, meetings=meetings)
+                       focus=focus, focus_done=focus_done, suggested=suggested, meetings=meetings,
+                       stale=stale, week_wins=week_wins)
 
 
-async def compose_daily(job: str, now: datetime) -> Daily | None:
-    """The daily message, or None if there's nothing worth saying (an empty mid-day check-in)."""
+async def compose_daily(job: str, now: datetime, sunday: bool = False) -> Daily | None:
+    """
+    The daily message, or None if there's nothing worth saying (an empty mid-day check-in).
+    sunday: the first morning of the week also carries last week's wins and the cleanup (F8).
+    """
     s = get_settings()
     now_local = now.astimezone(s.tz)
-    f = await asyncio.to_thread(_daily_facts, job, now)
+    f = await asyncio.to_thread(_daily_facts, job, now, sunday)
     if job == "checkin" and f.open_count == 0 and not (set(t["id"] for t in f.focus) - f.focus_done):
         return None
     if job == "morning":
-        return await _compose_morning(f, now)
+        return await _compose_morning(f, now, sunday)
 
     first_open = next((t for t in f.focus if t["id"] not in f.focus_done), None)
     chips = chips_json(chips_for(JOB_CHIPS[job], None, f.lang), f.lang, first_open["id"] if first_open else None)
@@ -354,7 +405,21 @@ def morning_template(focus: list[dict[str, Any]], meetings: list[tuple[datetime,
     return "\n".join(lines)
 
 
-async def _compose_morning(f: _DailyFacts, now: datetime) -> Daily:
+def sunday_lines(f: _DailyFacts, focus_ids: list[int]) -> tuple[str, list[int]]:
+    """
+    The Sunday additions, written by code so the buttons act on exactly what's shown: one line of last
+    week's wins, and up to three old tasks to drop or keep. Returns (text, the ids Drop them acts on).
+    """
+    lines = []
+    if f.week_wins:
+        lines.append(fixed_text("wins_week_1" if f.week_wins == 1 else "wins_week", f.lang, n=f.week_wins))
+    stale = [t for t in f.stale if t["id"] not in focus_ids]
+    if stale:
+        lines.append(fixed_text("stale", f.lang, titles=" · ".join(t["title"] for t in stale)))
+    return "\n".join(lines), [t["id"] for t in stale]
+
+
+async def _compose_morning(f: _DailyFacts, now: datetime, sunday: bool = False) -> Daily:
     """
     The morning plan proposes Today's 3 and saves it right away (silence accepts it). The LLM picks
     with set_focus; if it doesn't (or can't), the code's pick stands.
@@ -365,7 +430,8 @@ async def _compose_morning(f: _DailyFacts, now: datetime) -> Daily:
     # The chips name "the first one": as suggested, until the LLM changes the pick.
     preview = chips_json(chips_for("morning", None, f.lang), f.lang, suggested_ids[0] if suggested_ids else None)
     messages = [
-        {"role": "system", "content": render("daily_morning", playbooks=select_playbooks("morning"), chips=preview,
+        {"role": "system", "content": render("daily_morning", chips=preview,
+                                             playbooks=select_playbooks("morning", signals={"sunday"} if sunday else ()),
                                              now=f"{now_local:%Y-%m-%d %H:%M}", weekday=f"{now_local:%A}")},
         {"role": "user", "content": f.snapshot + "\n\nToday's conversation so far:\n"
                                     + (context.format_messages(f.today_msgs, now_local) or "(nothing yet)")},
@@ -393,7 +459,54 @@ async def _compose_morning(f: _DailyFacts, now: datetime) -> Daily:
     ids = [t["id"] for t in focus]
     chips = chips_json(chips_for("morning", None, f.lang), f.lang, ids[0] if ids else None) if ids else []
     text = clip(text.strip(), MAX_TEXT) if used else morning_template(focus, f.meetings)
+    if sunday:
+        extra, stale_ids = sunday_lines(f, ids)
+        if extra:
+            text += "\n\n" + extra
+        if stale_ids:
+            chips = chips + chips_json(chips_for("sunday", None, f.lang), f.lang, None, stale_ids)
+            await asyncio.to_thread(tasks.mark_stale_offered, stale_ids)
     return Daily(text, chips, ids, used_llm=used)
+
+
+# ================================================================ re-entry after a lapse (F7)
+
+def _reentry_facts(now: datetime) -> tuple[str, bool, list[dict[str, Any]]]:
+    """Blocking: (language, is anything overdue, a few open tasks for the LLM's eyes only)."""
+    open_all = [t for t in tasks.list_tasks("open") if t["kind"] == "task" and not t.get("parent_id")]
+    lang = chip_lang(thread.last_user_text(), " ".join(t["title"] for t in open_all[:5]))
+    overdue = any(t["due_at"] is not None and t["due_at"] < now for t in open_all)
+    return lang, overdue, open_all[:5]
+
+
+async def compose_reentry(now: datetime) -> Daily:
+    """
+    The morning message after a lapse (48 hours with no chat or tap): no plan, no counts, no overdue
+    list. "Good to see you. Want me to pick one thing for today?" with Pick one for me · Move overdue to
+    next week (the second only if something is overdue). The LLM writes it; the template never fails.
+    """
+    s = get_settings()
+    now_local = now.astimezone(s.tz)
+    lang, overdue, some = await asyncio.to_thread(_reentry_facts, now)
+    chips = [c for c in chips_json(chips_for("reentry", None, lang), lang, None)
+             if overdue or c["id"] != "move_overdue"]
+    messages = [
+        {"role": "system", "content": render("daily_reentry", playbooks=select_playbooks("reentry"), chips=chips,
+                                             now=f"{now_local:%Y-%m-%d %H:%M}", weekday=f"{now_local:%A}")},
+        {"role": "user", "content": "The user has been away for a few days. Some of their open tasks, only so "
+                                    "you know their language (don't list, name or count them):\n"
+                                    + ("\n".join(f"- {t['title']}" for t in some) or "(none)")},
+    ]
+    try:
+        msg = await chat_completion(messages, temperature=0.5)
+        text = (msg.get("content") or "").strip()
+        if text:
+            return Daily(clip(text, 300), chips, used_llm=True, kind="reentry")
+    except LLMUnavailable as e:
+        log.warning("Re-entry message falls back to template: %s", e or type(e).__name__)
+    except Exception:
+        log.exception("Re-entry message failed; using template")
+    return Daily(fixed_text("reentry", lang), chips, kind="reentry")
 
 
 # ================================================================ meeting digests

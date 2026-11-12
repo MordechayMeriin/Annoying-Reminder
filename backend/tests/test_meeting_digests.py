@@ -123,9 +123,23 @@ def due_jobs(monkeypatch, at):
     return scheduler.due_daily_jobs
 
 
+def far_from_morning(monkeypatch):
+    """The week's meetings at 11:00: more than an hour from the 07:30 morning plan, so a message of their own."""
+    from dataclasses import replace
+    from datetime import time
+    s = replace(scheduler.get_settings(), week_meetings_time=time(11))
+    monkeypatch.setattr(scheduler, "get_settings", lambda: s)
+
+
 def test_week_job_only_on_the_first_day_of_the_week(monkeypatch):
-    assert "week_meetings" in due_jobs(monkeypatch, local(8, 8, 5))()      # Sunday
-    assert "week_meetings" not in due_jobs(monkeypatch, local(9, 8, 5))()  # Monday
+    far_from_morning(monkeypatch)
+    assert "week_meetings" in due_jobs(monkeypatch, local(8, 11, 5))()      # Sunday
+    assert "week_meetings" not in due_jobs(monkeypatch, local(9, 11, 5))()  # Monday
+
+
+def test_week_job_joins_the_morning_plan_when_within_an_hour(monkeypatch):
+    jobs = due_jobs(monkeypatch, local(8, 8, 5))()                          # Sunday, defaults 07:30 / 08:00
+    assert "morning" in jobs and "week_meetings" not in jobs
 
 
 def test_evening_job_every_day_once(monkeypatch):

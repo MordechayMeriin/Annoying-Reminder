@@ -26,39 +26,56 @@ def clean_overrides():
     config.apply_overrides({})
 
 
+NOW = local(9, 10)
+
+
 def task(**kw):
-    return {"kind": "task", "priority": 1, "remind_requested": False, **kw}
+    """A task with a deadline tomorrow: one that may escalate (see logic.escalates)."""
+    return {"kind": "task", "priority": 1, "remind_requested": False, "due_at": local(10, 12), **kw}
 
 
 # ---------------------------------------------------------------- levels (pure)
 
 def test_ordinary_task_gets_louder_when_ignored_but_never_alarms_by_default():
     p = AlertPolicy()  # urgent after 1, alarms for important+ after 2, max 4 check-ins
-    assert [alert_level(task(), n, p) for n in range(4)] == [NORMAL, URGENT, URGENT, URGENT]
+    assert [alert_level(task(), n, p, NOW) for n in range(4)] == [NORMAL, URGENT, URGENT, URGENT]
 
 
 def test_important_task_alarms_after_two_ignored():
     p = AlertPolicy()
-    assert [alert_level(task(priority=2), n, p) for n in range(4)] == [URGENT, URGENT, ALARM, ALARM]
+    assert [alert_level(task(priority=2), n, p, NOW) for n in range(4)] == [URGENT, URGENT, ALARM, ALARM]
 
 
 def test_alarm_for_setting():
-    assert alert_level(task(priority=2), 3, AlertPolicy(alarm_for="critical")) == URGENT
-    assert alert_level(task(priority=3), 3, AlertPolicy(alarm_for="critical")) == ALARM
-    assert alert_level(task(), 2, AlertPolicy(alarm_for="all")) == ALARM
-    assert alert_level(task(priority=3), 9, AlertPolicy(alarm_for="off")) == URGENT
+    assert alert_level(task(priority=2), 3, AlertPolicy(alarm_for="critical"), NOW) == URGENT
+    assert alert_level(task(priority=3), 3, AlertPolicy(alarm_for="critical"), NOW) == ALARM
+    assert alert_level(task(), 2, AlertPolicy(alarm_for="all"), NOW) == ALARM
+    assert alert_level(task(priority=3), 9, AlertPolicy(alarm_for="off"), NOW) == URGENT
 
 
 def test_last_check_in_is_the_alarm_when_nagging_stops_sooner():
     p = AlertPolicy(alarm_after=10, max_nags=4)
-    assert alert_level(task(priority=3), 2, p) == URGENT
-    assert alert_level(task(priority=3), 3, p) == ALARM  # 4th and last check-in, all ignored
+    assert alert_level(task(priority=3), 2, p, NOW) == URGENT
+    assert alert_level(task(priority=3), 3, p, NOW) == ALARM  # 4th and last check-in, all ignored
 
 
 def test_meetings_and_requested_reminders_are_urgent_never_alarms():
     p = AlertPolicy(alarm_for="all", alarm_after=0)
-    assert alert_level(task(kind="meeting", priority=3), 5, p) == URGENT
-    assert alert_level(task(remind_requested=True), 0, AlertPolicy()) == URGENT
+    assert alert_level(task(kind="meeting", priority=3), 5, p, NOW) == URGENT
+    assert alert_level(task(remind_requested=True), 0, AlertPolicy(), NOW) == URGENT
+
+
+def test_only_fixed_events_asked_for_reminders_and_near_deadlines_escalate():
+    """De-escalation (F7): everything else stays normal however often it's ignored, whatever its priority."""
+    loud = AlertPolicy(alarm_for="all", alarm_after=0, urgent_after=0)
+    undated = task(due_at=None, priority=3)
+    assert [alert_level(undated, n, loud, NOW) for n in (0, 3, 9)] == [NORMAL] * 3
+    assert alert_level(task(due_at=local(1, 9), priority=3), 9, loud, NOW) == NORMAL    # overdue for a week
+    assert alert_level(task(due_at=local(12, 9)), 9, loud, NOW) == NORMAL               # due in 3 days
+    assert alert_level(task(due_at=local(8, 12), priority=2), 3, AlertPolicy(), NOW) == ALARM   # missed yesterday
+    assert alert_level(task(due_at=None, remind_requested=True), 0, AlertPolicy(), NOW) == URGENT
+    assert alert_level(task(kind="fence", due_at=NOW, priority=3), 9, loud, NOW) == URGENT      # never an alarm
+    assert alert_level(task(kind="meeting", due_at=NOW), 0, AlertPolicy(), NOW) == URGENT
 
 
 def test_alarm_window_stops_before_quiet_hours_and_shabbat():
@@ -176,7 +193,7 @@ def tick():
 
 
 def test_ignored_important_task_escalates_to_an_alarm(store):
-    t = store.add_task("File the tax report", priority=2, remind_at=local(9, 10), focus=True)
+    t = store.add_task("File the tax report", priority=2, remind_at=local(9, 10), focus=True, due_at=local(10, 12))
     for _ in range(3):
         assert tick() == [t["id"]]
         store.advance(20)
@@ -186,7 +203,7 @@ def test_ignored_important_task_escalates_to_an_alarm(store):
 
 
 def test_a_reply_resets_the_ladder(store):
-    t = store.add_task("Call the plumber", remind_at=local(9, 10), focus=True)
+    t = store.add_task("Call the plumber", remind_at=local(9, 10), focus=True, due_at=local(10, 12))
     tick()
     store.advance(30)
     tick()
@@ -201,7 +218,7 @@ def test_a_reply_resets_the_ladder(store):
 def test_alarm_is_downgraded_right_before_quiet_hours(store):
     store.now = local(9, 22, 59).astimezone(timezone.utc)
     store.add_task("Critical thing", priority=3, nag_count=2, last_notified_at=store.now - timedelta(minutes=15),
-                   remind_at=store.now, focus=True)
+                   remind_at=store.now, focus=True, due_at=store.now + timedelta(hours=12))
     tick()
     assert store.pushovers[-1]["level"] == URGENT  # 1 minute left: an alarm couldn't repeat even once
 
@@ -209,13 +226,13 @@ def test_alarm_is_downgraded_right_before_quiet_hours(store):
 def test_alarm_stops_at_quiet_hours(store):
     store.now = local(9, 22, 30).astimezone(timezone.utc)
     store.add_task("Critical thing", priority=3, nag_count=2, last_notified_at=store.now - timedelta(minutes=15),
-                   remind_at=store.now, focus=True)
+                   remind_at=store.now, focus=True, due_at=store.now + timedelta(hours=12))
     tick()
     assert store.pushovers[-1]["level"] == ALARM and store.pushovers[-1]["expire_s"] == 1800
 
 
 def test_daily_messages_are_normal(store, monkeypatch):
-    monkeypatch.setattr(scheduler.coach, "compose_daily", lambda job, now: _async(scheduler.coach.Daily("Plan for today")))
+    monkeypatch.setattr(scheduler.coach, "compose_daily", lambda job, now, sunday=False: _async(scheduler.coach.Daily("Plan for today")))
     asyncio.run(scheduler.run_daily_job("morning"))
     assert store.pushovers[-1]["level"] == NORMAL
 
