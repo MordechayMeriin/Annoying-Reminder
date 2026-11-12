@@ -176,7 +176,7 @@ def tick():
 
 
 def test_ignored_important_task_escalates_to_an_alarm(store):
-    t = store.add_task("File the tax report", priority=2, remind_at=local(9, 10))
+    t = store.add_task("File the tax report", priority=2, remind_at=local(9, 10), focus=True)
     for _ in range(3):
         assert tick() == [t["id"]]
         store.advance(20)
@@ -186,7 +186,7 @@ def test_ignored_important_task_escalates_to_an_alarm(store):
 
 
 def test_a_reply_resets_the_ladder(store):
-    t = store.add_task("Call the plumber", remind_at=local(9, 10))
+    t = store.add_task("Call the plumber", remind_at=local(9, 10), focus=True)
     tick()
     store.advance(30)
     tick()
@@ -201,7 +201,7 @@ def test_a_reply_resets_the_ladder(store):
 def test_alarm_is_downgraded_right_before_quiet_hours(store):
     store.now = local(9, 22, 59).astimezone(timezone.utc)
     store.add_task("Critical thing", priority=3, nag_count=2, last_notified_at=store.now - timedelta(minutes=15),
-                   remind_at=store.now)
+                   remind_at=store.now, focus=True)
     tick()
     assert store.pushovers[-1]["level"] == URGENT  # 1 minute left: an alarm couldn't repeat even once
 
@@ -209,13 +209,13 @@ def test_alarm_is_downgraded_right_before_quiet_hours(store):
 def test_alarm_stops_at_quiet_hours(store):
     store.now = local(9, 22, 30).astimezone(timezone.utc)
     store.add_task("Critical thing", priority=3, nag_count=2, last_notified_at=store.now - timedelta(minutes=15),
-                   remind_at=store.now)
+                   remind_at=store.now, focus=True)
     tick()
     assert store.pushovers[-1]["level"] == ALARM and store.pushovers[-1]["expire_s"] == 1800
 
 
 def test_daily_messages_are_normal(store, monkeypatch):
-    monkeypatch.setattr(scheduler.coach, "compose_daily", lambda job, now: _async("Plan for today"))
+    monkeypatch.setattr(scheduler.coach, "compose_daily", lambda job, now: _async(scheduler.coach.Daily("Plan for today")))
     asyncio.run(scheduler.run_daily_job("morning"))
     assert store.pushovers[-1]["level"] == NORMAL
 

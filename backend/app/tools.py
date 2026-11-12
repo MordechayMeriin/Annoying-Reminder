@@ -14,7 +14,7 @@ from typing import Any, Callable
 
 from . import tasks
 from .config import get_settings
-from .logic import Guardrails, clamp_followup, parse_local_datetime
+from .logic import FOCUS_MAX, Guardrails, clamp_followup, focus_day, parse_local_datetime
 
 
 class ToolArgError(ValueError):
@@ -23,11 +23,14 @@ class ToolArgError(ValueError):
 
 @dataclass
 class ToolContext:
-    mode: str                                   # "chat" or "coach"
+    mode: str                                   # "chat", "coach" (check-ins) or "morning" (the morning plan)
     now: datetime                               # aware
     acted_on: list[int] = field(default_factory=list)            # task ids touched (for linking)
     followups: dict[int, datetime] = field(default_factory=dict) # coach mode: chosen next check-ins
     changed: bool = False
+    focus: list[int] | None = None              # set_focus was called: Today's 3, in order
+    closed: set[int] = field(default_factory=set)  # tasks completed or cancelled in this turn
+    created: dict[int, str] = field(default_factory=dict)  # tasks added in this turn: id → kind
 
     def touched(self, task_id: int) -> None:
         if task_id not in self.acted_on:
@@ -43,6 +46,11 @@ def _fn(name: str, description: str, props: dict[str, Any], required: list[str])
 
 _ISO = "Local ISO datetime, e.g. 2026-11-09T14:00"
 _ID = {"type": "integer"}
+_NEXT_ACTION = {"type": "string", "description": (
+    "REQUIRED for tasks: the very first physical step, verb first, 15 minutes or less, in the user's "
+    "language (e.g. 'Find last year's PDF in email'). Infer it yourself; never ask. Over 45 minutes in "
+    "total: the first 15-minute chunk.")}
+_ESTIMATE = {"type": "integer", "description": "Your guess of the whole task's length in minutes. Infer it; never ask."}
 
 SCHEDULE_FOLLOWUP_PROPS = {
     "task_id": _ID,
@@ -60,6 +68,8 @@ CHAT_TOOLS: list[dict[str, Any]] = [
         "priority": {"type": "integer", "enum": [1, 2, 3]},
         "recurrence": {"type": "string", "enum": ["daily", "weekdays", "weekly", "monthly"]},
         "description": {"type": "string", "description": "What the task is about and anything useful the user said"},
+        "next_action": _NEXT_ACTION,
+        "estimate_min": _ESTIMATE,
     }, ["title"]),
     _fn("list_tasks", "List tasks. Use it to find the right id before changing a task.", {
         "scope": {"type": "string", "enum": ["today", "overdue", "upcoming", "open", "done_today", "blocked"]},
@@ -74,6 +84,8 @@ CHAT_TOOLS: list[dict[str, Any]] = [
         "priority": {"type": "integer", "enum": [1, 2, 3]},
         "recurrence": {"type": "string", "enum": ["daily", "weekdays", "weekly", "monthly", "none"]},
         "kind": {"type": "string", "enum": ["task", "meeting"]},
+        "next_action": {"type": "string", "description": "A new first step (e.g. the user corrected yours)"},
+        "estimate_min": _ESTIMATE,
         "unblock": {"type": "boolean"},
     }, ["id"]),
     _fn("complete_task", "Mark a task as done.", {"id": _ID}, ["id"]),
@@ -101,6 +113,18 @@ CHAT_TOOLS: list[dict[str, Any]] = [
     }, ["task_id", "reason", "followup_minutes"]),
 ]
 
+SET_FOCUS = _fn("set_focus", "Set Today's 3: up to three task ids, most important first. Replaces today's "
+                "earlier pick. No meetings.", {
+    "task_ids": {"type": "array", "items": {"type": "integer"}, "description": "1 to 3 task ids, first = do first"},
+}, ["task_ids"])
+
+CHAT_TOOLS.append(SET_FOCUS)
+
+LIST_TASKS = next(t for t in CHAT_TOOLS if t["function"]["name"] == "list_tasks")
+
+# The morning plan picks Today's 3.
+MORNING_TOOLS: list[dict[str, Any]] = [SET_FOCUS, LIST_TASKS]
+
 COACH_TOOLS: list[dict[str, Any]] = [
     _fn("schedule_followup", "Optional: choose when to check in about this task next, if a different time than "
         "usual makes sense (e.g. after a meeting, tomorrow morning).", SCHEDULE_FOLLOWUP_PROPS,
@@ -108,6 +132,9 @@ COACH_TOOLS: list[dict[str, Any]] = [
 ]
 
 _SCHEMAS = {t["function"]["name"]: t["function"]["parameters"] for t in CHAT_TOOLS}
+
+# Tools allowed per mode (chat: all of CHAT_TOOLS).
+_MODE_TOOLS = {"coach": {"schedule_followup"}, "morning": {"set_focus", "list_tasks"}}
 
 
 # ================================================================ validation
@@ -152,6 +179,13 @@ def _coerce(key: str, value: Any, spec: dict[str, Any]) -> Any:
         if isinstance(value, (dict, list)):
             raise ToolArgError(f"'{key}' must be a string.")
         value = str(value).strip()
+    elif typ == "array":
+        if isinstance(value, str):  # "3, 5, 7" or "[3,5,7]"
+            value = [v for v in re.split(r"[\s,\[\]]+", value) if v]
+        elif not isinstance(value, list):
+            value = [value]
+        item = spec.get("items", {})
+        value = [_coerce(key, v, item) for v in value]
     if "enum" in spec and value not in spec["enum"]:
         raise ToolArgError(f"'{key}' must be one of {spec['enum']}, got {value!r}.")
     return value
@@ -252,28 +286,44 @@ def brief(task: dict[str, Any] | None) -> dict[str, Any] | None:
         return None
     t = tasks.to_public(task)
     keys = ("id", "parent_id", "title", "kind", "priority", "status", "due_at", "remind_at", "recurrence",
-            "blocked_reason", "blocked_until")
+            "blocked_reason", "blocked_until", "next_action", "estimate_min", "focus_date")
     return {k: t[k] for k in keys if t.get(k) is not None}
 
 
 def execute(name: str, raw_args: Any, ctx: ToolContext) -> Any:
     """Validate and run one tool call. Raises ToolArgError for problems the model can fix."""
     schema = None
+    allowed = _MODE_TOOLS.get(ctx.mode)
+    if allowed is not None and name not in allowed:
+        raise ToolArgError(f"Tool '{name}' is not available here.")
     if ctx.mode == "coach":
-        if name != "schedule_followup":
-            raise ToolArgError(f"Tool '{name}' is not available here.")
         schema = COACH_TOOLS[0]["function"]["parameters"]
     args = validate(name, raw_args, schema)
     return _HANDLERS[name](args, ctx)
 
 
+def _estimate(a: dict[str, Any]) -> int | None:
+    est = a.get("estimate_min")
+    if est is not None and not 1 <= est <= 10000:
+        raise ToolArgError("'estimate_min' must be between 1 and 10000 minutes.")
+    return est
+
+
 def _add_task(a: dict[str, Any], ctx: ToolContext) -> Any:
-    t = tasks.create(a["title"], kind=a.get("kind", "task"), priority=a.get("priority", 1),
+    kind = a.get("kind", "task")
+    t = tasks.create(a["title"], kind=kind, priority=a.get("priority", 1),
                      description=a.get("description"), due_at=_dt(a.get("due_at"), "due_at"),
-                     remind_at=_dt(a.get("remind_at"), "remind_at"), recurrence=a.get("recurrence"))
+                     remind_at=_dt(a.get("remind_at"), "remind_at"), recurrence=a.get("recurrence"),
+                     next_action=a.get("next_action"), estimate_min=_estimate(a))
+    ctx.created[t["id"]] = t["kind"]
     ctx.touched(t["id"])
     ctx.changed = True
-    return brief(t)
+    out = brief(t)
+    if kind == "task" and not t.get("next_action"):
+        # Saved anyway (never lose what the user said), but every task needs its first step.
+        out["note"] = ("Saved without a next_action. Now call update_task with next_action: the very first "
+                       "physical step, verb first, 15 minutes or less. Infer it; don't ask the user.")
+    return out
 
 
 def _list_tasks(a: dict[str, Any], ctx: ToolContext) -> Any:
@@ -289,6 +339,7 @@ def _update_task(a: dict[str, Any], ctx: ToolContext) -> Any:
             a[key] = _dt(a[key], key)
     if a.get("recurrence") == "none":
         a["recurrence"] = None
+    _estimate(a)
     t = tasks.update(task_id, **a) if a else tasks.get(task_id)
     if unblock:
         t = tasks.unblock(task_id)
@@ -300,6 +351,7 @@ def _update_task(a: dict[str, Any], ctx: ToolContext) -> Any:
 def _complete_task(a: dict[str, Any], ctx: ToolContext) -> Any:
     _task(a["id"])
     ctx.touched(a["id"])
+    ctx.closed.add(a["id"])
     ctx.changed = True
     return brief(tasks.complete(a["id"]))
 
@@ -307,8 +359,30 @@ def _complete_task(a: dict[str, Any], ctx: ToolContext) -> Any:
 def _cancel_task(a: dict[str, Any], ctx: ToolContext) -> Any:
     _task(a["id"])
     ctx.touched(a["id"])
+    ctx.closed.add(a["id"])
     ctx.changed = True
     return brief(tasks.cancel(a["id"]))
+
+
+def _set_focus(a: dict[str, Any], ctx: ToolContext) -> Any:
+    ids = list(dict.fromkeys(a["task_ids"]))
+    if not ids:
+        raise ToolArgError("Give 1 to 3 task ids.")
+    if len(ids) > FOCUS_MAX:
+        raise ToolArgError(f"At most {FOCUS_MAX} tasks: pick the most important ones.")
+    found = {t["id"]: t for t in tasks.get_many(ids)}
+    bad = [i for i in ids if i not in found or found[i]["status"] != "open" or found[i]["kind"] != "task"
+           or found[i].get("parent_id")]
+    if bad:
+        raise ToolArgError(f"Not open top-level tasks (meetings can't be focus tasks): {bad}. "
+                           "Use list_tasks to find the right ids.")
+    s = get_settings()
+    rows = tasks.set_focus(ids, focus_day(ctx.now.astimezone(s.tz), s.day_reset_time))
+    ctx.focus = [t["id"] for t in rows]
+    for i in ctx.focus:
+        ctx.touched(i)
+    ctx.changed = True
+    return {"focus": [brief(t) for t in rows]}
 
 
 def resolve_followup(now: datetime, minutes: int | None, at_iso: str | None, g: Guardrails) -> tuple[datetime, bool]:
@@ -377,4 +451,5 @@ _HANDLERS: dict[str, Callable[[dict[str, Any], ToolContext], Any]] = {
     "add_subtask": _add_subtask,
     "log_interaction": _log_interaction,
     "mark_blocked": _mark_blocked,
+    "set_focus": _set_focus,
 }

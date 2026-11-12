@@ -104,7 +104,7 @@ def tick(store):
 
 
 def test_nothing_is_sent_on_shabbat_and_everything_comes_after(store):
-    a = store.add_task("Call the bank", remind_at=at(2026, 11, 14, 10), priority=3)
+    a = store.add_task("Call the bank", remind_at=at(2026, 11, 14, 10), priority=3, focus=True)
     b = store.add_task("Team sync", kind="meeting", due_at=at(2026, 11, 14, 19), remind_at=at(2026, 11, 14, 11))
 
     assert tick(store) == [] and store.pushes == []

@@ -1,20 +1,21 @@
 """Task storage and the operations shared by the agent, the coach, the UI and notification buttons."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from . import db
 from .config import get_settings
-from .logic import next_occurrence
+from .logic import FOCUS_MAX, NEAR_DEADLINE_H, next_occurrence
 
 COLUMNS = ("id, parent_id, title, description, kind, priority, status, due_at, remind_at, "
            "remind_requested, recurrence, nag_count, escalated, blocked_reason, blocked_until, "
-           "last_notified_at, created_at, completed_at")
+           "last_notified_at, created_at, completed_at, next_action, estimate_min, focus_date, focus_rank")
 
 TIME_KEYS = ("due_at", "remind_at", "blocked_until", "last_notified_at", "created_at", "completed_at")
 DESCRIPTION_MAX = 800
+NEXT_ACTION_MAX = 200
 EVENT_KINDS = {"postponed", "committed", "progress", "stuck", "blocked", "unblocked", "ignored", "done",
-               "description_changed"}
+               "description_changed", "session_started", "session_ended", "paused", "parked"}
 
 
 def now_utc() -> datetime:
@@ -123,28 +124,31 @@ def event_counts_many(ids: list[int], days: int = 7) -> dict[int, dict[str, int]
 
 def create(title: str, *, kind: str = "task", priority: int = 1, description: str | None = None,
            due_at: datetime | None = None, remind_at: datetime | None = None,
-           recurrence: str | None = None, parent_id: int | None = None) -> dict[str, Any]:
+           recurrence: str | None = None, parent_id: int | None = None,
+           next_action: str | None = None, estimate_min: int | None = None) -> dict[str, Any]:
     s = get_settings()
     if remind_at is None and due_at is not None:
         lead = s.meeting_lead_min if kind == "meeting" else 0
         remind_at = due_at - timedelta(minutes=lead)
     return db.fetch_one(
         f"""insert into tasks (title, kind, priority, description, due_at, remind_at, remind_requested,
-                               recurrence, parent_id)
-            values (%s, %s, %s, %s, %s, %s, %s, %s, %s) returning {COLUMNS}""",
+                               recurrence, parent_id, next_action, estimate_min)
+            values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) returning {COLUMNS}""",
         (title, kind, priority, _clip(description), due_at, remind_at, remind_at is not None,
-         recurrence, parent_id),
+         recurrence, parent_id, _clip(next_action, NEXT_ACTION_MAX), estimate_min),
     )
 
 
 UPDATABLE = {"title", "description", "kind", "priority", "due_at", "remind_at", "recurrence", "status",
-             "blocked_reason", "blocked_until"}
+             "blocked_reason", "blocked_until", "next_action", "estimate_min"}
 
 
 def update(task_id: int, **fields: Any) -> dict[str, Any] | None:
     fields = {k: v for k, v in fields.items() if k in UPDATABLE}
     if not fields:
         return get(task_id)
+    if "next_action" in fields:
+        fields["next_action"] = _clip(fields["next_action"], NEXT_ACTION_MAX)
     if "description" in fields:
         fields["description"] = _clip(fields["description"])
         old = get(task_id)
@@ -163,11 +167,11 @@ def update(task_id: int, **fields: Any) -> dict[str, Any] | None:
     return db.fetch_one(f"update tasks set {sets} where id = %(id)s returning {COLUMNS}", fields)
 
 
-def _clip(text: str | None) -> str | None:
+def _clip(text: str | None, limit: int = DESCRIPTION_MAX) -> str | None:
     if text is None:
         return None
     text = text.strip()
-    return text if len(text) <= DESCRIPTION_MAX else text[: DESCRIPTION_MAX - 1] + "…"
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 # ---------------------------------------------------------------- lifecycle
@@ -257,10 +261,18 @@ def close_finished_meetings() -> None:
     )
 
 
-def due_for_contact(limit: int = 20) -> list[dict[str, Any]]:
+def due_for_contact(today: date, limit: int = 20) -> list[dict[str, Any]]:
+    """
+    Tasks due for a check-in, with the focus filter (logic.may_check_in, here in SQL so quiet tasks
+    can't crowd out the rest): meetings and fences, reminders the user asked for, Today's 3 (today =
+    logic.focus_day), and tasks due within 48 hours. Undated tasks outside Today's 3 stay quiet.
+    """
     return db.fetch_all(
-        f"select {COLUMNS} from tasks where status = 'open' and remind_at <= now() order by remind_at limit %s",
-        (limit,),
+        f"""select {COLUMNS} from tasks where status = 'open' and remind_at <= now()
+            and (kind in ('meeting', 'fence') or remind_requested or focus_date = %s
+                 or due_at < now() + make_interval(hours => %s))
+            order by remind_at limit %s""",
+        (today, NEAR_DEADLINE_H, limit),
     )
 
 
@@ -299,6 +311,38 @@ def finish_contact(task_id: int, nag_count: int, next_at: datetime | None, reque
            escalated = escalated or %s where id = %s""",
         (nag_count, next_at, requested, escalate, task_id),
     )
+
+
+# ---------------------------------------------------------------- Today's 3
+
+def set_focus(task_ids: list[int], today: date) -> list[dict[str, Any]]:
+    """
+    Make these (at most 3, open, not meetings) Today's 3, replacing today's earlier pick. Returns them
+    in the given order. Silence accepts it: nothing else is needed from the user.
+    """
+    ids = list(dict.fromkeys(task_ids))[:FOCUS_MAX]
+    with db.connect() as conn, conn.transaction():
+        conn.execute("""update tasks set focus_date = null, focus_rank = null
+                        where focus_date = %s and not (id = any(%s::bigint[]))""",
+                     (today, ids))
+        rows = conn.execute(
+            f"""update tasks set focus_date = %s, focus_rank = array_position(%s::bigint[], id)
+                where id = any(%s::bigint[]) and status = 'open' and kind = 'task' returning {COLUMNS}""",
+            (today, ids, ids)).fetchall()
+    by_id = {r["id"]: r for r in rows}
+    return [by_id[i] for i in ids if i in by_id]
+
+
+def focus_today(today: date) -> tuple[list[dict[str, Any]], set[int]]:
+    """Today's 3 (open or done, not cancelled) and which of them were done today (recurring ones roll on)."""
+    rows = db.fetch_all(
+        f"""select {COLUMNS}, exists (select 1 from task_events e where e.task_id = tasks.id and e.kind = 'done'
+                                      and e.created_at >= %s) as done_today
+            from tasks where focus_date = %s and status <> 'cancelled' order by focus_rank nulls last, id""",
+        (datetime.combine(today, datetime.min.time(), get_settings().tz), today),
+    )
+    done = {r["id"] for r in rows if r.pop("done_today") or r["status"] == "done"}
+    return rows, done
 
 
 # ---------------------------------------------------------------- lists

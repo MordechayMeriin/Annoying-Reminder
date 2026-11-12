@@ -12,7 +12,14 @@ create table if not exists tasks (
     parent_id        bigint      references tasks (id) on delete cascade,  -- set for subtasks
     title            text        not null,
     description      text,                  -- living state of the task, rewritten by the assistant
-    kind             text        not null default 'task'   check (kind in ('task', 'meeting')),
+    next_action      text,                  -- the first physical step (verb first, 15 min or less)
+    estimate_min     integer                check (estimate_min is null or estimate_min between 1 and 10000),
+    focus_date       date,                  -- the day this task is in Today's 3
+    focus_rank       smallint,              -- its place in Today's 3 (1 = first)
+    resume_note      text,                  -- "where did you stop?" (shown next time)
+    parked_until     timestamptz,           -- "Not now": no check-ins before this time
+    stale_offered_at timestamptz,           -- Sunday cleanup offered it (cooldown)
+    kind             text        not null default 'task'   check (kind in ('task', 'meeting', 'fence')),
     priority         smallint    not null default 1        check (priority between 1 and 3),
     status           text        not null default 'open'   check (status in ('open', 'done', 'cancelled')),
     due_at           timestamptz,           -- deadline, or meeting start time
@@ -31,6 +38,7 @@ create table if not exists tasks (
 create index if not exists tasks_open_remind_idx on tasks (remind_at) where status = 'open';
 create index if not exists tasks_open_due_idx    on tasks (due_at)    where status = 'open';
 create index if not exists tasks_parent_idx      on tasks (parent_id) where parent_id is not null;
+create index if not exists tasks_focus_idx       on tasks (focus_date) where focus_date is not null;
 
 -- Append-only interaction log per task: what the user said / did about it over time
 create table if not exists task_events (
@@ -38,9 +46,11 @@ create table if not exists task_events (
     task_id    bigint      not null references tasks (id) on delete cascade,
     kind       text        not null check (kind in (
                    'postponed', 'committed', 'progress', 'stuck', 'blocked', 'unblocked',
-                   'ignored', 'done', 'description_changed'
+                   'ignored', 'done', 'description_changed',
+                   'session_started', 'session_ended', 'paused', 'parked'
                )),
     note       text,
+    avoid_reason text  check (avoid_reason in ('too_big', 'unclear', 'boring', 'scary', 'people', 'no_energy')),
     created_at timestamptz not null default now()
 );
 
@@ -57,10 +67,13 @@ create table if not exists messages (
                    'nudge',                                  -- assistant's own task check-in
                    'reminder',                               -- a reminder the user asked for
                    'meeting',                                -- meeting reminder
-                   'event'                                   -- "[Marked done: …]" (role = user)
+                   'event',                                  -- "[Marked done: …]" (role = user)
+                   'session',                                -- focus session start / end
+                   'reentry'                                 -- the first message after a lapse
                )),
     task_id    bigint      references tasks (id) on delete set null,  -- main task it's about
     task_ids   bigint[]    not null default '{}',                     -- every task it's about
+    chips      jsonb       not null default '[]',                     -- reply buttons, chosen by code
     created_at timestamptz not null default now()
 );
 
@@ -91,14 +104,36 @@ create table if not exists app_settings (
     updated_at timestamptz not null default now()
 );
 
+-- Focus sessions: ▶ Start → a timer → one check-in at the end
+create table if not exists sessions (
+    id          bigserial primary key,
+    task_id     bigint      not null references tasks (id) on delete cascade,
+    started_at  timestamptz not null default now(),
+    planned_min integer     not null check (planned_min > 0 and planned_min % 5 = 0),
+    ended_at    timestamptz,
+    outcome     text        check (outcome in ('done', 'another', 'stopped', 'paused')),
+    user_id     uuid        -- unused: keeps a later multi-user step cheap
+);
+create index if not exists sessions_open_idx on sessions (started_at) where ended_at is null;
+
+-- Preferences stated in chat ("shorter messages please"), injected into every prompt
+create table if not exists preferences (
+    id         bigserial primary key,
+    text       text        not null,
+    created_at timestamptz not null default now(),
+    user_id    uuid        -- unused: keeps a later multi-user step cheap
+);
+
 alter table tasks              enable row level security;
 alter table task_events        enable row level security;
 alter table messages           enable row level security;
 alter table push_subscriptions enable row level security;
 alter table job_runs           enable row level security;
 alter table app_settings       enable row level security;
+alter table sessions           enable row level security;
+alter table preferences        enable row level security;
 
 -- Hardening (same as migrations/002): RLS doesn't cover TRUNCATE, so drop the API roles' grants.
-revoke all on table tasks, task_events, messages, push_subscriptions, job_runs, app_settings
-    from anon, authenticated;
+revoke all on table tasks, task_events, messages, push_subscriptions, job_runs, app_settings,
+    sessions, preferences from anon, authenticated;
 revoke all on all sequences in schema public from anon, authenticated;
