@@ -144,8 +144,9 @@ class Spec:
         return f"{v:g}" if self.kind == "float" else str(v)
 
 
-_G_DAY, _G_QUIET, _G_SHABBAT, _G_MEET, _G_NAG, _G_PUSHOVER = (
-    "Daily messages", "Quiet hours", "Shabbat & holidays", "Meetings", "Check-ins & limits", "Notifications")
+_G_DAY, _G_QUIET, _G_SHABBAT, _G_MEET, _G_NAG, _G_PUSHOVER, _G_APP = (
+    "Daily messages", "Quiet hours", "Shabbat & holidays", "Meetings", "Check-ins & limits", "Notifications",
+    "App")
 
 PUSHOVER_MODES = (
     ("always", "Every message"),
@@ -243,6 +244,10 @@ SPECS: dict[str, Spec] = {s.key: s for s in [
          "If check-ins stop sooner (see above), the last one is the alarm.", 0, 50),
     Spec("pushover_alarm_retry_min", "int", "2", "Alarm repeats every (min)", _G_PUSHOVER,
          "For up to an hour, and never into quiet hours or Shabbat.", 1, 30),
+
+    Spec("show_model", "bool", "false", "Show which AI model replied", _G_APP,
+         "A small grey line under the title, for the latest message only. Empty when code wrote it "
+         "(a template or a button's answer)."),
 ]}
 
 
@@ -350,6 +355,8 @@ class Settings:
     day_reset_time: time = field(default_factory=lambda: _env("day_reset_time"))
     # A reply this soon after a check-in treats that check-in's tasks as the likely topic.
     reply_link_hours: float = field(default_factory=lambda: _env("reply_link_hours"))
+    # The app shows which model wrote the latest message (messages carry it only when this is on).
+    show_model: bool = field(default_factory=lambda: _env("show_model"))
 
     # Browser push (only when the VAPID keys are set) and Pushover (only when PUSHOVER_TOKEN and
     # PUSHOVER_USER are set); notify.py combines them.

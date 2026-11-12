@@ -78,6 +78,7 @@ create table if not exists messages (
     task_id    bigint      references tasks (id) on delete set null,  -- main task it's about
     task_ids   bigint[]    not null default '{}',                     -- every task it's about
     chips      jsonb       not null default '[]',                     -- reply buttons, chosen by code
+    model      text,                       -- the LLM that wrote it (null: written by code)
     created_at timestamptz not null default now()
 );
 

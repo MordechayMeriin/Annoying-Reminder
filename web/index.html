@@ -49,7 +49,11 @@
   <!-- Main: the chat -->
   <section id="main" class="screen" hidden>
     <header>
-      <h1>🔔 Reminder</h1>
+      <div class="brand">
+        <h1>🔔 Reminder</h1>
+        <!-- ⚙ "Show which AI model replied": the model behind the latest reply (hidden by default) -->
+        <span id="model-tag" class="model-tag" hidden></span>
+      </div>
       <div class="header-actions">
         <button id="enable-push" class="small" hidden>Enable notifications</button>
         <button id="open-tasks" class="small ghost" title="Tasks">☑ Tasks <span id="task-count" class="badge" hidden></span></button>

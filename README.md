@@ -265,6 +265,12 @@ Things that aren't settings ("shorter messages please", "no emojis") are remembe
 they're added to every prompt (`{preferences}`), and listed under ⚙ → *What you asked for*, where ✕
 forgets one.
 
+### Which model replied
+Off by default. **⚙ → App → Show which AI model replied** puts the model behind the latest reply in a
+small grey line under the title ("gemini-2.5-flash"; the full id on hover), so you can see when
+OpenRouter fell back to another model. It's the model OpenRouter says answered, saved on every message
+an LLM wrote. Nothing shows when code wrote the latest message (a template, a button's answer).
+
 ### Prompts are files: a short core plus playbooks
 [`backend/app/prompts/`](backend/app/prompts/): `core.md` (who the assistant is and the communication
 rules, in every prompt) and [`playbooks/`](backend/app/prompts/playbooks/) (`planning`, `stuck`,
@@ -296,7 +302,7 @@ Smaller prompts get better behaviour from cheaper models. `system.md` (chat), `c
    [`db/migrations/`](db/migrations/) in order instead; they are idempotent. After `006`, give your
    existing tasks their first steps once: Render → api service → Shell →
    `python scripts/backfill_next_actions.py`. `007` adds two columns for focus sessions, `008` three
-   columns for avoided tasks.)
+   columns for avoided tasks, `009` the model that wrote each message.)
 3. **Authentication → Sign In / Providers**: keep Email enabled, **turn off "Allow new users to sign up"**.
 4. **Authentication → Users → Add user → Create new user** with your email (tick auto-confirm). Copy its **User UID** → `OWNER_USER_ID`.
 5. **Authentication → Emails → Magic Link** template: add `Your code: {{ .Token }}` so you can log in with a code inside the installed app.

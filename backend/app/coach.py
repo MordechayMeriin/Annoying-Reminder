@@ -15,7 +15,7 @@ from typing import Any
 
 from . import context, sessions, tasks, thread
 from .config import get_settings
-from .llm import LLMUnavailable, chat_completion
+from .llm import LLMUnavailable, chat_completion, last_model, track_models
 from .llm_loop import run as run_tools
 from .logic import (WEEK_WINS_DAYS, chip_label, chip_lang, chips_for, chips_json, clip, day_start, focus_day,
                     meeting_occurrences, pick_focus, select_playbooks, task_stage)
@@ -39,6 +39,7 @@ class Composed:
     used_llm: bool = False
     chips: list[dict[str, Any]] = field(default_factory=list)          # reply buttons (chat)
     push_actions: list[dict[str, str]] = field(default_factory=list)   # notification buttons
+    model: str | None = None       # the LLM that wrote the text (None: a template)
 
 
 # ================================================================ pure helpers
@@ -165,17 +166,18 @@ async def compose(group: list[dict[str, Any]], now: datetime,
     chips = checkin_chips(group, None, lang, avoided)
 
     body, followups, used = "", {}, False
-    if meetings or others:
-        try:
-            prep = await asyncio.to_thread(_checkin_prep, group, now, contacts_today or {}, avoided)
-            chips, lang = prep.chips, prep.lang
-            ctx = ToolContext(mode="coach", now=now)
-            body = await asyncio.wait_for(_llm_body(group, now, prep, ctx), timeout=s.llm_timeout_s)
-            followups, used = dict(ctx.followups), bool(body.strip())
-        except (LLMUnavailable, asyncio.TimeoutError) as e:
-            log.warning("Check-in falls back to template: %s", e or type(e).__name__)
-        except Exception:
-            log.exception("Check-in LLM path failed; using template")
+    with track_models() as models:
+        if meetings or others:
+            try:
+                prep = await asyncio.to_thread(_checkin_prep, group, now, contacts_today or {}, avoided)
+                chips, lang = prep.chips, prep.lang
+                ctx = ToolContext(mode="coach", now=now)
+                body = await asyncio.wait_for(_llm_body(group, now, prep, ctx), timeout=s.llm_timeout_s)
+                followups, used = dict(ctx.followups), bool(body.strip())
+            except (LLMUnavailable, asyncio.TimeoutError) as e:
+                log.warning("Check-in falls back to template: %s", e or type(e).__name__)
+            except Exception:
+                log.exception("Check-in LLM path failed; using template")
 
     if not used:
         followups = {}
@@ -188,7 +190,7 @@ async def compose(group: list[dict[str, Any]], now: datetime,
     head = "\n".join([meeting_line(m, now) for m in meetings] + [fence_line(f, lang) for f in fences])
     text = clip("\n".join(x for x in (head, body.strip()) if x), MAX_TEXT)
     return Composed(text=text, kind=kind, title=title, followups=followups, used_llm=used, chips=chips,
-                    push_actions=push_actions(group, lang))
+                    push_actions=push_actions(group, lang), model=last_model(models, used))
 
 
 async def _llm_body(group: list[dict[str, Any]], now: datetime, prep: _CheckinPrep, ctx: ToolContext) -> str:
@@ -260,6 +262,7 @@ class Daily:
     task_ids: list[int] = field(default_factory=list)   # the morning plan is linked to Today's 3
     used_llm: bool = False
     kind: str | None = None        # the message kind when it isn't the job's name ('reentry', 'meeting')
+    model: str | None = None       # the LLM that wrote the text (None: a template)
 
 
 @dataclass
@@ -364,10 +367,11 @@ async def compose_daily(job: str, now: datetime, sunday: bool = False) -> Daily 
                                     + (context.format_messages(f.today_msgs, now_local) or "(nothing yet)")},
     ]
     try:
-        msg = await chat_completion(messages, temperature=0.5)
+        with track_models() as models:
+            msg = await chat_completion(messages, temperature=0.5)
         text = (msg.get("content") or "").strip()
         if text:
-            return Daily(clip(text, MAX_TEXT), chips, used_llm=True)
+            return Daily(clip(text, MAX_TEXT), chips, used_llm=True, model=last_model(models))
     except LLMUnavailable as e:
         log.warning("Daily job %s falls back to template: %s", job, e or type(e).__name__)
     except Exception:
@@ -438,16 +442,17 @@ async def _compose_morning(f: _DailyFacts, now: datetime, sunday: bool = False) 
     ]
     ctx = ToolContext(mode="morning", now=now)
     text, used = "", False
-    if suggested_ids:
-        try:
-            text = await asyncio.wait_for(
-                run_tools(messages, MORNING_TOOLS, ctx, max_rounds=3, temperature=0.5, timeout=s.llm_timeout_s),
-                timeout=s.llm_timeout_s * 2)
-            used = bool(text.strip())
-        except (LLMUnavailable, asyncio.TimeoutError) as e:
-            log.warning("Morning plan falls back to template: %s", e or type(e).__name__)
-        except Exception:
-            log.exception("Morning plan LLM path failed; using template")
+    with track_models() as models:
+        if suggested_ids:
+            try:
+                text = await asyncio.wait_for(
+                    run_tools(messages, MORNING_TOOLS, ctx, max_rounds=3, temperature=0.5, timeout=s.llm_timeout_s),
+                    timeout=s.llm_timeout_s * 2)
+                used = bool(text.strip())
+            except (LLMUnavailable, asyncio.TimeoutError) as e:
+                log.warning("Morning plan falls back to template: %s", e or type(e).__name__)
+            except Exception:
+                log.exception("Morning plan LLM path failed; using template")
 
     if ctx.focus:
         focus_ids = ctx.focus
@@ -466,7 +471,7 @@ async def _compose_morning(f: _DailyFacts, now: datetime, sunday: bool = False) 
         if stale_ids:
             chips = chips + chips_json(chips_for("sunday", None, f.lang), f.lang, None, stale_ids)
             await asyncio.to_thread(tasks.mark_stale_offered, stale_ids)
-    return Daily(text, chips, ids, used_llm=used)
+    return Daily(text, chips, ids, used_llm=used, model=last_model(models, used))
 
 
 # ================================================================ re-entry after a lapse (F7)
@@ -498,10 +503,11 @@ async def compose_reentry(now: datetime) -> Daily:
                                     + ("\n".join(f"- {t['title']}" for t in some) or "(none)")},
     ]
     try:
-        msg = await chat_completion(messages, temperature=0.5)
+        with track_models() as models:
+            msg = await chat_completion(messages, temperature=0.5)
         text = (msg.get("content") or "").strip()
         if text:
-            return Daily(clip(text, 300), chips, used_llm=True, kind="reentry")
+            return Daily(clip(text, 300), chips, used_llm=True, kind="reentry", model=last_model(models))
     except LLMUnavailable as e:
         log.warning("Re-entry message falls back to template: %s", e or type(e).__name__)
     except Exception:

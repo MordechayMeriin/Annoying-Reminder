@@ -5,8 +5,10 @@ server error, malformed response) raises LLMUnavailable, so callers can fall bac
 """
 
 import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import date, datetime
-from typing import Any
+from typing import Any, Iterator
 
 import httpx
 
@@ -16,6 +18,10 @@ from .config import get_settings
 log = logging.getLogger("llm")
 
 _calls_today: dict[date, int] = {}
+
+# The models that answered inside a track_models() block. A list, not a value: asyncio.wait_for and
+# to_thread run the call in a copy of the context, and the copy still points at the same list.
+_answered_by: ContextVar[list[str] | None] = ContextVar("answered_by", default=None)
 
 
 class LLMUnavailable(RuntimeError):
@@ -35,6 +41,32 @@ def _count_call() -> None:
     if _calls_today.get(today, 0) >= s.llm_calls_per_day:
         raise LLMLimitReached("Daily LLM call limit reached")
     _calls_today[today] = _calls_today.get(today, 0) + 1
+
+
+@contextmanager
+def track_models() -> Iterator[list[str]]:
+    """
+    Collects the model of every answer received inside the block, in order (the last one wrote the
+    final text). Used to show which model wrote a message, when the owner turns that on.
+    """
+    models: list[str] = []
+    token = _answered_by.set(models)
+    try:
+        yield models
+    finally:
+        _answered_by.reset(token)
+
+
+def record_model(model: str | None) -> None:
+    """Note the model that answered (OpenRouter says which one, after any fallback)."""
+    models = _answered_by.get()
+    if models is not None and model:
+        models.append(model)
+
+
+def last_model(models: list[str], used: bool = True) -> str | None:
+    """The model behind a message: the last one that answered, or None if the text isn't the LLM's."""
+    return models[-1] if used and models else None
 
 
 def calls_today() -> int:
@@ -83,6 +115,8 @@ async def chat_completion(messages: list[dict[str, Any]], tools: list[dict] | No
         data = r.json()
         if "error" in data:
             raise LLMUnavailable(f"OpenRouter error: {str(data['error'])[:300]}")
-        return data["choices"][0]["message"]
+        message = data["choices"][0]["message"]
     except (ValueError, KeyError, IndexError, TypeError) as e:
         raise LLMUnavailable(f"Malformed OpenRouter response: {e}") from e
+    record_model(data.get("model"))
+    return message
