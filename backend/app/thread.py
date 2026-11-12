@@ -95,6 +95,12 @@ def last_user_reply_at() -> datetime | None:
     return row["created_at"] if row else None
 
 
+def last_kind_at(kind: str) -> datetime | None:
+    """When a message of this kind was last sent (e.g. 'reentry': one per lapse)."""
+    row = db.fetch_one("select created_at from messages where kind = %s order by created_at desc limit 1", (kind,))
+    return row["created_at"] if row else None
+
+
 def last_user_text() -> str | None:
     """The user's latest typed message (decides the language of the reply buttons)."""
     row = db.fetch_one(

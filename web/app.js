@@ -17,6 +17,7 @@ const KIND_LABEL = {
   session: "⏱ Session",
   reentry: "👋 Welcome back",
 };
+const KIND_ICON = { meeting: "📅 ", fence: "⛔ " };   // fence: a fixed hard stop, learned from chat
 const PAGE = 50;
 const START_MIN_APP = 25;   // ▶ Start on the focus card (from a notification or a chip: 5)
 const HEBREW = /[\u0590-\u05FF]/;
@@ -318,6 +319,8 @@ async function onChip(chip, row) {
   try {
     if (chip.action === "what_now") {
       await whatNow({ chip: chip.id, low_energy: !!chip.low_energy, exclude: chip.exclude || [] });
+    } else if (BULK_TOAST[chip.action]) {
+      await runBulkAction(chip.action, chip.task_ids || []);
     } else if (chip.action === "start" || chip.action === "another") {
       await runAction(chip.task_id, chip.action, chip.minutes, { quiet: true });
       if (session) openSessionScreen();
@@ -331,8 +334,20 @@ async function onChip(chip, row) {
 
 const ACTION_TOAST = {
   done: "Done ✓", snooze: "Snoozed for 1 hour", cancel: "Cancelled", later: "OK, later", start: "▶ Started",
-  another: "▶ Another round", stop: "Stopped",
+  another: "▶ Another round", stop: "Stopped", not_now: "Parked for a week",
 };
+// Chips that act on several tasks with one tap (Phase 3): the re-entry message and the Sunday cleanup.
+const BULK_TOAST = { move_overdue: "Moved to next week", drop: "Dropped", keep: "Kept" };
+
+async function runBulkAction(action, taskIds) {
+  try {
+    await api("/tasks/bulk-action", { method: "POST", body: JSON.stringify({ action, task_ids: taskIds }) });
+    toast(BULK_TOAST[action]);
+    await Promise.all([loadTasks(), loadNewer(), loadFocus()]);
+  } catch (e) {
+    toast(e.message);
+  }
+}
 
 /** A task action without the LLM (chips, the focus card, the task list); refreshes what it changed. */
 async function runAction(id, action, minutes, { quiet = false } = {}) {
@@ -856,6 +871,8 @@ async function sendChat(text, onEvent) {
 // What the assistant is doing, by tool. t = the tool event ({ name, title?, taskTitle?, kind? }).
 const TOOL_LABEL = {
   add_task: (t) => [t.kind === "meeting" ? "📅 Saving a new meeting" : "📝 Writing a new task", t.title],
+  update_setting: () => ["⚙️ Changing a setting"],
+  remember_preference: () => ["🧠 Remembering that"],
   list_tasks: () => ["🔎 Checking your tasks"],
   update_task: (t) => ["✏️ Updating task", t.taskTitle || t.title],
   complete_task: (t) => ["✅ Marking as done", t.taskTitle],
@@ -1103,9 +1120,11 @@ document.addEventListener("keydown", (e) => {
 });
 
 function taskMeta(t) {
-  const overdue = t.due_at && new Date(t.due_at) < new Date() && t.kind !== "meeting";
+  const overdue = t.due_at && new Date(t.due_at) < new Date() && t.kind === "task";
   const parts = [t.due_at ? (overdue ? "Overdue · " : "") + fmtTime(t.due_at) : "No date"];
+  if (t.kind === "fence") parts.unshift("Hard stop");
   if (t.recurrence) parts.push(`🔁 ${t.recurrence}`);
+  if (t.parked_until && new Date(t.parked_until) > new Date()) parts.push(`💤 parked until ${fmtTime(t.parked_until)}`);
   if (t.blocked_reason) parts.push("⛔ waiting");
   if (t.parent_id) parts.push(`step of ${tasksById.get(t.parent_id)?.title || "#" + t.parent_id}`);
   return { text: parts.join(" · "), overdue };
@@ -1116,7 +1135,7 @@ function taskItem(t) {
   li.dataset.taskId = t.id;
   li.hidden = pendingDone.has(t.id);
   const prio = t.priority === 3 ? "🚨 " : t.priority === 2 ? "❗ " : "";
-  const icon = t.kind === "meeting" ? "📅 " : "";
+  const icon = KIND_ICON[t.kind] || "";
   const info = el("button", "info");
   info.type = "button";
   const title = el("div", "title", prio + icon + t.title);
@@ -1138,7 +1157,8 @@ function taskItem(t) {
   const done = el("button", "done-btn", "✓");
   done.title = "Done";
   done.onclick = () => markDone(t.id);
-  btns.append(snooze, done);
+  // A hard stop isn't something to finish or snooze: open it to change or cancel it.
+  if (t.kind !== "fence") btns.append(snooze, done);
   li.append(info, btns);
   return li;
 }
@@ -1230,7 +1250,7 @@ async function openTask(id) {
   }
   if (detailTaskId !== id) return;
   const prio = t.priority === 3 ? "🚨 " : t.priority === 2 ? "❗ " : "";
-  $("detail-title").textContent = prio + (t.kind === "meeting" ? "📅 " : "") + t.title;
+  $("detail-title").textContent = prio + (KIND_ICON[t.kind] || "") + t.title;
   const status = t.status !== "open" ? ` · ${t.status}` : "";
   $("detail-meta").textContent = taskMeta(t).text + status +
     (t.remind_at ? ` · next check-in ${fmtTime(t.remind_at)}` : "");
@@ -1247,6 +1267,7 @@ async function openTask(id) {
   desc.dataset.original = desc.value;
   $("detail-save").disabled = true;
   ["detail-snooze", "detail-done", "detail-cancel"].forEach((b) => ($(b).hidden = t.status !== "open"));
+  if (t.kind === "fence") $("detail-snooze").hidden = $("detail-done").hidden = true;
 
   const subs = $("detail-subtasks");
   subs.textContent = "";
@@ -1515,9 +1536,44 @@ async function openSettings() {
   try {
     const data = applySettings(await api("/settings"));
     renderSettings(data.rest, data.pushover);
+    renderPreferences(data.preferences || []);
   } catch (e) {
     $("settings-form").textContent = e.message;
   }
+}
+
+// What you asked for in chat ("shorter messages please"): read-only, each with a delete button.
+// Nothing to configure here: you say it in the chat, and delete it when it no longer holds.
+function renderPreferences(list) {
+  const box = $("preferences");
+  box.textContent = "";
+  box.hidden = !list.length;
+  if (!list.length) return;
+  box.appendChild(el("h2", "", "What you asked for"));
+  box.appendChild(el("p", "muted", "Said in the chat; the assistant follows these in every message."));
+  const ul = el("ul", "pref-list");
+  list.forEach((p) => {
+    const li = el("li", "pref");
+    const text = el("span", "pref-text", p.text);
+    text.dir = "auto";
+    const del = el("button", "small ghost", "✕");
+    del.type = "button";
+    del.title = "Forget this";
+    del.setAttribute("aria-label", `Forget: ${p.text}`);
+    del.onclick = async () => {
+      del.disabled = true;
+      try {
+        renderPreferences(await api(`/preferences/${p.id}`, { method: "DELETE" }));
+        toast("Forgotten");
+      } catch (e) {
+        del.disabled = false;
+        toast(e.message);
+      }
+    };
+    li.append(text, del);
+    ul.appendChild(li);
+  });
+  box.appendChild(ul);
 }
 
 $("open-settings").onclick = () => openSettings();
@@ -1536,6 +1592,7 @@ $("settings-save").onclick = async () => {
       body: JSON.stringify({ values: Object.fromEntries(pendingSettings) }),
     }));
     renderSettings(data.rest, data.pushover);
+    renderPreferences(data.preferences || []);
     toast("Settings saved");
     if (pushChanged) setupPush().catch(() => {});
   } catch (e) {

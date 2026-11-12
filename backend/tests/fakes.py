@@ -8,9 +8,10 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from app import llm, llm_loop, coach, notify, sessions, tasks, thread
+from app import llm, llm_loop, coach, notify, preferences, sessions, tasks, thread
 from app.config import get_settings
-from app.logic import FOCUS_MAX, ContactState, focus_day, may_check_in, next_occurrence
+from app.logic import (FOCUS_MAX, STALE_COOLDOWN_DAYS, STALE_DAYS, STALE_MAX, ContactState, focus_day, is_parked,
+                       may_check_in, next_occurrence)
 
 
 class FakeStore:
@@ -22,8 +23,9 @@ class FakeStore:
         self.pushes: list[dict[str, Any]] = []
         self.pushovers: list[dict[str, Any]] = []
         self.sessions: list[dict[str, Any]] = []
+        self.preferences: list[dict[str, Any]] = []
         self.pushover_mode = "always"   # as if PUSHOVER_TOKEN / PUSHOVER_USER were set
-        self._ids = {"task": 0, "msg": 0, "session": 0}
+        self._ids = {"task": 0, "msg": 0, "session": 0, "pref": 0}
         self.calls: list[str] = []      # every storage call, in order (for counting round trips)
 
     # ------------------------------------------------------------ setup helpers
@@ -42,7 +44,8 @@ class FakeStore:
              "recurrence": None, "nag_count": 0, "escalated": False, "blocked_reason": None,
              "blocked_until": None, "last_notified_at": None, "created_at": self.now, "completed_at": None,
              "next_action": None, "estimate_min": None, "focus_date": None, "focus_rank": None,
-             "resume_note": None}
+             "resume_note": None, "parked_until": None, "stale_offered_at": None, "avoid_asked_at": None,
+             "avoid_asks": 0, "avoid_reset_at": None}
         t.update(kw)
         self.tasks[t["id"]] = t
         return dict(t)
@@ -57,14 +60,18 @@ class FakeStore:
                      "subtasks_many", "recent_events_many", "event_counts_many",
                      "create", "update", "complete", "set_followup", "snooze", "block", "unblock", "cancel",
                      "close_finished_meetings", "due_for_contact", "meetings_between", "defer", "lease", "finish_contact",
-                     "list_tasks", "set_focus", "focus_today", "done_since"):
+                     "list_tasks", "set_focus", "focus_today", "done_since", "fence_fired", "avoid_asked",
+                     "reset_avoidance", "park", "stale_tasks", "mark_stale_offered"):
             setattr_(tasks, name, self._counted("tasks." + name, getattr(self, "t_" + name), name != "now_utc"))
         for name in ("add", "add_event", "link", "since", "for_tasks", "last_proactive", "recent_task_ids",
-                     "user_replied_since", "last_user_reply_at", "last_user_text", "contact_state", "page", "by_ids"):
+                     "user_replied_since", "last_user_reply_at", "last_user_text", "contact_state", "page", "by_ids",
+                     "last_kind_at"):
             setattr_(thread, name, self._counted("thread." + name, getattr(self, "m_" + name)))
         for name in ("start", "get", "latest", "open_sessions", "latest_for_task", "end", "set_planned", "claim_end",
                      "close_note", "close_notes_for_task", "stats_since"):
             setattr_(sessions, name, self._counted("sessions." + name, getattr(self, "s_" + name)))
+        for name in ("load", "items", "add", "delete"):
+            setattr_(preferences, name, getattr(self, "p_" + name))
         setattr_(notify, "send_push", self.send_push)
         setattr_(notify, "send_pushover", self.send_pushover)
         setattr_(notify, "pushover_mode", lambda: self.pushover_mode)
@@ -110,16 +117,19 @@ class FakeStore:
     def t_subtasks(self, task_id):
         return [dict(t) for t in self.tasks.values() if t["parent_id"] == task_id and t["status"] != "cancelled"]
 
-    def t_add_event(self, task_id, kind, note=None):
-        self.events.append({"task_id": task_id, "kind": kind, "note": note, "created_at": self.now})
+    def t_add_event(self, task_id, kind, note=None, avoid_reason=None):
+        self.events.append({"task_id": task_id, "kind": kind, "note": note, "avoid_reason": avoid_reason,
+                            "created_at": self.now})
 
     def t_recent_events(self, task_id, limit=8):
         return [e for e in reversed(self.events) if e["task_id"] == task_id][:limit]
 
     def t_event_counts(self, task_id, days=7):
         out: dict[str, int] = {}
+        reset = (self.tasks.get(task_id) or {}).get("avoid_reset_at")
         for e in self.events:
-            if e["task_id"] == task_id and e["created_at"] > self.now - timedelta(days=days):
+            if (e["task_id"] == task_id and e["created_at"] > self.now - timedelta(days=days)
+                    and (reset is None or e["created_at"] > reset)):
                 out[e["kind"]] = out.get(e["kind"], 0) + 1
         return out
 
@@ -153,6 +163,7 @@ class FakeStore:
             if "remind_at" not in fields and fields.get("due_at") is not None:
                 fields["remind_at"] = fields["due_at"]
             fields["remind_requested"] = fields.get("remind_at") is not None
+            fields["parked_until"] = None
         t.update(fields)
         return dict(t)
 
@@ -173,7 +184,7 @@ class FakeStore:
         t = self.tasks.get(task_id)
         if t is None or t["status"] != "open":
             return None
-        t.update(remind_at=when, remind_requested=requested, nag_count=0, escalated=False)
+        t.update(remind_at=when, remind_requested=requested, nag_count=0, escalated=False, parked_until=None)
         return dict(t)
 
     def t_snooze(self, task_id, minutes=60):
@@ -203,10 +214,80 @@ class FakeStore:
                     and t["due_at"] and t["due_at"] < self.now - timedelta(hours=2)):
                 t.update(status="done", completed_at=self.now, remind_at=None)
 
-    def t_due_for_contact(self, today, limit=20):
+    def t_due_for_contact(self, today, lapsed=False, limit=20):
         due = [t for t in self.tasks.values() if t["status"] == "open" and t["remind_at"] and t["remind_at"] <= self.now
-               and may_check_in(t, self.now, today)]
+               and may_check_in(t, self.now, today, lapsed)]
         return [dict(t) for t in sorted(due, key=lambda t: t["remind_at"])][:limit]
+
+    def t_fence_fired(self, task_id):
+        t = self.tasks.get(task_id)
+        if t is None or t["status"] != "open" or t["kind"] != "fence":
+            return dict(t) if t else None
+        if t["recurrence"] and t["due_at"]:
+            nxt = next_occurrence(t["due_at"], t["recurrence"], get_settings().tz)
+            while nxt <= self.now:
+                nxt = next_occurrence(nxt, t["recurrence"], get_settings().tz)
+            t.update(due_at=nxt, remind_at=nxt, remind_requested=True, nag_count=0, last_notified_at=self.now)
+        else:
+            t.update(status="done", completed_at=self.now, remind_at=None, last_notified_at=self.now)
+        return dict(t)
+
+    def t_avoid_asked(self, task_id, next_at):
+        t = self.tasks[task_id]
+        t.update(avoid_asks=t["avoid_asks"] + 1, avoid_asked_at=self.now, remind_at=next_at,
+                 remind_requested=False, last_notified_at=self.now)
+
+    def t_reset_avoidance(self, task_id):
+        self.tasks[task_id].update(avoid_reset_at=self.now, avoid_asks=0, avoid_asked_at=None, parked_until=None)
+
+    def t_park(self, task_id, until):
+        t = self.tasks.get(task_id)
+        if t is None or t["status"] != "open":
+            return None
+        t.update(parked_until=until, remind_at=until, remind_requested=False, nag_count=0, escalated=False,
+                 focus_date=None, focus_rank=None, avoid_reset_at=self.now, avoid_asks=0, avoid_asked_at=None)
+        self.t_add_event(task_id, "parked", f"until {until.astimezone(get_settings().tz):%Y-%m-%d}")
+        return dict(t)
+
+    def t_stale_tasks(self, limit=STALE_MAX):
+        old = self.now - timedelta(days=STALE_DAYS)
+        moving = {e["task_id"] for e in self.events if e["kind"] in tasks.PROGRESS_KINDS and e["created_at"] > old}
+        rows = [t for t in self.tasks.values()
+                if t["status"] == "open" and t["kind"] == "task" and not t["parent_id"] and not t["recurrence"]
+                and t["created_at"] < old and (t["due_at"] is None or t["due_at"] < self.now)
+                and not (t["blocked_until"] and t["blocked_until"] > self.now) and not is_parked(t, self.now)
+                and (t["stale_offered_at"] is None
+                     or t["stale_offered_at"] < self.now - timedelta(days=STALE_COOLDOWN_DAYS))
+                and t["id"] not in moving]
+        return [dict(t) for t in sorted(rows, key=lambda t: (t["created_at"], t["id"]))][:limit]
+
+    def t_mark_stale_offered(self, ids):
+        for i in ids:
+            self.tasks[i]["stale_offered_at"] = self.now
+
+    # ------------------------------------------------------------ preferences.*
+
+    def p_load(self):
+        pass
+
+    def p_items(self):
+        return [dict(p) for p in self.preferences]
+
+    def p_add(self, text):
+        text = " ".join((text or "").split())[:preferences.MAX_CHARS]
+        if not text:
+            raise ValueError("The preference is empty.")
+        if len(self.preferences) >= preferences.MAX_ITEMS:
+            raise ValueError("There are already too many saved preferences.")
+        self._ids["pref"] += 1
+        row = {"id": self._ids["pref"], "text": text, "created_at": self.now}
+        self.preferences.append(row)
+        return dict(row)
+
+    def p_delete(self, pref_id):
+        before = len(self.preferences)
+        self.preferences = [p for p in self.preferences if p["id"] != pref_id]
+        return len(self.preferences) < before
 
     def t_set_focus(self, task_ids, today):
         ids = list(dict.fromkeys(task_ids))[:FOCUS_MAX]
@@ -238,8 +319,8 @@ class FakeStore:
                                 "done_at": e["created_at"]}
         return sorted(out.values(), key=lambda r: r["done_at"])
 
-    def t_meetings_between(self, start, end):
-        rows = [t for t in self.tasks.values() if t["status"] == "open" and t["kind"] == "meeting"
+    def t_meetings_between(self, start, end, kinds=("meeting",)):
+        rows = [t for t in self.tasks.values() if t["status"] == "open" and t["kind"] in kinds
                 and t["due_at"] and t["due_at"] < end and (t["due_at"] >= start or t["recurrence"])]
         return [dict(t) for t in sorted(rows, key=lambda t: t["due_at"])]
 
@@ -324,6 +405,10 @@ class FakeStore:
 
     def m_last_user_reply_at(self):
         rows = [m for m in self.messages if m["role"] == "user" and m["kind"] in thread.ACTIVITY_KINDS]
+        return rows[-1]["created_at"] if rows else None
+
+    def m_last_kind_at(self, kind):
+        rows = [m for m in self.messages if m["kind"] == kind]
         return rows[-1]["created_at"] if rows else None
 
     def m_last_user_text(self):

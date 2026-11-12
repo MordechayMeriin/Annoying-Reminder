@@ -279,6 +279,10 @@ header {
 .settings { padding: 0 16px; display: flex; flex-direction: column; }
 .settings-intro { margin: 12px 0 0; }
 .settings-group h2 { margin: 20px 0 8px; }
+.preferences p { margin: 0 0 8px; font-size: .8rem; }
+.pref-list { list-style: none; margin: 0; padding: 0; }
+.pref { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-top: 1px solid var(--line, rgba(128,128,128,.25)); }
+.pref-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .setting {
   display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; align-items: center;
   padding: 10px 0; border-bottom: 1px solid var(--line);

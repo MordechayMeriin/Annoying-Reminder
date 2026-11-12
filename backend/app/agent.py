@@ -16,8 +16,8 @@ from typing import Any, Callable
 from . import context, tasks, thread
 from .config import get_settings
 from .llm_loop import run as run_tools
-from .logic import (chat_signals, chip_label, chip_lang, chips_for, chips_json, day_start, focus_day,
-                    link_task_ids, select_candidate_tasks, select_playbooks, task_stage)
+from .logic import (AVOID_CHIPS, chat_signals, chip_id_for_text, chip_label, chip_lang, chips_for, chips_json,
+                    day_start, focus_day, link_task_ids, select_candidate_tasks, select_playbooks, task_stage)
 from .prompting import render
 from .tools import CHAT_TOOLS, ToolContext
 
@@ -116,6 +116,21 @@ class _Turn:
     open_kinds: dict[int, str]   # open tasks at the start of the turn: id → kind
 
 
+def avoid_reason_tap(text: str, history: list[dict[str, Any]], last_proactive: dict[str, Any] | None) -> tuple[str, int] | None:
+    """
+    (reason, task id) when the message is a tap on Too big / Unclear / Boring under an avoided task's
+    reason message: the latest assistant message (today's chat, else the last proactive one) carries
+    that button and is about that task. Code records the reason, so it never depends on the model.
+    """
+    chip = chip_id_for_text(text)
+    if chip not in AVOID_CHIPS:
+        return None
+    asked = next((m for m in reversed(history) if m["role"] == "assistant"), None) or last_proactive
+    if asked and asked.get("task_ids") and any(c.get("id") == chip for c in asked.get("chips") or []):
+        return chip, asked["task_ids"][0]
+    return None
+
+
 def _start_turn(text: str, now, on_saved: Callable[[dict[str, Any]], None]) -> _Turn:
     """Blocking: saves the user's message (then calls on_saved) and builds the prompt."""
     s = get_settings()
@@ -132,6 +147,12 @@ def _start_turn(text: str, now, on_saved: Callable[[dict[str, Any]], None]) -> _
     open_tasks = tasks.list_tasks("open")
     candidate_ids = select_candidate_tasks(text, now, last, thread.recent_task_ids(start), open_tasks,
                                            s.reply_link_hours)
+    reason = avoid_reason_tap(text, history, last)
+    if reason:
+        # A reason button: recorded here, and the task gets a fresh start (no more reason messages, no park).
+        tasks.add_event(reason[1], "avoided", text.strip(), reason[0])
+        tasks.reset_avoidance(reason[1])
+        candidate_ids = [reason[1]] + [i for i in candidate_ids if i != reason[1]][:2]
     by_id = {t["id"]: t for t in open_tasks}
     missing = [i for i in candidate_ids if i not in by_id]
     by_id.update({t["id"]: t for t in tasks.get_many(missing)})
@@ -148,7 +169,8 @@ def _start_turn(text: str, now, on_saved: Callable[[dict[str, Any]], None]) -> _
                     chips=[{"label": chip_label(c.id, lang)} for c in chips_for("chat_task", None, lang)],
                     now=f"{now_local:%Y-%m-%d %H:%M}", weekday=f"{now_local:%A}", tz=s.tz.key,
                     likely_topic=likely_topic(candidates, recent, now_local, facts, today))
-    return _Turn(history=history, user_msg=user_msg, checkin_ids=list(recent["task_ids"]) if recent else [],
+    checkin_ids = [reason[1]] if reason else list(recent["task_ids"]) if recent else []
+    return _Turn(history=history, user_msg=user_msg, checkin_ids=checkin_ids,
                  system=system, titles={i: t["title"] for i, t in by_id.items()},
                  open_kinds={t["id"]: t["kind"] for t in open_tasks})
 

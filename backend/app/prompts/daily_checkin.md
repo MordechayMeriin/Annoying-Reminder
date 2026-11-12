@@ -7,6 +7,8 @@ Now: {now} ({weekday}).
 
 {playbooks}
 
+{preferences}
+
 # The mid-day check-in
 - Max 50 words. Lead with the next action of the first open task in Today's 3; don't list everything.
 - If they've already reacted to something today, build on it instead of repeating the list.

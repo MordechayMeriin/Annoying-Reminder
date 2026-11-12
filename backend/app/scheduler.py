@@ -12,6 +12,17 @@ The /tick logic, called every 5 minutes by cron-job.org.
 4. Focus sessions: plan_sessions() (sync) records silence as paused and claims due end check-ins;
    deliver_session_ends() (background) sends them: a template with ✓ Done · ▶ Another round · Stop.
    While a session runs, other check-ins wait (the focus hold, in logic.contact_decision).
+5. Gentler pressure (Phase 3):
+   - An avoided task (3+ postponed / ignored in 7 days) gets no more ordinary check-ins: one reason
+     message (Too big · Unclear · Boring · Not now), one more try 3 days later, then it's parked.
+   - Only meetings, fences, asked-for reminders and near deadlines are ever urgent or alarms; every
+     other task gets one normal check-in a day at most.
+   - A lapse (48 hours with no chat or tap, Shabbat and holidays not counted) stops task check-ins and
+     the mid-day / evening messages; the next morning message is the re-entry message, once.
+   - Fences (hard stops) are sent at their time, urgent, through sessions and the gap, never through
+     quiet hours or Shabbat (then they're skipped: late, they'd only be noise).
+   - The first morning of the week carries the week's meetings (instead of a separate digest), last
+     week's wins and the cleanup (Drop them · Keep).
 """
 
 import asyncio
@@ -22,11 +33,12 @@ from datetime import datetime, timedelta
 
 from . import actions, coach, db, notify, sessions, tasks, thread
 from .config import get_settings
-from .jewish_calendar import next_period, rest_config, rest_until
-from .logic import (ALARM, URGENT, AlertPolicy, ContactState, Guardrails, alarm_window_s, alert_level,
-                    chip_label, contact_decision, day_start, focus_day, focus_hold_until, job_is_due,
-                    next_reminder_after_nag, plan_contacts, session_end_due, session_end_at, session_last_active,
-                    session_silent, user_active_recently)
+from .jewish_calendar import next_period, periods_between, rest_config, rest_until
+from .logic import (ALARM, AVOID_RETRY_DAYS, NORMAL, URGENT, AlertPolicy, ContactState, Guardrails, alarm_window_s,
+                    alert_level, avoid_move, chip_label, contact_decision, day_start, escalates, fence_is_stale,
+                    focus_day, focus_hold_until, job_is_due, lapsed, next_reminder_after_nag, plan_contacts,
+                    reentry_due, session_end_due, session_end_at, session_last_active, session_silent,
+                    user_active_recently, week_meetings_merged)
 
 log = logging.getLogger("scheduler")
 
@@ -77,7 +89,7 @@ def message_level(group: list[dict], now: datetime, last_reply=_UNSET) -> tuple[
     policy = alert_policy()
     if last_reply is _UNSET:
         last_reply = thread.last_user_reply_at()
-    level = max(alert_level(t, ignored_streak(t, last_reply), policy) for t in group)
+    level = max(alert_level(t, ignored_streak(t, last_reply), policy, now) for t in group)
     if level < ALARM:
         return level, 0
     now_local = now.astimezone(s.tz)
@@ -93,6 +105,19 @@ def _delivery_running() -> bool:
     return _delivering_since is not None and time.monotonic() - _delivering_since < 3 * 60
 
 
+def is_lapsed(now: datetime) -> bool:
+    """No chat message and no tap for 48 hours, not counting Shabbat and holidays (logic.lapsed)."""
+    last = thread.last_user_reply_at()
+    if last is None:
+        return False
+    cfg = rest_config(get_settings())
+    rests = []
+    if cfg is not None:
+        first = last.astimezone(cfg.tz).date() - timedelta(days=4)
+        rests = [(p.start, p.end) for p in periods_between(first, now.astimezone(cfg.tz).date() + timedelta(days=1), cfg)]
+    return lapsed(last, now, rests)
+
+
 # ---------------------------------------------------------------- 1. plan (sync)
 
 def plan_tick() -> list[int]:
@@ -102,8 +127,12 @@ def plan_tick() -> list[int]:
         return []  # the previous message isn't out yet; the gap rule needs its timestamp
     tasks.close_finished_meetings()
     s = get_settings()
-    now_local = tasks.now_utc().astimezone(s.tz)
-    due = tasks.due_for_contact(focus_day(now_local, s.day_reset_time))  # with the focus filter
+    now = tasks.now_utc()
+    now_local = now.astimezone(s.tz)
+    due = tasks.due_for_contact(focus_day(now_local, s.day_reset_time), is_lapsed(now))  # focus + lapse filter
+    for fence in [t for t in due if t["kind"] == "fence" and fence_is_stale(t, now)]:
+        tasks.fence_fired(fence["id"])  # its time passed in quiet hours / Shabbat: skipped, not sent late
+        due.remove(fence)
     if not due:
         return []
     state = replace(thread.contact_state(day_start(now_local, s.day_reset_time)),
@@ -111,12 +140,35 @@ def plan_tick() -> list[int]:
     plan = plan_contacts(due, state, now_local, guardrails())
     for task_id, until in plan.defer.items():
         tasks.defer(task_id, until)
-    order = [t["id"] for t in plan.send]
+    order = _without_avoided(plan.send, now)
     leased = set(tasks.lease(order, LEASE_MIN))
     ids = [i for i in order if i in leased]
     if ids:
         _delivering_since = time.monotonic()
     return ids
+
+
+def _without_avoided(send: list[dict], now: datetime) -> list[int]:
+    """
+    Avoided tasks get no ordinary check-ins (logic.avoid_move). Returns the ids for this tick's message:
+    the tasks that aren't avoided; or, when there are none, ONE avoided task whose reason message is due
+    (it's sent alone; another one waits for a later tick). Waiting ones are postponed; a task whose two
+    reason messages went unanswered is parked, silently.
+    """
+    counts = tasks.event_counts_many([t["id"] for t in send if t["kind"] == "task"], 7)
+    normal, asks = [], []
+    for t in send:
+        move = avoid_move(t, counts.get(t["id"]), now)
+        if move is None:
+            normal.append(t["id"])
+        elif move == "ask":
+            asks.append(t["id"])
+        elif move == "wait":
+            tasks.defer(t["id"], t["avoid_asked_at"] + timedelta(days=AVOID_RETRY_DAYS))
+        else:
+            actions.park(t["id"], silent=True)
+            log.info("Task %s: two reason messages unanswered, parked", t["id"])
+    return normal or asks[:1]
 
 
 # ---------------------------------------------------------------- 2. deliver (background)
@@ -135,57 +187,73 @@ async def _deliver(task_ids: list[int]) -> None:
     # Database and notification calls block, so they run in worker threads; only the LLM part
     # (coach.compose) runs on the event loop.
     now = tasks.now_utc()
-    group, state = await asyncio.to_thread(_load_group, task_ids, now)
+    group, state, avoided = await asyncio.to_thread(_load_group, task_ids, now)
     if not group:
         return
-    composed = await coach.compose(group, now, state.sent_today_by_task)
-    await asyncio.to_thread(_send, group, composed, now)
+    composed = await coach.compose(group, now, state.sent_today_by_task, avoided)
+    await asyncio.to_thread(_send, group, composed, now, avoided)
 
 
-def _load_group(task_ids: list[int], now: datetime) -> tuple[list[dict], ContactState | None]:
+def _load_group(task_ids: list[int], now: datetime) -> tuple[list[dict], ContactState | None, bool]:
+    """The tasks, today's contact counts, and whether this is an avoided task's reason message."""
     s = get_settings()
     by_id = {t["id"]: t for t in tasks.get_many(task_ids) if t["status"] == "open"}
     group = [by_id[i] for i in task_ids if i in by_id]
     if not group:
-        return [], None
-    return group, thread.contact_state(day_start(now.astimezone(s.tz), s.day_reset_time))
+        return [], None, False
+    avoided = False
+    if len(group) == 1 and group[0]["kind"] == "task":
+        avoided = avoid_move(group[0], tasks.event_counts(group[0]["id"], 7), now) == "ask"
+    return group, thread.contact_state(day_start(now.astimezone(s.tz), s.day_reset_time)), avoided
 
 
-def _send(group: list[dict], composed: "coach.Composed", now: datetime) -> None:
+def _send(group: list[dict], composed: "coach.Composed", now: datetime, avoided: bool = False) -> None:
     msg = thread.add("assistant", composed.text, composed.kind, [t["id"] for t in group], composed.chips)
     single = group[0] if len(group) == 1 else None
     last_reply = thread.last_user_reply_at()
-    level, alarm_s = message_level(group, now, last_reply)
+    # The reason message about an avoided task is never loud, whatever the task is.
+    level, alarm_s = (NORMAL, 0) if avoided else message_level(group, now, last_reply)
     notify.notify(
         composed.title, composed.text,
         level=level, expire_s=alarm_s,
         task_id=single["id"] if single and composed.push_actions else None,  # ▶ Start / ✓ Done: one task
         actions=composed.push_actions,
         message_id=msg["id"],
-        priority=max(t["priority"] for t in group),
+        priority=1 if avoided else max(t["priority"] for t in group),
     )
-    log.info("Sent message %s about tasks %s (llm=%s, level=%s)",
-             msg["id"], [t["id"] for t in group], composed.used_llm, level)
+    log.info("Sent message %s about tasks %s (llm=%s, level=%s, avoided=%s)",
+             msg["id"], [t["id"] for t in group], composed.used_llm, level, avoided)
 
     for task in group:
         _after_contact(task, now, composed.followups.get(task["id"]), alarmed=level == ALARM,
-                       last_reply=last_reply)
+                       last_reply=last_reply, avoided=avoided)
 
 
 def _after_contact(task: dict, now: datetime, followup: datetime | None, alarmed: bool = False,
-                   last_reply=_UNSET) -> None:
+                   last_reply=_UNSET, avoided: bool = False) -> None:
     s = get_settings()
+    if task["kind"] == "fence":
+        tasks.fence_fired(task["id"])  # once: a recurring fence moves to its next time, a one-off closes
+        return
     if last_reply is _UNSET:
         last_reply = thread.last_user_reply_at()
     if task["last_notified_at"] and not _replied_since(last_reply, task["last_notified_at"]):
         tasks.add_event(task["id"], "ignored")
+    if avoided:
+        # One more look in 3 days: a last try, or (after that one) the park. Nothing in between.
+        tasks.avoid_asked(task["id"], now + timedelta(days=AVOID_RETRY_DAYS))
+        return
 
     nag_count = task["nag_count"] + 1
     if task["kind"] == "meeting" and task["due_at"]:
         # Meetings: one reminder before, one at start time, then stop.
         next_at = task["due_at"] if now < task["due_at"] - timedelta(minutes=2) else None
     else:
-        next_at = next_reminder_after_nag(now, nag_count, task["priority"], s.nag_interval_min, s.max_nags)
+        # Tasks that may escalate (asked-for reminders, near deadlines) follow up within the day; every
+        # other task gets one check-in a day (the per-task cap in logic.contact_decision holds the LLM to it).
+        interval = s.nag_interval_min if escalates(task, now) else 24 * 60
+        priority = task["priority"] if escalates(task, now) else 1
+        next_at = next_reminder_after_nag(now, nag_count, priority, interval, s.max_nags)
         if followup is not None:
             next_at = followup  # the coach chose a time (already clamped by code)
     tasks.finish_contact(task["id"], nag_count, next_at, requested=task["kind"] == "meeting", escalate=alarmed)
@@ -223,7 +291,10 @@ def due_daily_jobs() -> list[str]:
             jobs.append("checkin")
     if job_is_due(now_local, s.evening_time, window_hours=2) and claim_job("evening", today):
         jobs.append("evening")
+    # The week's meetings: inside the first morning plan of the week when the two times are within an
+    # hour (one message instead of two); otherwise a message of their own, as before.
     if (s.week_meetings_time and now_local.weekday() == s.week_start_day
+            and not week_meetings_merged(s.morning_time, s.week_meetings_time)
             and job_is_due(now_local, s.week_meetings_time) and claim_job("week_meetings", today)):
         jobs.append("week_meetings")
     if (s.meetings_eve_time and job_is_due(now_local, s.meetings_eve_time, window_hours=2)
@@ -232,20 +303,59 @@ def due_daily_jobs() -> list[str]:
     return jobs
 
 
+def _first_morning_of_week(now: datetime) -> tuple[bool, bool]:
+    """(it's the first day of the week, the week's meetings go inside this morning's message)."""
+    s = get_settings()
+    first = now.astimezone(s.tz).weekday() == s.week_start_day
+    return first, first and week_meetings_merged(s.morning_time, s.week_meetings_time)
+
+
 async def run_daily_job(job: str) -> None:
     if job in coach.MEETING_JOBS:
         return await asyncio.to_thread(run_meeting_digest, job)
+    now = tasks.now_utc()
+    sunday, merged = _first_morning_of_week(now) if job == "morning" else (False, False)
+    daily = None
     try:
-        now = tasks.now_utc()
+        away = await asyncio.to_thread(is_lapsed, now)
         if job == "checkin" and await asyncio.to_thread(_active_recently, now):
             log.info("Mid-day check-in skipped: the user was active in the last hour")
             return
-        daily = await coach.compose_daily(job, now)
-        if daily is None:
+        if away and job != "morning":
+            log.info("%s skipped: the user has been away for 48 hours", job)
             return
-        await asyncio.to_thread(_post_daily, job, daily)
+        if away:
+            # After a lapse the morning plan becomes the re-entry message: once, then quiet mornings.
+            if await asyncio.to_thread(_reentry_due, now):
+                daily = await coach.compose_reentry(now)
+            else:
+                log.info("Morning plan skipped: away, and the re-entry message was already sent")
+        else:
+            daily = await coach.compose_daily(job, now, sunday)
     except Exception:
         log.exception("Daily job %s failed", job)
+    try:
+        if merged:
+            daily = await asyncio.to_thread(_with_week_meetings, daily, now)
+        if daily is not None:
+            await asyncio.to_thread(_post_daily, job, daily)
+    except Exception:
+        log.exception("Daily job %s failed", job)
+
+
+def _reentry_due(now: datetime) -> bool:
+    return reentry_due(thread.last_user_reply_at(), thread.last_kind_at("reentry"), now)
+
+
+def _with_week_meetings(daily: "coach.Daily | None", now: datetime) -> "coach.Daily | None":
+    """The week's meetings at the end of the first morning message of the week (or alone, if there's none)."""
+    digest = coach.meeting_digest("week_meetings", now)
+    if digest is None:
+        return daily
+    if daily is None:
+        return coach.Daily(digest.text, task_ids=digest.task_ids, kind="meeting")
+    daily.text = f"{daily.text}\n\n{digest.text}"
+    return daily
 
 
 def _active_recently(now: datetime) -> bool:
@@ -255,8 +365,9 @@ def _active_recently(now: datetime) -> bool:
 
 
 def _post_daily(job: str, daily: "coach.Daily") -> None:
-    msg = thread.add("assistant", daily.text, job, daily.task_ids, daily.chips)
-    notify.notify(coach.JOB_TITLES[job], daily.text, message_id=msg["id"], priority=1)
+    kind = daily.kind or job
+    msg = thread.add("assistant", daily.text, kind, daily.task_ids, daily.chips)
+    notify.notify(coach.JOB_TITLES[kind], daily.text, message_id=msg["id"], priority=1)
 
 
 def run_meeting_digest(job: str) -> None:

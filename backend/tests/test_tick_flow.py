@@ -51,7 +51,7 @@ def test_due_task_gives_one_llm_message_and_one_push(store, monkeypatch):
     assert push["task_id"] == t["id"]  # exactly one task → ✓ / ⏰ buttons
     assert "Client: Dana" in llm.requests[0]["messages"][1]["content"]  # description is the context
     after = store.tasks[t["id"]]
-    assert after["nag_count"] == 1 and after["remind_at"] == store.now + timedelta(minutes=30)
+    assert after["nag_count"] == 1 and after["remind_at"] == store.now + timedelta(days=1)   # one check-in a day
 
 
 def test_two_due_tasks_give_one_combined_message(store, monkeypatch):
@@ -158,7 +158,7 @@ def test_daily_cap_never_exceeded(store, monkeypatch):
 
 
 def test_ignored_check_in_is_logged(store, monkeypatch):
-    t = store.add_task("Clean the garage", remind_at=local(9, 10), focus=True)
+    t = store.add_task("Clean the garage", remind_at=local(9, 10), focus=True, due_at=local(10, 12))
     use_llm(monkeypatch, "Garage?", "Still the garage?")
     tick(store)
     store.advance(30)
@@ -175,7 +175,7 @@ def test_done_from_notification_appears_in_chat(store):
 
 
 def test_snoozed_reminder_is_requested_and_skips_per_task_cap(store, monkeypatch):
-    t = store.add_task("Stretch", remind_at=local(9, 10), focus=True)
+    t = store.add_task("Stretch", remind_at=local(9, 10), focus=True, due_at=local(10, 12))
     use_llm(monkeypatch, *(["msg"] * 10))
     for _ in range(4):           # four unrequested check-ins use up the per-task cap
         tick(store)

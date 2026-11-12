@@ -19,7 +19,10 @@ create table if not exists tasks (
     resume_note      text,                  -- "where did you stop?" (shown next time)
     parked_until     timestamptz,           -- "Not now": no check-ins before this time
     stale_offered_at timestamptz,           -- Sunday cleanup offered it (cooldown)
-    kind             text        not null default 'task'   check (kind in ('task', 'meeting', 'fence')),
+    avoid_asked_at   timestamptz,           -- the "what's in the way?" message went out
+    avoid_asks       smallint    not null default 0,  -- ... this many times since the last fresh start
+    avoid_reset_at   timestamptz,           -- fresh start: earlier postponed / ignored events don't count
+    kind             text        not null default 'task'   check (kind in ('task', 'meeting', 'fence')),  -- fence: a fixed hard stop
     priority         smallint    not null default 1        check (priority between 1 and 3),
     status           text        not null default 'open'   check (status in ('open', 'done', 'cancelled')),
     due_at           timestamptz,           -- deadline, or meeting start time
@@ -47,7 +50,8 @@ create table if not exists task_events (
     kind       text        not null check (kind in (
                    'postponed', 'committed', 'progress', 'stuck', 'blocked', 'unblocked',
                    'ignored', 'done', 'description_changed',
-                   'session_started', 'session_ended', 'paused', 'parked'
+                   'session_started', 'session_ended', 'paused', 'parked',
+                   'avoided'              -- the user said why they avoid it (see avoid_reason)
                )),
     note       text,
     avoid_reason text  check (avoid_reason in ('too_big', 'unclear', 'boring', 'scary', 'people', 'no_energy')),

@@ -6,7 +6,8 @@ Cron:     POST /tick                (X-Cron-Secret header)
 Buttons:  POST /actions             (signed token from the notification: ▶ Start / ✓ Done / ▶ Another round)
 Owner:    everything else           (Supabase login + OWNER_USER_ID check), incl. GET/PATCH /settings,
           POST /what-now, POST /tasks/{id}/start, POST /sessions/{id}/end, PATCH /sessions/{id},
-          POST /sessions/{id}/note
+          POST /sessions/{id}/note, POST /tasks/bulk-action (Move overdue to next week · Drop them · Keep),
+          GET /preferences, DELETE /preferences/{id}
 
 Writing in the chat or acting on a task stops any repeating Pushover alarm (you've seen it).
 
@@ -29,7 +30,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import actions, agent, db, httpclient, notify, prompting, scheduler, sessions, tasks, thread, user_settings
+from . import (actions, agent, db, httpclient, notify, preferences, prompting, scheduler, sessions, tasks, thread,
+               user_settings)
 from .auth import require_cron, require_owner
 from .config import SPECS, get_settings
 from .llm import LLMLimitReached, LLMUnavailable
@@ -43,6 +45,7 @@ log = logging.getLogger("main")
 settings = get_settings()  # fail fast at startup if env vars are missing (env-only values below)
 prompting.check_all()      # ... or a prompt file is missing
 user_settings.load()       # behaviour settings changed in the app (logs and keeps defaults on error)
+preferences.load()         # what the owner asked of the assistant in chat (same)
 
 
 @asynccontextmanager
@@ -83,6 +86,7 @@ async def tick(background: BackgroundTasks):
     # Deciding WHEN is fast and synchronous; writing the message (LLM) runs after the response,
     # so cron-job.org never times out.
     await run_in_threadpool(user_settings.load)
+    await run_in_threadpool(preferences.load)
     task_ids = await run_in_threadpool(scheduler.plan_tick)
     if task_ids:
         background.add_task(scheduler.deliver, task_ids)
@@ -376,6 +380,33 @@ def task_action(task_id: int, body: TaskAction, background: BackgroundTasks):
     if body.action in ("start", "another"):
         out["session"] = _session_now()
     return out
+
+
+class BulkAction(BaseModel):
+    action: str = Field(pattern="^(" + "|".join(actions.BULK_ACTIONS) + ")$")
+    task_ids: list[int] = Field(default_factory=list, max_length=20)   # drop / keep: exactly the listed tasks
+
+
+@app.post("/tasks/bulk-action", dependencies=[Depends(require_owner)])
+def bulk_action(body: BulkAction, background: BackgroundTasks):
+    """The chips that act on several tasks with one tap, no LLM: Move overdue to next week, Drop them, Keep."""
+    background.add_task(notify.cancel_alarms)
+    rows = actions.bulk(body.action, body.task_ids)
+    return {"ok": True, "tasks": [tasks.to_public(t) for t in rows]}
+
+
+@app.get("/preferences", dependencies=[Depends(require_owner)])
+def list_preferences():
+    """What the owner asked of the assistant in chat ("shorter messages"): read-only, each can be deleted."""
+    preferences.load()
+    return preferences.to_public()
+
+
+@app.delete("/preferences/{pref_id}", dependencies=[Depends(require_owner)])
+def delete_preference(pref_id: int):
+    if not preferences.delete(pref_id):
+        raise HTTPException(status_code=404, detail="Preference not found")
+    return preferences.to_public()
 
 
 @app.get("/settings", dependencies=[Depends(require_owner)])

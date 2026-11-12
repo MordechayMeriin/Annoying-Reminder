@@ -56,6 +56,7 @@ def next_reminder_after_nag(
 # The guardrails (quiet hours, Shabbat, gaps, caps) decide WHETHER to send; this only decides how loud.
 
 NORMAL, URGENT, ALARM = 0, 1, 2
+NEAR_DEADLINE_H = 48            # a deadline this close: check-ins outside Today's 3, and louder levels
 
 _ALARM_MIN_PRIORITY = {"critical": 3, "important": 2, "all": 1}
 
@@ -68,22 +69,41 @@ class AlertPolicy:
     max_nags: int = 4              # check-ins per task before nagging stops
 
 
-def alert_level(task: dict[str, Any], ignored: int, p: AlertPolicy) -> int:
+def escalates(task: dict[str, Any], now: datetime) -> bool:
+    """
+    May a contact about this task be louder than normal, and come more than once a day? Only meetings,
+    fences, reminders the user asked for, and tasks with a deadline within 48 hours (coming up, or
+    missed that recently). Everything else stays at normal level, one check-in a day at most: pressure
+    on a task that's being avoided feeds the avoidance.
+    """
+    if task["kind"] in ("meeting", "fence") or task.get("remind_requested"):
+        return True
+    due = task.get("due_at")
+    window = timedelta(hours=NEAR_DEADLINE_H)
+    return due is not None and now - window < due < now + window
+
+
+def alert_level(task: dict[str, Any], ignored: int, p: AlertPolicy, now: datetime) -> int:
     """
     How loud a contact about one task should be.
     ignored: check-ins about it in a row that got no reply.
+      NORMAL — every task that doesn't escalate (see escalates), however often it was ignored
+      URGENT — meetings and fences, always (never an alarm)
+    and for tasks that escalate (asked-for reminders, a deadline within 48 hours):
       ALARM  — a task of an alarm-worthy priority, ignored `alarm_after` times; if nagging would stop
                before that, the last check-in is the alarm (only when all the earlier ones were ignored)
-      URGENT — meetings, reminders the user asked for, important/critical tasks, or ignored
-               `urgent_after` times
+      URGENT — reminders the user asked for, important/critical tasks, or ignored `urgent_after` times
       NORMAL — everything else (first check-ins about ordinary tasks)
     """
+    if task["kind"] in ("meeting", "fence"):
+        return URGENT
+    if not escalates(task, now):
+        return NORMAL
     min_prio = _ALARM_MIN_PRIORITY.get(p.alarm_for)
-    if (task["kind"] != "meeting" and min_prio is not None and task["priority"] >= min_prio
+    if (min_prio is not None and task["priority"] >= min_prio
             and ignored >= min(p.alarm_after, max(p.max_nags - 1, 0))):
         return ALARM
-    if (task["kind"] == "meeting" or task.get("remind_requested") or task["priority"] >= 2
-            or ignored >= p.urgent_after):
+    if task.get("remind_requested") or task["priority"] >= 2 or ignored >= p.urgent_after:
         return URGENT
     return NORMAL
 
@@ -233,11 +253,12 @@ def contact_decision(task: dict[str, Any], state: ContactState, now_local: datet
       - blocked tasks wait until blocked_until
       - focus hold: while a session runs (until it ends + 10 min) only meetings, fences and the
         session's own end check-in come through
-      - meetings skip the gap and the caps (they still count toward the daily cap)
+      - meetings and fences skip the gap and the caps (they still count toward the daily cap)
       - session end check-ins skip the gap and the per-task cap (user-requested), not the daily cap
       - min gap between proactive messages
       - max proactive messages per day
-      - max check-ins per task per day, not counting reminders the user asked for
+      - max check-ins per task per day, not counting reminders the user asked for; one a day for
+        tasks that don't escalate (see escalates)
     When several rules apply, the latest postponement wins (saves re-deferring every tick).
     """
     later: list[datetime] = []
@@ -250,15 +271,15 @@ def contact_decision(task: dict[str, Any], state: ContactState, now_local: datet
     if (task["kind"] not in ("meeting", "fence", "session") and state.focus_hold_until
             and state.focus_hold_until > now_local):
         later.append(state.focus_hold_until)
-    if task["kind"] != "meeting":
+    if task["kind"] not in ("meeting", "fence"):
         if state.last_proactive_at and task["kind"] != "session":
             gap_end = state.last_proactive_at + timedelta(minutes=g.min_gap_min)
             if gap_end > now_local:
                 later.append(gap_end)
         if state.sent_today >= g.max_per_day:
             later.append(next_morning(now_local, g))
-        if (not task.get("remind_requested")
-                and state.sent_today_by_task.get(task["id"], 0) >= g.max_per_task_per_day):
+        per_task = g.max_per_task_per_day if escalates(task, now_local) else min(1, g.max_per_task_per_day)
+        if not task.get("remind_requested") and state.sent_today_by_task.get(task["id"], 0) >= per_task:
             later.append(next_morning(now_local, g))
     return max(later) if later else None
 
@@ -281,11 +302,12 @@ def plan_contacts(due: Iterable[dict[str, Any]], state: ContactState, now_local:
             plan.send.append(task)
         else:
             plan.defer[task["id"]] = later
-    # Meetings first (soonest start), then most important, then longest waiting.
+    # Meetings and fences first (soonest start), then most important, then longest waiting.
     far = datetime.max.replace(tzinfo=now_local.tzinfo)
+    fixed = ("meeting", "fence")
     plan.send.sort(key=lambda t: (
-        t["kind"] != "meeting",
-        (t.get("due_at") or far) if t["kind"] == "meeting" else far,
+        t["kind"] not in fixed,
+        (t.get("due_at") or far) if t["kind"] in fixed else far,
         -t["priority"],
         t.get("remind_at") or far,
     ))
@@ -374,7 +396,6 @@ def clip(text: str, limit: int) -> str:
 # Decisions below are constants, not settings, to keep ⚙ from growing (see the brief).
 
 FOCUS_MAX = 3                   # Today's 3
-NEAR_DEADLINE_H = 48            # tasks due this soon are still checked in on outside Today's 3
 LATER_CUTOFF = time(18)         # "Later": +2 h before 18:00, otherwise the next morning
 LATER_HOURS = 2
 AVOIDED_MIN_EVENTS = 3          # postponed or ignored events in 7 days → the task is avoided
@@ -392,7 +413,7 @@ class Chip:
     action: str | None = None   # action chips run without the LLM (actions.apply); None = a text chip
     minutes: int | None = None  # ▶ Start: session length
 
-    def to_json(self, lang: str, task_id: int | None = None) -> dict[str, Any]:
+    def to_json(self, lang: str, task_id: int | None = None, task_ids: Iterable[int] = ()) -> dict[str, Any]:
         out: dict[str, Any] = {"id": self.id, "label": chip_label(self.id, lang)}
         if self.action:
             out["action"] = self.action
@@ -400,6 +421,8 @@ class Chip:
                 out["minutes"] = self.minutes
             if task_id is not None and self.action in _NEEDS_TASK:
                 out["task_id"] = task_id
+            if self.action in _NEEDS_TASKS:
+                out["task_ids"] = list(task_ids)
         return out
 
 
@@ -451,6 +474,8 @@ CHIPS_BY_KIND: dict[str, tuple[Chip, ...]] = {
 
 # Chips that need a task to act on: without one they're left out.
 _NEEDS_TASK = {"start", "done", "later", "another", "stop", "not_now"}
+# Chips that act on a list of tasks (Sunday cleanup): bound to exactly those ids (chips_json task_ids).
+_NEEDS_TASKS = {"drop", "keep"}
 
 _HEBREW = re.compile(r"[֐-׿]")
 
@@ -476,9 +501,15 @@ def chips_for(kind: str, stage: str | None, lang: str) -> list[Chip]:
     return list(CHIPS_BY_KIND.get(kind, ()))
 
 
-def chips_json(chips: Iterable[Chip], lang: str, task_id: int | None) -> list[dict[str, Any]]:
-    """Chips as stored on the message: action chips are bound to their task (dropped if there is none)."""
-    return [c.to_json(lang, task_id) for c in chips if task_id is not None or c.action not in _NEEDS_TASK]
+def chips_json(chips: Iterable[Chip], lang: str, task_id: int | None,
+               task_ids: Iterable[int] = ()) -> list[dict[str, Any]]:
+    """
+    Chips as stored on the message: action chips are bound to their task (dropped if there is none).
+    task_ids: the tasks Drop them / Keep act on (dropped if there are none).
+    """
+    ids = list(task_ids)
+    return [c.to_json(lang, task_id, ids) for c in chips
+            if (task_id is not None or c.action not in _NEEDS_TASK) and (ids or c.action not in _NEEDS_TASKS)]
 
 
 def chip_id_for_text(text: str) -> str | None:
@@ -534,7 +565,8 @@ def select_playbooks(job: str | None = None, stages: Iterable[str] = (),
       job:     morning → planning (Sunday morning, signal "sunday": + sunday); reentry → reentry
       stages:  of the tasks the message is (probably) about; avoided → avoiding
       signals: stuck (a stuck event today / the I'm stuck chip), avoid_reason (Too big / Unclear /
-               Boring chip), overwhelmed, completed (a task was just marked done)
+               Boring chip), overwhelmed, completed (a task was just marked done), reentry (the Pick one
+               for me chip under the re-entry message)
     """
     sig = set(signals)
     order: list[str] = []
@@ -544,6 +576,8 @@ def select_playbooks(job: str | None = None, stages: Iterable[str] = (),
         order.append("planning")
         if "sunday" in sig:
             order.append("sunday")
+    if "reentry" in sig and "reentry" not in order:
+        order.append("reentry")
     if "avoid_reason" in sig or "avoided" in set(stages):
         order.append("avoiding")
     if "stuck" in sig:
@@ -555,7 +589,8 @@ def select_playbooks(job: str | None = None, stages: Iterable[str] = (),
     return list(dict.fromkeys(order))[:2]
 
 
-_AVOID_CHIPS = {"too_big", "unclear", "boring"}
+AVOID_CHIPS = ("too_big", "unclear", "boring")   # the reason chips (text chips; code logs the reason)
+AVOID_REASONS = (*AVOID_CHIPS, "scary", "people", "no_energy")   # the last three: noticed by the agent
 
 
 def chat_signals(text: str, since_last_reply: Iterable[dict[str, Any]], stuck_today: bool,
@@ -571,8 +606,10 @@ def chat_signals(text: str, since_last_reply: Iterable[dict[str, Any]], stuck_to
     chip = chip_id_for_text(text)
     if stuck_today or chip == "stuck":
         out.add("stuck")
-    if chip in _AVOID_CHIPS:
+    if chip in AVOID_CHIPS:
         out.add("avoid_reason")
+    if chip == "pick_one":
+        out.add("reentry")
     if now_local.time() >= OVERWHELMED_FROM and focus_open >= FOCUS_MAX:
         out.add("overwhelmed")
     if any(m.get("kind") == "event" and m.get("content", "").startswith("[Marked done") for m in since_last_reply):
@@ -604,21 +641,34 @@ def pick_focus(tasks: Iterable[dict[str, Any]], now_local: datetime, limit: int 
 
     rows = [t for t in tasks
             if t.get("status", "open") == "open" and t.get("kind", "task") == "task" and not t.get("parent_id")
-            and not (t.get("blocked_until") and t["blocked_until"] > now)]
+            and not (t.get("blocked_until") and t["blocked_until"] > now) and not is_parked(t, now)]
     rows.sort(key=lambda t: (bucket(t), -t.get("priority", 1), t.get("due_at") or far,
                              t.get("created_at") or far, t["id"]))
     return [t["id"] for t in rows[:limit]]
 
 
-def may_check_in(task: dict[str, Any], now: datetime, today: date) -> bool:
+def is_parked(task: dict[str, Any], now: datetime) -> bool:
+    """Not now: parked tasks get no check-ins and aren't offered (Today's 3, What now?) until the park ends."""
+    return task.get("parked_until") is not None and task["parked_until"] > now
+
+
+def may_check_in(task: dict[str, Any], now: datetime, today: date, lapsed: bool = False) -> bool:
     """
     Check-ins during the day only for: meetings and fences, reminders the user asked for, Today's 3,
-    and tasks due within 48 hours (overdue included). Undated tasks outside Today's 3 stay quiet and
-    compete for tomorrow's focus instead. (tasks.due_for_contact applies the same rule in SQL.)
+    tasks due within 48 hours (overdue included), and an avoided task waiting for its second (last)
+    "what's in the way?" message. Undated tasks outside Today's 3 stay quiet and compete for tomorrow's
+    focus instead. Parked tasks: nothing. lapsed (no chat or tap for 48 hours): only meetings, fences
+    and reminders the user asked for, until they're back. (tasks.due_for_contact: the same rule in SQL.)
     """
-    if task["kind"] in ("meeting", "fence") or task.get("remind_requested"):
+    if task["kind"] in ("meeting", "fence"):
         return True
-    if task.get("focus_date") == today:
+    if is_parked(task, now):
+        return False
+    if task.get("remind_requested"):
+        return True
+    if lapsed:
+        return False
+    if task.get("focus_date") == today or task.get("avoid_asks"):
         return True
     due = task.get("due_at")
     return due is not None and due < now + timedelta(hours=NEAR_DEADLINE_H)
@@ -780,7 +830,8 @@ def pick_next(tasks: Iterable[dict[str, Any]], now: datetime, next_fixed_event: 
     far = datetime.max.replace(tzinfo=now.tzinfo)
     rows = [t for t in tasks
             if t.get("status", "open") == "open" and t.get("kind", "task") == "task" and not t.get("parent_id")
-            and t["id"] not in done and not (t.get("blocked_until") and t["blocked_until"] > now)]
+            and t["id"] not in done and not (t.get("blocked_until") and t["blocked_until"] > now)
+            and not is_parked(t, now)]
     focus = sorted((t for t in rows if t.get("focus_date") == today),
                    key=lambda t: (t.get("focus_rank") or 99, t["id"]))
     others = sorted((t for t in rows if t.get("focus_date") != today),
@@ -836,6 +887,16 @@ _TEXTS: dict[str, tuple[str, str]] = {
                 "אין כרגע משהו פתוח. ספר לי מה על הראש ואשמור את זה."),
     "session_end": ("⏱ Time's up: {step}. Done, another round, or stop?",
                     "⏱ הזמן נגמר: {step}. בוצע, עוד סבב, או לעצור?"),
+    # Phase 3
+    "avoid_ask": ("{title} keeps slipping, and that's fine. What's in the way?",
+                  "{title} נדחית שוב ושוב, וזה בסדר. מה מפריע?"),
+    "reentry": ("Good to see you. Want me to pick one thing for today?",
+                "טוב לראות אותך. שאבחר לך דבר אחד להיום?"),
+    "fence": ("⛔ {at} — {title}. Time to stop.", "⛔ {at} — {title}. הגיע הזמן לעצור."),
+    "wins_week": ("✅ Last week you finished {n} things.", "✅ בשבוע שעבר סיימת {n} דברים."),
+    "wins_week_1": ("✅ Last week you finished one thing.", "✅ בשבוע שעבר סיימת דבר אחד."),
+    "stale": ("🧹 Open for 3+ weeks with no progress: {titles}. Drop them or keep?",
+              "🧹 פתוחות יותר מ-3 שבועות בלי התקדמות: {titles}. לוותר עליהן או להשאיר?"),
 }
 
 
@@ -862,6 +923,97 @@ def what_now_text(pick: Pick | None, lang: str, next_fixed_local: datetime | Non
     return _t(pick.reason, lang, **values)
 
 
+def text(key: str, lang: str, **values: Any) -> str:
+    """A fixed text in the user's language (the Phase 3 templates: avoid_ask, reentry, fence, wins_week, stale)."""
+    return _t(key, lang, **values)
+
+
 def session_text(kind: str, task: dict[str, Any], minutes: int, lang: str) -> str:
     """Session messages are templates (no LLM). kind: 'session_end'."""
     return _t(kind, lang, step=task.get("next_action") or task["title"], min=minutes)
+
+
+# ================================================================ ADHD assistant (Phase 3): gentler pressure
+#
+# Avoidance (F7): no nagging, one "what's in the way?" message, then quiet. De-escalation: see
+# escalates / alert_level. Re-entry after a lapse. Sunday cleanup (F8). Fences (F9). Constants, not settings.
+
+AVOID_RETRY_DAYS = 3        # silence after the reason message: one more try this much later ...
+AVOID_MAX_ASKS = 2          # ... and after that try (and 3 more silent days) the task is parked
+PARK_DAYS = 7               # Not now (or silence): no check-ins for this long
+LAPSE_HOURS = 48            # no chat or tap for this long (Shabbat and holidays not counted): a lapse
+REENTRY_REPEAT_DAYS = 7     # one re-entry message per lapse; a lapse that goes on gets one a week
+STALE_DAYS = 21             # Sunday cleanup: open this long with no progress
+STALE_COOLDOWN_DAYS = 28    # ... and not offered again for this long
+STALE_MAX = 3
+WEEK_WINS_DAYS = 7
+SUNDAY_MERGE_MIN = 60       # the week's meetings join the morning plan when their times are this close
+FENCE_STALE_MIN = 30        # a fence held back longer than this (quiet hours, Shabbat) is skipped, not sent late
+
+
+def avoid_move(task: dict[str, Any], counts_7d: dict[str, int] | None, now: datetime) -> str | None:
+    """
+    What to do instead of an ordinary check-in about a task (F7). None = it isn't avoided: check in as usual.
+      ask   send the one reason message (Too big · Unclear · Boring · Not now)
+      wait  it was sent less than 3 days ago: nothing now
+      park  two messages went unanswered: park the task for 7 days, say nothing
+    Avoided = 3+ postponed / ignored events in 7 days (counted since the last park, reason or start: see
+    tasks.reset_avoidance). A task whose deadline is coming up within 48 hours keeps its ordinary check-ins.
+    """
+    if task["kind"] != "task":
+        return None
+    counts = counts_7d or {}
+    if counts.get("postponed", 0) + counts.get("ignored", 0) < AVOIDED_MIN_EVENTS:
+        return None
+    due = task.get("due_at")
+    if due is not None and now < due <= now + timedelta(hours=NEAR_DEADLINE_H):
+        return None
+    asks, asked = task.get("avoid_asks") or 0, task.get("avoid_asked_at")
+    if asks == 0 or asked is None:
+        return "ask"
+    if now < asked + timedelta(days=AVOID_RETRY_DAYS):
+        return "wait"
+    return "ask" if asks < AVOID_MAX_ASKS else "park"
+
+
+def lapsed(last_activity: datetime | None, now: datetime,
+           rest_periods: Iterable[tuple[datetime, datetime]] = (), hours: float = LAPSE_HOURS) -> bool:
+    """
+    A lapse: no chat message and no tap for 48 hours, not counting Shabbat and holidays
+    (rest_periods: their (start, end)). Someone who never wrote at all (a new install) hasn't lapsed.
+    """
+    if last_activity is None:
+        return False
+    away = now - last_activity
+    for start, end in rest_periods:
+        overlap = min(end, now) - max(start, last_activity)
+        if overlap > timedelta(0):
+            away -= overlap
+    return away >= timedelta(hours=hours)
+
+
+def reentry_due(last_activity: datetime | None, last_reentry: datetime | None, now: datetime) -> bool:
+    """During a lapse: send the re-entry message? Once per lapse, and again only after a week of more silence."""
+    if last_reentry is None or (last_activity is not None and last_reentry < last_activity):
+        return True
+    return now - last_reentry >= timedelta(days=REENTRY_REPEAT_DAYS)
+
+
+def week_meetings_merged(morning: time, week_meetings: time | None) -> bool:
+    """The week's meetings go inside the first morning plan of the week when the two are within an hour."""
+    if week_meetings is None:
+        return False
+    return abs((week_meetings.hour * 60 + week_meetings.minute) - (morning.hour * 60 + morning.minute)) <= SUNDAY_MERGE_MIN
+
+
+def fence_is_stale(task: dict[str, Any], now: datetime) -> bool:
+    """A hard stop that couldn't be sent near its time (quiet hours, Shabbat) is skipped: late, it's only noise."""
+    return task.get("due_at") is not None and now - task["due_at"] > timedelta(minutes=FENCE_STALE_MIN)
+
+
+def moved_to_next_week(due: datetime, now: datetime) -> datetime:
+    """Move overdue to next week: the same weekday and time, the first one at least a week after the old date that's still ahead."""
+    new = due + timedelta(days=7)
+    while new <= now:
+        new += timedelta(days=7)
+    return new

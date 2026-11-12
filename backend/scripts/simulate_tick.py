@@ -1,12 +1,12 @@
 """
-Run a simulated morning end to end — real scheduler, guardrails, coach, agent and actions — against an
+Run a simulated morning (and then a simulated week) end to end — real scheduler, guardrails, coach, agent and actions — against an
 in-memory database and a scripted LLM. No network, no Supabase, no OpenRouter.
 
     cd backend
     python scripts/simulate_tick.py            # LLM answers
     python scripts/simulate_tick.py --llm-down # OpenRouter unreachable → templates and the code's picks
 
-What it shows (Phases 1 and 2 of the ADHD-assistant brief):
+What it shows (Phases 1 to 3 of the ADHD-assistant brief):
   07:30  the morning plan sets Today's 3 (no reply needed), with ▶ Start the first one · Change it
   10:00  a check-in about a focus task, with reply buttons and ▶ Start / ✓ Done on the notification;
          an undated task outside Today's 3 stays quiet
@@ -17,6 +17,13 @@ What it shows (Phases 1 and 2 of the ADHD-assistant brief):
   10:15  the session's end check-in (a template: ✓ Done · ▶ Another round · Stop)
   10:30  no answer → the session is recorded as paused (nothing more sent); the meeting reminder
          comes through (skips the gap, time comes from code, no buttons)
+Then Phase 3, gentler pressure:
+  Mon 11:00  said in chat: a hard stop ("fence"), a setting and a preference (skipped with --llm-down)
+  Mon 12:30  the fence fires during a running focus session (written by code, urgent)
+  Tue 10:00  a task ignored three times is avoided: one reason message instead of a check-in
+             (Too big · Unclear · Boring · Not now), at normal level; Not now parks it for a week
+  Fri 07:30  after 48 silent hours the morning plan is the re-entry message; no task check-ins
+  Sun 07:30  one message: Today's 3, last week's wins, old tasks to drop or keep, the week's meetings
 """
 
 import asyncio
@@ -32,7 +39,7 @@ import conftest  # noqa: E402,F401  (dummy env vars)
 
 from fakes import FakeStore, ScriptedLLM  # noqa: E402
 
-from app import actions, agent, scheduler, sessions  # noqa: E402
+from app import actions, agent, config, scheduler, sessions, user_settings  # noqa: E402
 from app.llm import LLMUnavailable  # noqa: E402
 
 TZ = ZoneInfo("Asia/Jerusalem")
@@ -59,8 +66,8 @@ def setattr_(obj, name, value):
     setattr(obj, name, value)
 
 
-def at(h: int, m: int = 0) -> datetime:
-    return datetime(2026, 11, 9, h, m, tzinfo=TZ)
+def at(h: int, m: int = 0, d: int = 9) -> datetime:
+    return datetime(2026, 11, d, h, m, tzinfo=TZ)   # Mon 9 Nov 2026 by default
 
 
 def tick() -> None:
@@ -147,6 +154,91 @@ def main() -> None:
     for x in store.sessions:
         print(f"Session #{x['id']} on task #{x['task_id']}: {x['planned_min']} min planned, outcome {x['outcome']}")
     print(f"LLM calls made: {len(llm.requests)}  (fallback mode: {LLM_DOWN})")
+    phase3(store, invoice_id=invoice["id"], report_id=report["id"])
+
+
+def phase3(store: FakeStore, invoice_id: int, report_id: int) -> None:
+    """Gentler pressure: a fence, the avoided stage, re-entry after a lapse, and Sunday."""
+    print("\n\n################ Phase 3: gentler pressure ################")
+    saved: dict[str, str] = {}
+    setattr_(user_settings, "save", lambda values: saved.update(values) or config.apply_overrides(
+        {k: v for k, v in saved.items() if v is not None}))   # settings without a database
+    down = LLMUnavailable("OpenRouter unreachable (simulated)")
+
+    def go(d: int, h: int, m: int = 0) -> None:
+        store.now = at(h, m, d).astimezone(store.now.tzinfo)
+
+    ScriptedLLM([down] * 5).install(setattr_)
+    go(9, 10, 45)
+    tick()                                          # the meeting starts (its second and last reminder)
+    show(store, "The meeting's start reminder")
+    go(9, 11)
+    if LLM_DOWN:
+        store.add_task("Pick up the kids", kind="fence", due_at=at(12, 30), remind_at=at(12, 30),
+                       remind_requested=True, recurrence="weekdays")
+    else:
+        llm = ScriptedLLM([
+            {"tool": "add_task", "args": {"title": "Pick up the kids", "kind": "fence",
+                                          "due_at": "2026-11-09T12:30", "recurrence": "weekdays"}},
+            "Got it: I'll stop you at 12:30 on weekdays, even mid-session.",
+            {"tool": "update_setting", "args": {"key": "quiet_start", "value": "22:00"}},
+            "Done: quiet hours now start at 22:00 (was 23:00). Say 'undo' to revert.",
+            {"tool": "remember_preference", "args": {"text": "Keep messages to one sentence"}},
+            "Will do.",
+        ])
+        llm.install(setattr_)
+        asyncio.run(agent.handle_user_message("btw I pick up the kids at 12:30 every weekday"))
+        asyncio.run(agent.handle_user_message("and stop messaging me after 10pm"))
+        asyncio.run(agent.handle_user_message("shorter messages please"))
+        show(store, f"Said in chat: a hard stop, a setting (quiet from {config.get_settings().quiet_start:%H:%M}) "
+                    f"and a preference {[p['text'] for p in store.preferences]}")
+
+    ScriptedLLM([down] * 50).install(setattr_)      # from here on: templates (the same with the LLM up or down)
+    go(9, 12, 15)
+    actions.apply(report_id, "start", 25)
+    go(9, 12, 30)
+    tick()
+    show(store, "The fence fires during the running session (urgent, by code); the session goes on")
+    actions.apply(report_id, "done")
+
+    dentist = next(t for t in store.tasks.values() if t["title"] == "Book the dentist")
+    for _ in range(3):
+        store.t_add_event(dentist["id"], "ignored")
+    go(10, 10)
+    store.tasks[dentist["id"]].update(focus_date=store.focus_day(), remind_at=store.now)
+    tick()
+    level = store.pushovers[-1]["level"]
+    show(store, f"An avoided task: one reason message, not a check-in (push level {level} = normal)")
+    actions.apply(dentist["id"], "not_now")
+    parked = store.tasks[dentist["id"]]["parked_until"].astimezone(TZ)
+    show(store, f"Not now: parked until {parked:%a %d/%m}, no LLM")
+
+    # Silence from Tuesday 10:00. Friday morning is 69 hours later: a lapse (Shabbat hasn't started yet).
+    store.tasks[invoice_id].update(status="open")  # something overdue, so the re-entry offers to move it
+    photos = next(t for t in store.tasks.values() if t["title"] == "Sort the holiday photos")
+    go(13, 7, 30)
+    store.tasks[photos["id"]].update(focus_date=store.focus_day(), remind_at=store.now)
+    asyncio.run(scheduler.run_daily_job("morning"))
+    tick()
+    show(store, f"After 48 silent hours (lapsed: {scheduler.is_lapsed(store.now)}): the re-entry message, "
+                "and no task check-ins")
+    actions.bulk("move_overdue")
+    show(store, "Move overdue to next week (one tap, no LLM)")
+
+    go(15, 7, 30)                                   # Sunday; the tap on Friday means it isn't a lapse
+    store.add_task("Prepare the budget numbers", priority=2, next_action="Export last quarter from the bank")
+    store.add_task("Reply to the landlord", priority=2, next_action="Open his last email")
+    old = store.add_task("Learn to juggle", created_at=store.now - timedelta(days=40))
+    store.add_task("Budget review", kind="meeting", due_at=at(14, 0, 17))
+    jobs_before = len(store.messages)
+    asyncio.run(scheduler.run_daily_job("morning"))
+    show(store, "Sunday: one message instead of two, with the cleanup")
+    drop = next(c for c in store.messages[-1]["chips"] if c["id"] == "drop")
+    actions.bulk("drop", drop["task_ids"])
+    show(store, f"Drop them: exactly the listed task(s) {drop['task_ids']} → {store.tasks[old['id']]['status']}")
+    print(f"\nSunday morning messages: {len([m for m in store.messages[jobs_before:] if m['role'] == 'assistant'])}")
+    loud = [p for p in store.pushovers if p["level"] > 0 and p["title"].startswith(("📅", "⛔", "⏱")) is False]
+    print(f"Urgent or alarm pushes that weren't a meeting, a fence or a timer: {len(loud)}")
 
 
 if __name__ == "__main__":

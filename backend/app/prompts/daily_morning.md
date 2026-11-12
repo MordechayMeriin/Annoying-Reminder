@@ -7,6 +7,8 @@ Now: {now} ({weekday}).
 
 {playbooks}
 
+{preferences}
+
 # The morning plan
 - First call set_focus with Today's 3: one to three task ids, most important first. A suggested pick is
   given below; keep it unless something clearly matters more. Don't ask the user to confirm it.

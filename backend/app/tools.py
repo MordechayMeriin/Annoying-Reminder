@@ -12,9 +12,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
-from . import actions, sessions, tasks
+from . import actions, config, preferences, sessions, tasks, user_settings
 from .config import get_settings
-from .logic import FOCUS_MAX, Guardrails, clamp_followup, focus_day, parse_local_datetime
+from .logic import AVOID_REASONS, FOCUS_MAX, Guardrails, clamp_followup, focus_day, is_parked, parse_local_datetime
 
 
 class ToolArgError(ValueError):
@@ -60,10 +60,11 @@ SCHEDULE_FOLLOWUP_PROPS = {
 }
 
 CHAT_TOOLS: list[dict[str, Any]] = [
-    _fn("add_task", "Save a new task, meeting or deadline.", {
+    _fn("add_task", "Save a new task, meeting, deadline or hard stop (kind=fence: a fixed time the user must "
+        "stop what they're doing, e.g. picking up the kids at 17:00).", {
         "title": {"type": "string", "description": "Short title in the user's language"},
-        "kind": {"type": "string", "enum": ["task", "meeting"]},
-        "due_at": {"type": "string", "description": "Deadline / meeting start. " + _ISO},
+        "kind": {"type": "string", "enum": ["task", "meeting", "fence"]},
+        "due_at": {"type": "string", "description": "Deadline / meeting start / the moment to stop (fence). " + _ISO},
         "remind_at": {"type": "string", "description": "Optional explicit reminder time. " + _ISO},
         "priority": {"type": "integer", "enum": [1, 2, 3]},
         "recurrence": {"type": "string", "enum": ["daily", "weekdays", "weekly", "monthly"]},
@@ -83,7 +84,7 @@ CHAT_TOOLS: list[dict[str, Any]] = [
         "remind_at": {"type": "string", "description": _ISO},
         "priority": {"type": "integer", "enum": [1, 2, 3]},
         "recurrence": {"type": "string", "enum": ["daily", "weekdays", "weekly", "monthly", "none"]},
-        "kind": {"type": "string", "enum": ["task", "meeting"]},
+        "kind": {"type": "string", "enum": ["task", "meeting", "fence"]},
         "next_action": {"type": "string", "description": "A new first step (e.g. the user corrected yours)"},
         "estimate_min": _ESTIMATE,
         "resume_note": {"type": "string", "description": "Where the user stopped, in their words ('page 3', "
@@ -107,6 +108,8 @@ CHAT_TOOLS: list[dict[str, Any]] = [
         "task_id": _ID,
         "kind": {"type": "string", "enum": ["postponed", "committed", "progress", "stuck"]},
         "note": {"type": "string", "description": "Short, in the user's words"},
+        "avoid_reason": {"type": "string", "enum": list(AVOID_REASONS), "description": "Optional: why they keep "
+                         "putting this task off, when they say so or it's clear from what they wrote"},
     }, ["task_id", "kind", "note"]),
     _fn("mark_blocked", "The task can't move until something external happens (waiting for someone/something).", {
         "task_id": _ID,
@@ -121,6 +124,19 @@ SET_FOCUS = _fn("set_focus", "Set Today's 3: up to three task ids, most importan
 }, ["task_ids"])
 
 CHAT_TOOLS.append(SET_FOCUS)
+
+CHAT_TOOLS += [
+    _fn("update_setting", "Change how the app behaves when the user asks ('don't message me after 22:00'). "
+        "Applies at once; no confirmation needed. Times are HH:MM, lists of times are comma-separated, "
+        "switches are true/false, value 'default' resets the setting.", {
+        "key": {"type": "string", "enum": list(config.SPECS)},
+        "value": {"type": "string", "description": "The new value as text, e.g. '22:00', '13:00, 17:00', 'false', '45'"},
+    }, ["key", "value"]),
+    _fn("remember_preference", "Remember how the user wants you to talk or behave, when it isn't a setting "
+        "(tone, length, topics to avoid): 'shorter messages please'. It's added to all your instructions.", {
+        "text": {"type": "string", "description": "One short line, as an instruction to yourself, in English"},
+    }, ["text"]),
+]
 
 LIST_TASKS = next(t for t in CHAT_TOOLS if t["function"]["name"] == "list_tasks")
 
@@ -321,6 +337,11 @@ def _add_task(a: dict[str, Any], ctx: ToolContext) -> Any:
     ctx.touched(t["id"])
     ctx.changed = True
     out = brief(t)
+    if kind == "fence":
+        if t.get("due_at") is None:
+            out["note"] = "Saved without a time, so it can't interrupt. Call update_task with due_at: the moment to stop."
+        else:
+            out["note"] = "Saved as a hard stop: the app interrupts at that time, even during a focus session."
     if kind == "task" and not t.get("next_action"):
         # Saved anyway (never lose what the user said), but every task needs its first step.
         out["note"] = ("Saved without a next_action. Now call update_task with next_action: the very first "
@@ -353,7 +374,8 @@ def _update_task(a: dict[str, Any], ctx: ToolContext) -> Any:
 
 
 def _complete_task(a: dict[str, Any], ctx: ToolContext) -> Any:
-    _task(a["id"])
+    if _task(a["id"])["kind"] == "fence":
+        raise ToolArgError("A hard stop isn't completed: it fires at its time. Use cancel_task to remove it.")
     ctx.touched(a["id"])
     ctx.closed.add(a["id"])
     ctx.changed = True
@@ -383,6 +405,9 @@ def _set_focus(a: dict[str, Any], ctx: ToolContext) -> Any:
         raise ToolArgError(f"Not open top-level tasks (meetings can't be focus tasks): {bad}. "
                            "Use list_tasks to find the right ids.")
     s = get_settings()
+    for i in ids:
+        if is_parked(found[i], ctx.now):
+            tasks.reset_avoidance(i)  # chosen for today: the park is over
     rows = tasks.set_focus(ids, focus_day(ctx.now.astimezone(s.tz), s.day_reset_time))
     ctx.focus = [t["id"] for t in rows]
     for i in ctx.focus:
@@ -402,8 +427,8 @@ def resolve_followup(now: datetime, minutes: int | None, at_iso: str | None, g: 
 
 def _schedule_followup(a: dict[str, Any], ctx: ToolContext) -> Any:
     task = _task(a["task_id"])
-    if task["kind"] == "meeting":
-        raise ToolArgError("Meeting reminders are scheduled automatically; use update_task to change the time.")
+    if task["kind"] in ("meeting", "fence"):
+        raise ToolArgError("Meetings and hard stops are scheduled automatically; use update_task to change the time.")
     if task["status"] != "open":
         raise ToolArgError(f"Task {task['id']} is {task['status']}.")
     when, clamped = resolve_followup(ctx.now, a.get("minutes_from_now"), a.get("at_local_iso"), _guardrails())
@@ -433,9 +458,34 @@ def _add_subtask(a: dict[str, Any], ctx: ToolContext) -> Any:
 
 def _log_interaction(a: dict[str, Any], ctx: ToolContext) -> Any:
     _task(a["task_id"])
-    tasks.add_event(a["task_id"], a["kind"], a["note"])
+    reason = a.get("avoid_reason")
+    tasks.add_event(a["task_id"], a["kind"], a["note"], reason)
+    if reason or a["kind"] in ("progress", "committed"):
+        tasks.reset_avoidance(a["task_id"])  # moving again, or we know why not: a fresh start, no parking
     ctx.touched(a["task_id"])
     return {"ok": True}
+
+
+def _update_setting(a: dict[str, Any], ctx: ToolContext) -> Any:
+    key, value = a["key"], a["value"]
+    spec = config.SPECS[key]
+    desc = next(f for f in user_settings.describe_fields() if f["key"] == key)
+    reset = value.strip().lower() == "default"
+    errors = user_settings.save({key: None if reset else value})
+    if errors:
+        raise ToolArgError(f"'{key}' ({spec.label}): {errors[key]}.")
+    new = next(f for f in user_settings.describe_fields() if f["key"] == key)["value"]
+    ctx.changed = True
+    return {"setting": spec.label, "key": key, "new": new, "old": desc["value"],
+            "note": "Applied. Tell the user in one line, with the old value, and that saying 'undo' reverts it."}
+
+
+def _remember_preference(a: dict[str, Any], ctx: ToolContext) -> Any:
+    try:
+        row = preferences.add(a["text"])
+    except ValueError as e:
+        raise ToolArgError(str(e)) from None
+    return {"remembered": row["text"], "note": "It now applies to every message. The user can delete it under ⚙ Settings."}
 
 
 def _mark_blocked(a: dict[str, Any], ctx: ToolContext) -> Any:
@@ -458,4 +508,6 @@ _HANDLERS: dict[str, Callable[[dict[str, Any], ToolContext], Any]] = {
     "log_interaction": _log_interaction,
     "mark_blocked": _mark_blocked,
     "set_focus": _set_focus,
+    "update_setting": _update_setting,
+    "remember_preference": _remember_preference,
 }
