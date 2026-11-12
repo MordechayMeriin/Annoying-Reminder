@@ -243,6 +243,8 @@ pip install -r requirements.txt pytest
 python -m pytest -q                          # no DB or network needed
 python scripts/simulate_tick.py              # a simulated morning: ticks, grouping, a reply, a meeting
 python scripts/simulate_tick.py --llm-down   # same with OpenRouter "unreachable" → templates
+DATABASE_URL=... python scripts/metrics.py   # success measures for the last 28 days (read-only)
+                                             #   --from 2026-10-01 --to 2026-11-01 for a range
 cp .env.example .env   # fill in, then export the variables
 uvicorn app.main:app --reload
 
