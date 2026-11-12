@@ -8,7 +8,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from app import llm, llm_loop, coach, notify, tasks, thread
+from app import llm, llm_loop, coach, notify, sessions, tasks, thread
 from app.config import get_settings
 from app.logic import FOCUS_MAX, ContactState, focus_day, may_check_in, next_occurrence
 
@@ -21,8 +21,9 @@ class FakeStore:
         self.messages: list[dict[str, Any]] = []
         self.pushes: list[dict[str, Any]] = []
         self.pushovers: list[dict[str, Any]] = []
+        self.sessions: list[dict[str, Any]] = []
         self.pushover_mode = "always"   # as if PUSHOVER_TOKEN / PUSHOVER_USER were set
-        self._ids = {"task": 0, "msg": 0}
+        self._ids = {"task": 0, "msg": 0, "session": 0}
         self.calls: list[str] = []      # every storage call, in order (for counting round trips)
 
     # ------------------------------------------------------------ setup helpers
@@ -40,7 +41,8 @@ class FakeStore:
              "priority": 1, "status": "open", "due_at": None, "remind_at": None, "remind_requested": False,
              "recurrence": None, "nag_count": 0, "escalated": False, "blocked_reason": None,
              "blocked_until": None, "last_notified_at": None, "created_at": self.now, "completed_at": None,
-             "next_action": None, "estimate_min": None, "focus_date": None, "focus_rank": None}
+             "next_action": None, "estimate_min": None, "focus_date": None, "focus_rank": None,
+             "resume_note": None}
         t.update(kw)
         self.tasks[t["id"]] = t
         return dict(t)
@@ -55,11 +57,14 @@ class FakeStore:
                      "subtasks_many", "recent_events_many", "event_counts_many",
                      "create", "update", "complete", "set_followup", "snooze", "block", "unblock", "cancel",
                      "close_finished_meetings", "due_for_contact", "meetings_between", "defer", "lease", "finish_contact",
-                     "list_tasks", "set_focus", "focus_today"):
+                     "list_tasks", "set_focus", "focus_today", "done_since"):
             setattr_(tasks, name, self._counted("tasks." + name, getattr(self, "t_" + name), name != "now_utc"))
         for name in ("add", "add_event", "link", "since", "for_tasks", "last_proactive", "recent_task_ids",
                      "user_replied_since", "last_user_reply_at", "last_user_text", "contact_state", "page", "by_ids"):
             setattr_(thread, name, self._counted("thread." + name, getattr(self, "m_" + name)))
+        for name in ("start", "get", "latest", "open_sessions", "latest_for_task", "end", "set_planned", "claim_end",
+                     "close_note", "close_notes_for_task", "stats_since"):
+            setattr_(sessions, name, self._counted("sessions." + name, getattr(self, "s_" + name)))
         setattr_(notify, "send_push", self.send_push)
         setattr_(notify, "send_pushover", self.send_pushover)
         setattr_(notify, "pushover_mode", lambda: self.pushover_mode)
@@ -161,6 +166,7 @@ class FakeStore:
             t.update(due_at=nxt, remind_at=nxt, remind_requested=True, nag_count=0)
         else:
             t.update(status="done", completed_at=self.now, remind_at=None)
+        t["resume_note"] = None
         return dict(t)
 
     def t_set_followup(self, task_id, when, requested):
@@ -222,6 +228,15 @@ class FakeStore:
         done = {t["id"] for t in rows if t["status"] == "done" or any(
             e["task_id"] == t["id"] and e["kind"] == "done" and e["created_at"] >= start for e in self.events)}
         return [dict(t) for t in rows], done
+
+    def t_done_since(self, start):
+        out: dict[int, dict] = {}
+        for e in self.events:
+            t = self.tasks.get(e["task_id"])
+            if e["kind"] == "done" and e["created_at"] >= start and t and t["status"] != "cancelled":
+                out[t["id"]] = {"id": t["id"], "title": t["title"], "parent_id": t["parent_id"],
+                                "done_at": e["created_at"]}
+        return sorted(out.values(), key=lambda r: r["done_at"])
 
     def t_meetings_between(self, start, end):
         rows = [t for t in self.tasks.values() if t["status"] == "open" and t["kind"] == "meeting"
@@ -340,6 +355,81 @@ class FakeStore:
 
     def m_by_ids(self, ids):
         return [self._public(m) for m in self.messages if m["id"] in ids]
+
+
+# ------------------------------------------------------------ sessions.*  (on FakeStore)
+
+def _s_start(self, task_id, planned_min):
+    self._ids["session"] += 1
+    row = {"id": self._ids["session"], "task_id": task_id, "started_at": self.now, "planned_min": planned_min,
+           "ended_at": None, "outcome": None, "end_sent_at": None, "note_closed_at": None}
+    self.sessions.append(row)
+    return dict(row)
+
+
+def _s_get(self, session_id):
+    return next((dict(x) for x in self.sessions if x["id"] == session_id), None)
+
+
+def _s_latest(self):
+    rows = sorted(self.sessions, key=lambda x: (x["started_at"], x["id"]))
+    return dict(rows[-1]) if rows else None
+
+
+def _s_open_sessions(self):
+    return [dict(x) for x in self.sessions if x["ended_at"] is None]
+
+
+def _s_latest_for_task(self, task_id):
+    rows = sorted((x for x in self.sessions if x["task_id"] == task_id), key=lambda x: (x["started_at"], x["id"]))
+    return dict(rows[-1]) if rows else None
+
+
+def _s_end(self, session_id, outcome, ended_at=None):
+    row = next((x for x in self.sessions if x["id"] == session_id and x["ended_at"] is None), None)
+    if row is None:
+        return None
+    row.update(ended_at=ended_at or self.now, outcome=outcome)
+    return dict(row)
+
+
+def _s_set_planned(self, session_id, planned_min):
+    row = next((x for x in self.sessions if x["id"] == session_id and x["ended_at"] is None), None)
+    if row is None:
+        return None
+    row.update(planned_min=planned_min, end_sent_at=None)
+    return dict(row)
+
+
+def _s_claim_end(self, session_id):
+    row = next((x for x in self.sessions if x["id"] == session_id), None)
+    if row is None or row["ended_at"] is not None or row["end_sent_at"] is not None:
+        return False
+    row["end_sent_at"] = self.now
+    return True
+
+
+def _s_close_note(self, session_id):
+    for x in self.sessions:
+        if x["id"] == session_id and x["note_closed_at"] is None:
+            x["note_closed_at"] = self.now
+
+
+def _s_close_notes_for_task(self, task_id):
+    for x in self.sessions:
+        if x["task_id"] == task_id and x["note_closed_at"] is None:
+            x["note_closed_at"] = self.now
+
+
+def _s_stats_since(self, start, now):
+    from app.logic import actual_minutes
+    rows = [x for x in self.sessions if x["started_at"] >= start]
+    return len(rows), sum(actual_minutes(x, now) for x in rows)
+
+
+for _name, _fn in list(globals().items()):
+    if _name.startswith("_s_"):
+        setattr(FakeStore, _name[1:], _fn)
 
 
 class ScriptedLLM:

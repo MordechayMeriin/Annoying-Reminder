@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
-from . import tasks
+from . import actions, sessions, tasks
 from .config import get_settings
 from .logic import FOCUS_MAX, Guardrails, clamp_followup, focus_day, parse_local_datetime
 
@@ -86,6 +86,8 @@ CHAT_TOOLS: list[dict[str, Any]] = [
         "kind": {"type": "string", "enum": ["task", "meeting"]},
         "next_action": {"type": "string", "description": "A new first step (e.g. the user corrected yours)"},
         "estimate_min": _ESTIMATE,
+        "resume_note": {"type": "string", "description": "Where the user stopped, in their words ('page 3', "
+                        "'row 40'); shown next time they start. Cleared automatically when the task is done."},
         "unblock": {"type": "boolean"},
     }, ["id"]),
     _fn("complete_task", "Mark a task as done.", {"id": _ID}, ["id"]),
@@ -286,7 +288,7 @@ def brief(task: dict[str, Any] | None) -> dict[str, Any] | None:
         return None
     t = tasks.to_public(task)
     keys = ("id", "parent_id", "title", "kind", "priority", "status", "due_at", "remind_at", "recurrence",
-            "blocked_reason", "blocked_until", "next_action", "estimate_min", "focus_date")
+            "blocked_reason", "blocked_until", "next_action", "estimate_min", "focus_date", "resume_note")
     return {k: t[k] for k in keys if t.get(k) is not None}
 
 
@@ -341,6 +343,8 @@ def _update_task(a: dict[str, Any], ctx: ToolContext) -> Any:
         a["recurrence"] = None
     _estimate(a)
     t = tasks.update(task_id, **a) if a else tasks.get(task_id)
+    if a.get("resume_note"):
+        sessions.close_notes_for_task(task_id)  # saved from the chat: the app needn't ask "where did you stop?"
     if unblock:
         t = tasks.unblock(task_id)
     ctx.touched(task_id)
@@ -353,6 +357,7 @@ def _complete_task(a: dict[str, Any], ctx: ToolContext) -> Any:
     ctx.touched(a["id"])
     ctx.closed.add(a["id"])
     ctx.changed = True
+    actions.close_task_sessions(a["id"], "done")
     return brief(tasks.complete(a["id"]))
 
 
@@ -361,6 +366,7 @@ def _cancel_task(a: dict[str, Any], ctx: ToolContext) -> Any:
     ctx.touched(a["id"])
     ctx.closed.add(a["id"])
     ctx.changed = True
+    actions.close_task_sessions(a["id"], "stopped")
     return brief(tasks.cancel(a["id"]))
 
 

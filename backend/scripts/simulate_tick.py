@@ -6,13 +6,17 @@ in-memory database and a scripted LLM. No network, no Supabase, no OpenRouter.
     python scripts/simulate_tick.py            # LLM answers
     python scripts/simulate_tick.py --llm-down # OpenRouter unreachable → templates and the code's picks
 
-What it shows (Phase 1 of the ADHD-assistant brief):
+What it shows (Phases 1 and 2 of the ADHD-assistant brief):
   07:30  the morning plan sets Today's 3 (no reply needed), with ▶ Start the first one · Change it
   10:00  a check-in about a focus task, with reply buttons and ▶ Start / ✓ Done on the notification;
          an undated task outside Today's 3 stays quiet
   10:05  a reply about one task gets ▶ Start 5 min · ✓ Done (+ a new task gets its first step silently)
   10:10  ✓ Done tapped on a notification: no LLM call, an event in the chat
-  10:30  a meeting reminder (skips the gap, time comes from code, no buttons)
+  10:10  What now? picks the next thing by code (no LLM), short enough for the 10:45 meeting
+  10:10  ▶ Start 5 min tapped on a notification: a focus session; other check-ins wait
+  10:15  the session's end check-in (a template: ✓ Done · ▶ Another round · Stop)
+  10:30  no answer → the session is recorded as paused (nothing more sent); the meeting reminder
+         comes through (skips the gap, time comes from code, no buttons)
 """
 
 import asyncio
@@ -28,7 +32,7 @@ import conftest  # noqa: E402,F401  (dummy env vars)
 
 from fakes import FakeStore, ScriptedLLM  # noqa: E402
 
-from app import actions, agent, scheduler  # noqa: E402
+from app import actions, agent, scheduler, sessions  # noqa: E402
 from app.llm import LLMUnavailable  # noqa: E402
 
 TZ = ZoneInfo("Asia/Jerusalem")
@@ -63,6 +67,9 @@ def tick() -> None:
     ids = scheduler.plan_tick()
     if ids:
         asyncio.run(scheduler.deliver(ids))
+    ends = scheduler.plan_sessions()
+    if ends:
+        asyncio.run(scheduler.deliver_session_ends(ends))
 
 
 def main() -> None:
@@ -113,9 +120,21 @@ def main() -> None:
     actions.apply(invoice["id"], "done")  # ✓ Done on a notification
     show(store, f"✓ Done from the notification (LLM calls made: {len(llm.requests) - calls})")
 
-    store.advance(20)
+    calls = len(llm.requests)
+    actions.what_now()  # the What now? button
+    show(store, f"What now? (LLM calls made: {len(llm.requests) - calls})")
+
+    actions.apply(report["id"], "start", 5)  # ▶ Start 5 min on a notification
+    show(store, "▶ Start from the notification: a 5-minute focus session")
+
+    store.advance(5)
     tick()
-    show(store, "Tick: meeting reminder (skips the gap, time comes from code)")
+    show(store, "Tick after the session's end: the end check-in (no LLM)")
+
+    store.advance(15)
+    tick()
+    paused = sessions.latest()
+    show(store, f"Tick, no answer: session {paused['outcome']}; the meeting reminder still comes")
 
     print("\nTasks:")
     for t in store.tasks.values():
@@ -125,6 +144,8 @@ def main() -> None:
               f"first step: {t['next_action'] or '-'}")
     quiet = all(photos["id"] not in m["task_ids"] for m in store.messages)
     print(f"\nUndated task outside Today's 3 stayed quiet: {quiet}")
+    for x in store.sessions:
+        print(f"Session #{x['id']} on task #{x['task_id']}: {x['planned_min']} min planned, outcome {x['outcome']}")
     print(f"LLM calls made: {len(llm.requests)}  (fallback mode: {LLM_DOWN})")
 
 

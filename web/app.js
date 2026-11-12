@@ -21,10 +21,28 @@ const PAGE = 50;
 const START_MIN_APP = 25;   // ▶ Start on the focus card (from a notification or a chip: 5)
 const HEBREW = /[\u0590-\u05FF]/;
 
-// Opened from a notification? (?m=<message id>, or ?task=<id> from older links / Pushover)
+// Opened from a notification? (?m=<message id>, or ?task=<id> from older links / Pushover;
+// ?session=1: ▶ Start on a notification, open the timer). From the home-screen shortcut: ?new=1.
 const params = new URLSearchParams(location.search);
 let pendingMessageId = Number(params.get("m")) || null;
 let pendingTaskId = Number(params.get("task")) || null;
+let pendingSession = params.get("session") === "1";
+let pendingNew = params.get("new") === "1";
+
+// Shared from another app (the manifest's share_target): kept until it has been sent to the chat,
+// so a login in between doesn't lose it.
+const SHARE_KEY = "pendingShare";
+{
+  const shared = [params.get("share_title"), params.get("share_text"), params.get("share_url")]
+    .map((x) => (x || "").trim())
+    .filter((x, i, all) => x && all.indexOf(x) === i) // apps often repeat the url inside the text
+    .join("\n");
+  if (shared) {
+    try {
+      sessionStorage.setItem(SHARE_KEY, shared);
+    } catch {}
+  }
+}
 
 let started = false;
 let firstLoad = true;       // the first message load always scrolls to the bottom
@@ -45,6 +63,12 @@ let renderedLastDay = "";   // day of the last rendered message (for day separat
 let navDepth = 0;           // history entries pushed for open panels (Back button)
 let ignorePops = 0;         // popstate events caused by our own history.go()
 let drawerView = null;      // "list" | "detail" | "settings" | null (closed)
+let session = null;         // the running focus session (from the server), or null
+let clockSkew = 0;          // server clock − this device's clock, in ms (the timer follows the server)
+let sessionTimer = null;    // the 1 s timer update
+let sessionBusy = false;
+const timeUpFor = new Set(); // "id@ends_at" of sessions we already beeped for
+let audioCtx = null;        // created on a tap (▶ Start), so the end sound may play later
 // Touch keyboards have no Shift+Enter, so there Enter makes a new line and only ➤ sends.
 const touchKeyboard = window.matchMedia("(pointer: coarse)").matches;
 
@@ -129,11 +153,14 @@ function fmtDay(d) {
   return d.toLocaleDateString([], { weekday: "long", day: "numeric", month: "long" });
 }
 
-/** The user's language (for text the app sends for them, e.g. "What now?"): their latest typed message. */
+/** The user's language (the same rule as the reply buttons): their latest typed message. */
 function userLang() {
   const last = [...messages].reverse().find((m) => m.role === "user" && m.kind === "chat");
   return last && HEBREW.test(last.content) ? "he" : "en";
 }
+
+/** A label in the user's language. */
+const L = (en, he) => (userLang() === "he" ? he : en);
 
 // ------------------------------------------------------------------ auth
 
@@ -289,7 +316,14 @@ async function onChip(chip, row) {
   chipsBusy = true;
   row.querySelectorAll("button").forEach((b) => (b.disabled = true));
   try {
-    await runAction(chip.task_id, chip.action, chip.minutes);
+    if (chip.action === "what_now") {
+      await whatNow({ chip: chip.id, low_energy: !!chip.low_energy, exclude: chip.exclude || [] });
+    } else if (chip.action === "start" || chip.action === "another") {
+      await runAction(chip.task_id, chip.action, chip.minutes, { quiet: true });
+      if (session) openSessionScreen();
+    } else {
+      await runAction(chip.task_id, chip.action, chip.minutes);
+    }
   } finally {
     chipsBusy = false;
   }
@@ -297,6 +331,7 @@ async function onChip(chip, row) {
 
 const ACTION_TOAST = {
   done: "Done ✓", snooze: "Snoozed for 1 hour", cancel: "Cancelled", later: "OK, later", start: "▶ Started",
+  another: "▶ Another round", stop: "Stopped",
 };
 
 /** A task action without the LLM (chips, the focus card, the task list); refreshes what it changed. */
@@ -304,7 +339,8 @@ async function runAction(id, action, minutes, { quiet = false } = {}) {
   try {
     const body = { action };
     if (minutes) body.minutes = minutes;
-    await api(`/tasks/${id}/action`, { method: "POST", body: JSON.stringify(body) });
+    const res = await api(`/tasks/${id}/action`, { method: "POST", body: JSON.stringify(body) });
+    if ("session" in res) applySession(res.session);
     if (!quiet) toast(action === "start" && minutes ? `▶ ${minutes} min — go` : ACTION_TOAST[action]);
     await Promise.all([loadTasks(), loadNewer(), loadFocus()]);
     if (detailTaskId === id) openTask(id);
@@ -323,7 +359,18 @@ try {
 
 async function loadFocus() {
   const data = await api("/focus");
+  if (data.now) clockSkew = new Date(data.now).getTime() - Date.now();
+  applySession(data.session);
+  renderResume(data.resume);
   renderFocus(data);
+}
+
+/** The wins of the day: finished tasks and steps, and focus sessions. No streaks, no zeros. */
+function winsText(w) {
+  const parts = [];
+  if (w?.done) parts.push(`Done today: ${w.done}`);
+  if (w?.sessions) parts.push(`⏱ ${w.sessions} session${w.sessions === 1 ? "" : "s"}`);
+  return parts.join(" · ");
 }
 
 function renderFocus(data) {
@@ -331,7 +378,7 @@ function renderFocus(data) {
   card.hidden = !data.tasks.length;
   card.classList.toggle("folded", focusFolded);
   if (!data.tasks.length) return;
-  $("focus-done").textContent = data.doneToday ? `Done today: ${data.doneToday}` : "";
+  $("focus-done").textContent = winsText(data.wins);
   const list = $("focus-list");
   list.textContent = "";
   data.tasks.forEach((t, i) => {
@@ -354,7 +401,7 @@ function renderFocus(data) {
       start.type = "button";
       start.title = `Start ${START_MIN_APP} min`;
       start.setAttribute("aria-label", start.title);
-      start.onclick = () => runAction(t.id, "start", START_MIN_APP);
+      start.onclick = () => startSession(t.id, START_MIN_APP);
       li.appendChild(start);
     }
     list.appendChild(li);
@@ -369,7 +416,301 @@ $("focus").querySelector(".focus-head").addEventListener("click", (e) => {
     localStorage.setItem("focusFolded", focusFolded ? "1" : "0");
   } catch {}
 });
-$("focus-what-now").onclick = () => sendMessage(userLang() === "he" ? "מה עכשיו?" : "What now?");
+$("focus-what-now").onclick = () => whatNow({ chip: "what_now" });
+
+// ---- What now?: the server's code picks one task (no LLM, under a second) and answers in the chat.
+
+let whatNowBusy = false;
+
+async function whatNow({ chip = "what_now", low_energy = false, exclude = [] } = {}) {
+  if (whatNowBusy || outgoing) return;
+  whatNowBusy = true;
+  $("focus-what-now").disabled = true;
+  try {
+    const res = await api("/what-now", { method: "POST", body: JSON.stringify({ chip, low_energy, exclude }) });
+    mergeMessages(res.messages);
+    renderMessages();
+    scrollToBottom();
+  } catch (e) {
+    toast(e.message);
+  } finally {
+    whatNowBusy = false;
+    $("focus-what-now").disabled = false;
+  }
+}
+
+// ---- focus sessions: ▶ Start → the timer screen (a ring, the next action, ✓ Done · Stop · +5).
+// The server sends the end check-in at the first tick after the end; when the app is open the ring
+// also ends on time, with a sound. Closing the screen (✕) only hides it: the timer keeps running.
+
+const RING_C = 2 * Math.PI * 52;
+const SESSION_CHOICES = [5, 15, 25, 45];
+
+const serverNow = () => Date.now() + clockSkew;
+const sessionLeft = () => (session ? new Date(session.ends_at).getTime() - serverNow() : 0);
+
+function fmtClock(ms) {
+  const sec = Math.max(0, Math.ceil(ms / 1000));
+  return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+}
+
+function unlockAudio() {
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === "suspended") audioCtx.resume();
+  } catch {}
+}
+
+function timeUpSound() {
+  try {
+    if (audioCtx) {
+      if (audioCtx.state === "suspended") audioCtx.resume();
+      [0, 0.35, 0.7].forEach((t) => {
+        const o = audioCtx.createOscillator();
+        const g = audioCtx.createGain();
+        const at = audioCtx.currentTime + t;
+        o.frequency.value = 880;
+        o.connect(g);
+        g.connect(audioCtx.destination);
+        g.gain.setValueAtTime(0.0001, at);
+        g.gain.exponentialRampToValueAtTime(0.3, at + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.0001, at + 0.25);
+        o.start(at);
+        o.stop(at + 0.3);
+      });
+    }
+  } catch {}
+  navigator.vibrate?.([300, 150, 300]);
+}
+
+/** The server's view of the running session (or null): updates the bar, the screen and the 1 s timer. */
+function applySession(s) {
+  session = s || null;
+  clearInterval(sessionTimer);
+  sessionTimer = session ? setInterval(tickSession, 1000) : null;
+  if (!session) closeSessionScreen();
+  renderSessionScreen();
+  renderSessionBar();
+}
+
+function tickSession() {
+  if (!session) return;
+  const key = `${session.id}@${session.ends_at}`;
+  if (sessionLeft() <= 0 && !timeUpFor.has(key)) {
+    timeUpFor.add(key);
+    if (document.visibilityState === "visible") timeUpSound();
+    renderSessionScreen();
+  }
+  updateSessionClock();
+  renderSessionBar();
+}
+
+function renderSessionBar() {
+  const bar = $("session-bar");
+  bar.hidden = !session || !$("session").hidden;
+  if (bar.hidden) return;
+  const left = sessionLeft();
+  bar.textContent = `⏱ ${left > 0 ? fmtClock(left) : L("Time's up", "הזמן נגמר")} · ${session.title || ""}`;
+  bar.dir = "auto";
+}
+
+function renderSessionScreen() {
+  if (!session || $("session").hidden) return;
+  $("session-title").textContent = session.title || "";
+  $("session-step").textContent = "▶ " + (session.next_action || session.title || "");
+  const note = $("session-note");
+  note.hidden = !session.resume_note;
+  note.textContent = session.resume_note ? L("You stopped at: ", "עצרת ב: ") + session.resume_note : "";
+  const elapsed = serverNow() - new Date(session.started_at).getTime();
+  const box = $("session-lengths");
+  box.textContent = "";
+  SESSION_CHOICES.forEach((m) => {
+    const b = el("button", "length" + (m === session.planned_min ? " active" : ""), `${m}`);
+    b.type = "button";
+    b.setAttribute("aria-pressed", m === session.planned_min ? "true" : "false");
+    b.disabled = m * 60000 <= elapsed && m !== session.planned_min;
+    b.onclick = () => setSessionLength(m);
+    box.appendChild(b);
+  });
+  $("session-done").textContent = $("session-over-done").textContent = L("✓ Done", "✓ בוצע");
+  $("session-stop").textContent = $("session-over-stop").textContent = L("Stop", "לעצור");
+  $("session-another").textContent = L("▶ Another round", "▶ עוד סבב");
+  updateSessionClock();
+}
+
+function updateSessionClock() {
+  if (!session || $("session").hidden) return;
+  const total = session.planned_min * 60000;
+  const left = sessionLeft();
+  $("session-time").textContent = left > 0 ? fmtClock(left) : L("Time's up", "הזמן נגמר");
+  // The ring empties as time runs; at the end it closes, green: a finished round, not a failure.
+  $("ring-fg").style.strokeDashoffset = left > 0 ? String(RING_C * (1 - Math.min(1, left / total))) : "0";
+  $("session-run").hidden = left <= 0;
+  $("session-over").hidden = left > 0;
+  $("session").classList.toggle("over", left <= 0);
+}
+
+let chatScrollY = 0; // where the chat was when the timer opened
+
+function openSessionScreen() {
+  if (!session) return;
+  unlockAudio();
+  if (!$("drawer").hidden) {
+    if (!closeDrawer()) return; // unsaved settings: stay
+    navBack(0);
+  }
+  if ($("session").hidden) chatScrollY = window.scrollY;
+  $("session").hidden = false;
+  document.body.classList.add("drawer-open");
+  renderSessionScreen();
+  renderSessionBar();
+  navPush(1); // Android's Back closes it
+}
+
+function closeSessionScreen({ fromHistory = false } = {}) {
+  if ($("session").hidden) return;
+  $("session").hidden = true;
+  document.body.classList.remove("drawer-open");
+  window.scrollTo(0, chatScrollY);
+  if (!fromHistory) navBack(0);
+  renderSessionBar();
+}
+
+async function startSession(taskId, minutes) {
+  unlockAudio();
+  try {
+    const res = await api(`/tasks/${taskId}/start`, { method: "POST", body: JSON.stringify({ minutes }) });
+    applySession(res.session);
+    openSessionScreen();
+    Promise.all([loadTasks(), loadNewer(), loadFocus()]).catch(() => {});
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+async function sessionCall(path, options) {
+  if (!session || sessionBusy) return null;
+  sessionBusy = true;
+  $("session").querySelectorAll("button").forEach((b) => (b.disabled = true));
+  try {
+    return await api(path, options);
+  } catch (e) {
+    toast(e.message);
+    loadFocus().catch(() => {});
+    return null;
+  } finally {
+    sessionBusy = false;
+    $("session").querySelectorAll("button").forEach((b) => (b.disabled = false));
+    renderSessionScreen();
+  }
+}
+
+async function endSession(outcome) {
+  const res = await sessionCall(`/sessions/${session?.id}/end`, { method: "POST", body: JSON.stringify({ outcome }) });
+  if (!res) return;
+  applySession(res.session); // another: the new round; otherwise null (the screen closes)
+  if (outcome === "done") toast(L("Done ✓", "בוצע ✓"));
+  Promise.all([loadTasks(), loadNewer(), loadFocus()]).catch(() => {});
+}
+
+async function setSessionLength(minutes) {
+  if (!session || minutes === session.planned_min) return;
+  const res = await sessionCall(`/sessions/${session.id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ planned_min: minutes }),
+  });
+  if (res) applySession(res.session);
+}
+
+$("session-done").onclick = $("session-over-done").onclick = () => endSession("done");
+$("session-stop").onclick = $("session-over-stop").onclick = () => endSession("stopped");
+$("session-another").onclick = () => endSession("another");
+$("session-plus").onclick = () => session && setSessionLength(Math.min(session.planned_min + 5, 120));
+$("session-close").onclick = () => closeSessionScreen();
+$("session-bar").onclick = openSessionScreen;
+$("ring-fg").style.strokeDasharray = String(RING_C);
+
+// ---- "Where did you stop?": optional, after a stopped or unanswered session. Ignoring it is fine.
+
+function renderResume(r) {
+  const form = $("breadcrumb");
+  const appeared = r && form.hidden;
+  const stick = nearBottom();
+  form.hidden = !r;
+  if (!r) return;
+  if (appeared && stick) requestAnimationFrame(scrollToBottom);
+  if (form.dataset.sessionId !== String(r.session_id)) {
+    form.dataset.sessionId = r.session_id;
+    $("breadcrumb-input").value = "";
+  }
+  $("breadcrumb-label").textContent = L(`Where did you stop on “${r.title}”? (optional)`,
+    `איפה עצרת ב„${r.title}”? (לא חובה)`);
+}
+
+async function saveBreadcrumb(text) {
+  const form = $("breadcrumb");
+  const id = form.dataset.sessionId;
+  form.hidden = true; // not a chore: it goes away right away
+  try {
+    await api(`/sessions/${id}/note`, { method: "POST", body: JSON.stringify({ text }) });
+    if (text) {
+      toast(L("Saved for next time", "נשמר לפעם הבאה"));
+      loadNewer().catch(() => {});
+    }
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+$("breadcrumb").addEventListener("submit", (e) => {
+  e.preventDefault();
+  saveBreadcrumb($("breadcrumb-input").value.trim() || null);
+});
+$("breadcrumb-skip").onclick = () => saveBreadcrumb(null);
+
+// ---- the mic: dictation into a text field (Web Speech API), Hebrew or English by the chips' rule.
+
+const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
+let listening = null;
+
+function setupMic(button, input) {
+  if (!Speech) return; // not supported: no button
+  button.hidden = false;
+  button.onclick = () => {
+    if (listening) {
+      listening.stop();
+      return;
+    }
+    const rec = new Speech();
+    rec.lang = userLang() === "he" ? "he-IL" : "en-US";
+    rec.interimResults = true;
+    const base = input.value.trim() ? input.value.trim() + " " : "";
+    rec.onresult = (e) => {
+      input.value = base + [...e.results].map((r) => r[0].transcript).join("");
+      input.dispatchEvent(new Event("input"));
+    };
+    rec.onerror = (e) => {
+      if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+        toast("Microphone blocked. Allow it in Chrome site settings.");
+      }
+    };
+    rec.onend = () => {
+      button.classList.remove("listening");
+      listening = null;
+      input.focus();
+    };
+    listening = rec;
+    button.classList.add("listening");
+    try {
+      rec.start();
+    } catch {
+      rec.onend();
+    }
+  };
+}
+
+setupMic($("chat-mic"), $("chat-input"));
+setupMic($("breadcrumb-mic"), $("breadcrumb-input"));
 
 function mergeMessages(rows) {
   const byId = new Map(messages.map((m) => [m.id, m]));
@@ -395,12 +736,12 @@ async function loadLatest({ stickToBottom = true } = {}) {
   firstLoad = false;
 }
 
-/** Only what's new since the last loaded message (the 60 s check). */
+/** Only what's new since the last loaded message (the 60 s check). Resolves with how many arrived. */
 async function loadNewer() {
-  if (!messages.length) return loadLatest();
+  if (!messages.length) return loadLatest().then(() => 0);
   const wasNearBottom = nearBottom();
   const rows = await api(`/messages?limit=${PAGE}&after=${messages[messages.length - 1].id}`);
-  if (!rows.length) return;
+  if (!rows.length) return 0;
   if (rows.length === PAGE) {
     // A big gap (the app was closed for a while): start over from the newest page.
     messages = [];
@@ -409,6 +750,7 @@ async function loadNewer() {
   mergeMessages(rows);
   renderMessages();
   if (wasNearBottom) scrollToBottom();
+  return rows.length;
 }
 
 async function loadEarlier() {
@@ -449,6 +791,12 @@ function autosize() {
   // The composer is fixed at the bottom; keep the last messages clear of it as it grows.
   $("main").style.paddingBottom = $("chat-form").offsetHeight + 12 + "px";
 }
+
+// The focus card sits right under the header, whose height changes (buttons wrap on narrow phones,
+// the session bar comes and goes).
+new ResizeObserver(([entry]) => {
+  document.documentElement.style.setProperty("--header-h", `${entry.target.offsetHeight}px`);
+}).observe(document.querySelector("#main > header"));
 
 if (touchKeyboard) $("chat-input").enterKeyHint = "enter";
 $("chat-input").addEventListener("input", autosize);
@@ -680,7 +1028,9 @@ window.addEventListener("popstate", (e) => {
   const depth = e.state?.nav || 0;
   if (depth >= navDepth) return;
   navDepth = depth;
-  if (depth === 0) {
+  if (depth === 0 && !$("session").hidden) {
+    closeSessionScreen({ fromHistory: true });
+  } else if (depth === 0) {
     if (!closeDrawer()) navPush(1); // kept open (unsaved settings): put the entry back
   } else if (drawerView === "detail") {
     showDrawerTab(drawerTab);
@@ -747,7 +1097,9 @@ $("drawer-backdrop").onclick = requestCloseDrawer;
 $("drawer-back").onclick = backToList;
 document.querySelectorAll("#drawer-tabs button").forEach((b) => (b.onclick = () => showDrawerTab(b.dataset.tab)));
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && !$("drawer").hidden) requestCloseDrawer();
+  if (e.key !== "Escape") return;
+  if (!$("session").hidden) closeSessionScreen();
+  else if (!$("drawer").hidden) requestCloseDrawer();
 });
 
 function taskMeta(t) {
@@ -1263,6 +1615,10 @@ navigator.serviceWorker?.addEventListener("message", async (e) => {
     showMessage(Number(msg.messageId));
   } else if (msg.type === "open-task" && msg.taskId) {
     openTask(Number(msg.taskId));
+  } else if (msg.type === "open-session") {
+    await loadFocus().catch(() => {});
+    openSessionScreen();
+    Promise.all([loadTasks(), loadNewer()]).catch(() => {});
   }
 });
 
@@ -1292,7 +1648,8 @@ async function startApp() {
 
   clearInterval(pollTimer);
   pollTimer = setInterval(() => {
-    if (document.visibilityState === "visible") loadNewer().catch(() => {});
+    // New messages (e.g. a session's end check-in) can change the focus card and the timer too.
+    if (document.visibilityState === "visible") loadNewer().then((n) => n && loadFocus()).catch(() => {});
   }, 60_000);
 
   try {
@@ -1300,12 +1657,26 @@ async function startApp() {
   } catch (e) {
     toast(e.message);
   }
-  if (pendingMessageId) {
+  let shared = null;
+  try {
+    shared = sessionStorage.getItem(SHARE_KEY);
+    sessionStorage.removeItem(SHARE_KEY);
+  } catch {}
+  if (shared) {
+    // Shared from another app: the assistant saves it (with its first step). Nothing to type.
+    sendMessage("Shared with the app:\n" + shared.slice(0, 1900));
+  } else if (pendingSession) {
+    // ▶ Start on a notification: open the running timer (retry once if the start is still on its way).
+    if (!session) await new Promise((r) => setTimeout(r, 1500)).then(() => loadFocus()).catch(() => {});
+    openSessionScreen();
+  } else if (pendingMessageId) {
     showMessage(pendingMessageId);
-    pendingMessageId = null;
   } else if (pendingTaskId) {
     openTask(pendingTaskId);
-    pendingTaskId = null;
+  } else if (pendingNew) {
+    $("chat-input").focus(); // the "New task" shortcut: ready to type or dictate
   }
+  pendingMessageId = pendingTaskId = null;
+  pendingSession = pendingNew = false;
   setupPush();
 }

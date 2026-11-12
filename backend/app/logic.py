@@ -1,6 +1,7 @@
 """Pure scheduling logic (no I/O) — easy to unit-test."""
 
 import calendar
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
@@ -207,6 +208,9 @@ class ContactState:
     last_proactive_at: datetime | None = None
     sent_today: int = 0
     sent_today_by_task: dict[int, int] = field(default_factory=dict)
+    # A focus session is running (or just ended): other check-ins wait until this time (from sessions,
+    # not messages; see focus_hold_until).
+    focus_hold_until: datetime | None = None
 
 
 @dataclass
@@ -221,12 +225,16 @@ def contact_decision(task: dict[str, Any], state: ContactState, now_local: datet
     Decide whether a due task may be contacted about in this tick.
     Returns None to contact now, or the (aware) datetime to postpone its remind_at to.
 
-    task has: id, kind ('task' | 'meeting'), blocked_until (aware datetime | None),
+    task has: id, kind ('task' | 'meeting' | 'fence' | 'session'), blocked_until (aware datetime | None),
               remind_requested (bool: the user asked for this reminder time).
+              kind 'session' = the check-in at the end of a focus session (scheduler.plan_sessions).
     Rules:
       - Shabbat / holidays (g.rest_until) and quiet hours are never overruled, meetings included
       - blocked tasks wait until blocked_until
+      - focus hold: while a session runs (until it ends + 10 min) only meetings, fences and the
+        session's own end check-in come through
       - meetings skip the gap and the caps (they still count toward the daily cap)
+      - session end check-ins skip the gap and the per-task cap (user-requested), not the daily cap
       - min gap between proactive messages
       - max proactive messages per day
       - max check-ins per task per day, not counting reminders the user asked for
@@ -239,8 +247,11 @@ def contact_decision(task: dict[str, Any], state: ContactState, now_local: datet
         later.append(quiet_end_after(now_local, g.quiet_end))
     if task.get("blocked_until") and task["blocked_until"] > now_local:
         later.append(task["blocked_until"])
+    if (task["kind"] not in ("meeting", "fence", "session") and state.focus_hold_until
+            and state.focus_hold_until > now_local):
+        later.append(state.focus_hold_until)
     if task["kind"] != "meeting":
-        if state.last_proactive_at:
+        if state.last_proactive_at and task["kind"] != "session":
             gap_end = state.last_proactive_at + timedelta(minutes=g.min_gap_min)
             if gap_end > now_local:
                 later.append(gap_end)
@@ -387,7 +398,7 @@ class Chip:
             out["action"] = self.action
             if self.minutes:
                 out["minutes"] = self.minutes
-            if task_id is not None:
+            if task_id is not None and self.action in _NEEDS_TASK:
                 out["task_id"] = task_id
         return out
 
@@ -420,7 +431,9 @@ CHIP_LABELS: dict[str, tuple[str, str]] = {
 _START5 = Chip("start5", "start", START_MIN_NOTIFICATION)
 _DONE = Chip("done", "done")
 
-# Message kind → its chips. "What now?" is a text chip until the code picker (F4, Phase 2) exists.
+# Message kind → its chips. "What now?", Low energy and Something else run the code picker (F4,
+# logic.pick_next) with no LLM: action "what_now", no task needed.
+_WHAT_NOW = Chip("what_now", "what_now")
 CHIPS_BY_KIND: dict[str, tuple[Chip, ...]] = {
     "checkin": (_START5, _DONE, Chip("later", "later"), Chip("stuck")),
     "morning": (Chip("start_first", "start", START_MIN_NOTIFICATION), Chip("change")),
@@ -429,8 +442,9 @@ CHIPS_BY_KIND: dict[str, tuple[Chip, ...]] = {
     "reentry": (Chip("pick_one"), Chip("move_overdue", "move_overdue")),
     "sunday": (Chip("drop", "drop"), Chip("keep", "keep")),
     "meeting": (),
-    "midday": (Chip("start_next", "start", START_MIN_NOTIFICATION), Chip("what_now")),
-    "what_now": (Chip("start", "start", START_MIN_NOTIFICATION), Chip("low_energy"), Chip("something_else")),
+    "midday": (Chip("start_next", "start", START_MIN_NOTIFICATION), _WHAT_NOW),
+    "what_now": (Chip("start", "start", START_MIN_NOTIFICATION), Chip("low_energy", "what_now"),
+                 Chip("something_else", "what_now")),
     "chat_task": (_START5, _DONE),
     "evening": (),
 }
@@ -493,7 +507,8 @@ def focus_day(now_local: datetime, reset: time) -> date:
 def task_stage(task: dict[str, Any], counts_7d: dict[str, int] | None, today: date) -> str:
     """
     captured → clarified (has a next action) → planned (in Today's 3) → done; avoided after
-    3+ postponed / ignored events in 7 days. (in_session and paused come with sessions, Phase 2.)
+    3+ postponed / ignored events in 7 days. (A running session is shown by the session itself, not
+    by a stage: see session_state.)
     """
     if task.get("status") in ("done", "cancelled"):
         return task["status"]
@@ -612,3 +627,241 @@ def may_check_in(task: dict[str, Any], now: datetime, today: date) -> bool:
 def user_active_recently(last_activity: datetime | None, now: datetime,
                          minutes: int = ACTIVE_SKIPS_CHECKIN_MIN) -> bool:
     return last_activity is not None and now - last_activity < timedelta(minutes=minutes)
+
+
+# ================================================================ ADHD assistant (Phase 2): start and come back
+#
+# What now? (F4), focus sessions (F5), breadcrumbs (F6). Constants, not settings (see the brief).
+
+SESSION_CHOICES = (5, 15, 25, 45)  # one tap switches between them on the session screen
+SESSION_MAX_MIN = 120              # +5 can go past 45, up to this
+SESSION_SILENCE_MIN = 15           # no answer this long after the end check-in → paused, nothing more sent
+FOCUS_HOLD_MIN = 10                # other check-ins wait until the session ends + this
+BREADCRUMB_HOURS = 3               # "Where did you stop?" is offered this long after a stopped / paused session
+DEFAULT_MULTIPLIER = 1.5           # estimates × this until Phase 4 learns the real one
+DEFAULT_ESTIMATE_MIN = 15          # a task without an estimate: its next action is 15 minutes or less
+LOW_ENERGY_MAX_MIN = 15            # Low energy: tasks estimated this short
+WHAT_NOW_CHIPS = ("what_now", "low_energy", "something_else")  # the chips that ask the code picker
+
+
+# ---------------------------------------------------------------- sessions
+
+def session_length(minutes: int | None, default: int = START_MIN_NOTIFICATION) -> int:
+    """A session length: a multiple of 5 (ticks run every 5 minutes), 5 to SESSION_MAX_MIN."""
+    m = default if not minutes else int(minutes)
+    m = -(-m // 5) * 5  # round up to a multiple of 5
+    return min(max(m, 5), SESSION_MAX_MIN)
+
+
+def session_end_at(session: dict[str, Any]) -> datetime:
+    """When the session's timer runs out."""
+    return session["started_at"] + timedelta(minutes=session["planned_min"])
+
+
+def session_state(session: dict[str, Any] | None, now: datetime) -> str | None:
+    """running (timer on) → ended (time's up, waiting for an answer) → closed (an outcome is recorded)."""
+    if session is None:
+        return None
+    if session.get("ended_at") is not None:
+        return "closed"
+    return "running" if now < session_end_at(session) else "ended"
+
+
+def session_silent(session: dict[str, Any], now: datetime) -> bool:
+    """
+    An open session nobody answered: SESSION_SILENCE_MIN after its end check-in went out, or after its
+    end if the check-in couldn't be sent at all (quiet hours, Shabbat, the daily cap). → paused.
+    """
+    if session.get("ended_at") is not None:
+        return False
+    since = session.get("end_sent_at") or session_end_at(session)
+    return now >= since + timedelta(minutes=SESSION_SILENCE_MIN)
+
+
+def session_end_due(session: dict[str, Any], now: datetime) -> bool:
+    """Time for the end check-in: the timer ran out, it hasn't been sent and the session isn't silent yet."""
+    return (session_state(session, now) == "ended" and session.get("end_sent_at") is None
+            and not session_silent(session, now))
+
+
+def session_close_outcome(session: dict[str, Any], now: datetime) -> tuple[str, datetime]:
+    """
+    (outcome, ended_at) for an open session that's being replaced (a new session started): stopped now
+    if its timer was still running, otherwise paused at its planned end (silence means the planned time).
+    """
+    end = session_end_at(session)
+    return ("stopped", now) if now < end else ("paused", end)
+
+
+def actual_minutes(session: dict[str, Any], now: datetime) -> int:
+    """Minutes the session actually ran (until the Done / Stop tap; the planned time when silent)."""
+    end = session.get("ended_at") or now
+    return max(0, round((end - session["started_at"]).total_seconds() / 60))
+
+
+def focus_hold_until(latest: dict[str, Any] | None) -> datetime | None:
+    """
+    While a session runs, other check-ins wait until it ends + FOCUS_HOLD_MIN (meetings and fences
+    still come through). Ended early (Done, Stop): the hold counts from that moment.
+    latest: the most recent session.
+    """
+    if latest is None:
+        return None
+    end = latest.get("ended_at") or session_end_at(latest)
+    return end + timedelta(minutes=FOCUS_HOLD_MIN)
+
+
+def session_last_active(latest: dict[str, Any] | None, now: datetime) -> datetime | None:
+    """When a session last ran (now, if one is open): a session in the last hour skips the mid-day check-in."""
+    if latest is None:
+        return None
+    if latest.get("ended_at") is None:
+        return min(now, session_end_at(latest))
+    return latest["ended_at"]
+
+
+def wants_breadcrumb(latest: dict[str, Any] | None, now: datetime) -> bool:
+    """
+    Offer the optional "Where did you stop?" field: the latest session was stopped or went unanswered,
+    recently, and the field hasn't been answered or dismissed. Ignoring it changes nothing.
+    """
+    return (latest is not None and latest.get("outcome") in ("stopped", "paused")
+            and latest.get("ended_at") is not None and latest.get("note_closed_at") is None
+            and now - latest["ended_at"] < timedelta(hours=BREADCRUMB_HOURS))
+
+
+# ---------------------------------------------------------------- What now?
+
+@dataclass(frozen=True)
+class Pick:
+    """
+    What now?'s answer. reason:
+      fits         the task fits before the next meeting (or there's none)
+      short_start  nothing fits (or low energy and nothing is small): a 5-minute start of the first
+      small        low energy: the smallest task of 15 minutes or less
+      bonus        Today's 3 are all done: one more, only if the user feels like it
+      all_done     Today's 3 are all done and nothing else is open (task is None)
+    """
+    task: dict[str, Any] | None
+    minutes: int          # the session length for ▶ Start
+    reason: str
+    estimate: int | None = None   # the task's estimate × the multiplier
+
+
+def _est(task: dict[str, Any], multiplier: float) -> int:
+    return math.ceil((task.get("estimate_min") or DEFAULT_ESTIMATE_MIN) * multiplier)
+
+
+def _session_for(est: int, available: int | None) -> int:
+    """The shortest session choice that covers the estimate (45 at most), within the time available."""
+    m = next((c for c in SESSION_CHOICES if c >= est), SESSION_CHOICES[-1])
+    if available is not None:
+        fitting = [c for c in SESSION_CHOICES if c <= available]
+        m = min(m, fitting[-1]) if fitting else SESSION_CHOICES[0]
+    return m
+
+
+def pick_next(tasks: Iterable[dict[str, Any]], now: datetime, next_fixed_event: datetime | None,
+              multiplier: float = DEFAULT_MULTIPLIER, low_energy: bool = False, *, today: date,
+              done_ids: Iterable[int] = (), exclude: Iterable[int] = ()) -> Pick | None:
+    """
+    What now? decided by code in one step, no LLM. None = nothing is open at all.
+      Candidates: Today's 3 not done yet (in order), then the other open tasks (due soonest, then
+      highest priority, then oldest). When all of Today's 3 are done: the others, as a bonus.
+      exclude: tasks already offered (Something else); once every candidate was offered, start over.
+      Normal: the first candidate, if its estimate × multiplier fits before next_fixed_event; else the
+        shortest one that fits from the same group (Today's 3, or the others); else a 5-minute start
+        of the first.
+      Low energy: the smallest candidate estimated at 15 minutes or less (that fits); else 5 minutes of
+        the first.
+    tasks: open tasks (meetings, steps and blocked tasks are skipped here). done_ids: Today's 3 done today.
+    """
+    done = set(done_ids)
+    far = datetime.max.replace(tzinfo=now.tzinfo)
+    rows = [t for t in tasks
+            if t.get("status", "open") == "open" and t.get("kind", "task") == "task" and not t.get("parent_id")
+            and t["id"] not in done and not (t.get("blocked_until") and t["blocked_until"] > now)]
+    focus = sorted((t for t in rows if t.get("focus_date") == today),
+                   key=lambda t: (t.get("focus_rank") or 99, t["id"]))
+    others = sorted((t for t in rows if t.get("focus_date") != today),
+                    key=lambda t: (t.get("due_at") or far, -t.get("priority", 1), t.get("created_at") or far, t["id"]))
+    order = focus + others
+    if not order:
+        return Pick(None, 0, "all_done") if done else None
+    skip = set(exclude)
+    cands = [t for t in order if t["id"] not in skip] or order
+    focus_ids = {t["id"] for t in focus}
+    bonus = not focus and bool(done)
+
+    available = None
+    if next_fixed_event is not None:
+        available = max(0, int((next_fixed_event - now).total_seconds() // 60))
+
+    def fits(t: dict[str, Any]) -> bool:
+        return available is None or _est(t, multiplier) <= available
+
+    def chosen(t: dict[str, Any], reason: str) -> Pick:
+        est = _est(t, multiplier)
+        return Pick(t, _session_for(est, available), reason, est)
+
+    first = cands[0]
+    if low_energy:
+        def raw(t: dict[str, Any]) -> int:
+            return t.get("estimate_min") or DEFAULT_ESTIMATE_MIN
+
+        small = [t for t in cands if raw(t) <= LOW_ENERGY_MAX_MIN and fits(t)]
+        if small:  # the smallest; a known estimate beats a guessed one
+            return chosen(min(small, key=lambda t: (raw(t), t.get("estimate_min") is None)), "small")
+        return Pick(first, SESSION_CHOICES[0], "short_start", _est(first, multiplier))
+    if fits(first):
+        return chosen(first, "bonus" if bonus else "fits")
+    group = [t for t in cands if (t["id"] in focus_ids) == (first["id"] in focus_ids) and fits(t)]
+    if group:
+        return chosen(min(group, key=lambda t: _est(t, multiplier)), "bonus" if bonus else "fits")
+    return Pick(first, SESSION_CHOICES[0], "short_start", _est(first, multiplier))
+
+
+# ---------------------------------------------------------------- template texts (no LLM)
+
+_TEXTS: dict[str, tuple[str, str]] = {
+    "fits": ("Do this: {step} ({min} min).", "עכשיו: {step} ({min} דק׳)."),
+    "small": ("Something small: {step} ({min} min).", "משהו קטן: {step} ({min} דק׳)."),
+    "short_start_before": ("Before {at}: just 5 minutes of this: {step}.", "עד {at}: רק 5 דקות של זה: {step}."),
+    "short_start": ("Just 5 minutes of this: {step}.", "רק 5 דקות של זה: {step}."),
+    "bonus": ("All of Today's 3 are done. Bonus, only if you feel like it: {step} ({min} min).",
+              "כל שלוש המשימות של היום בוצעו. בונוס, רק אם בא לך: {step} ({min} דק׳)."),
+    "all_done": ("All of Today's 3 are done. Nothing else is open.",
+                 "כל שלוש המשימות של היום בוצעו. אין עוד משהו פתוח."),
+    "nothing": ("Nothing open right now. Tell me what's on your mind and I'll save it.",
+                "אין כרגע משהו פתוח. ספר לי מה על הראש ואשמור את זה."),
+    "session_end": ("⏱ Time's up: {step}. Done, another round, or stop?",
+                    "⏱ הזמן נגמר: {step}. בוצע, עוד סבב, או לעצור?"),
+}
+
+
+def _t(key: str, lang: str, **values: Any) -> str:
+    en, he = _TEXTS[key]
+    return (he if lang == "he" else en).format(**values)
+
+
+def step_of(task: dict[str, Any]) -> str:
+    """The task as one thing to do: its next action, with the title when they differ."""
+    step = task.get("next_action") or task["title"]
+    return step if step == task["title"] else f"{step} — {task['title']}"
+
+
+def what_now_text(pick: Pick | None, lang: str, next_fixed_local: datetime | None = None) -> str:
+    """What now?'s reply. next_fixed_local: the next meeting's local start (names the deadline of a short start)."""
+    if pick is None:
+        return _t("nothing", lang)
+    if pick.task is None:
+        return _t(pick.reason, lang)
+    values = {"step": step_of(pick.task), "min": pick.minutes}
+    if pick.reason == "short_start" and next_fixed_local is not None:
+        return _t("short_start_before", lang, at=f"{next_fixed_local:%H:%M}", **values)
+    return _t(pick.reason, lang, **values)
+
+
+def session_text(kind: str, task: dict[str, Any], minutes: int, lang: str) -> str:
+    """Session messages are templates (no LLM). kind: 'session_end'."""
+    return _t(kind, lang, step=task.get("next_action") or task["title"], min=minutes)
