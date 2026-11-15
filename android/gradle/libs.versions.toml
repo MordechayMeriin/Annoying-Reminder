@@ -1,6 +1,6 @@
 # All versions in one place. Gradle reads this file as "libs.*" in the build scripts.
 [versions]
-agp = "8.13.2"
+agp = "9.5.1"
 kotlin = "2.2.21"
 composeBom = "2025.12.00"
 activityCompose = "1.12.1"
