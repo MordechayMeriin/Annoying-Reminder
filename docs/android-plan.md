@@ -262,6 +262,8 @@ decided and why ("skipped: quiet hours", "skipped: min gap, 12 of 20 min"). When
 you share that log and the real conversation, and we see exactly what happened.
 
 ### Phase A: hello, Android (and Google Play)
+*Built: see [android-phase-a.md](android-phase-a.md) and [android/README.md](../android/README.md) for your setup steps.*
+
 - You: create the Play developer account; switch on internal app sharing on the phone.
 - An `android/` folder in this repo with a Kotlin + Compose project, supporting Android 10 and up.
 - GitHub Actions: build, run the tests, render screenshots, upload to internal testing.

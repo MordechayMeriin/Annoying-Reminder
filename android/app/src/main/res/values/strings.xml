@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Reminder</string>
+    <string name="channel_normal">Normal</string>
+    <string name="channel_normal_desc">Check-ins and everyday reminders.</string>
+    <string name="channel_urgent">Urgent</string>
+    <string name="channel_urgent_desc">Meetings, hard stops and deadlines. A long sound; allow it through Do Not Disturb.</string>
+    <string name="channel_alarm">Alarm</string>
+    <string name="channel_alarm_desc">The full-screen alarm that rings until you answer.</string>
+</resources>
