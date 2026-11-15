@@ -1,6 +1,6 @@
 # The Android app
 
-The native Android version of Annoying Reminder: Kotlin + Jetpack Compose, Android 10 and up. The full
+ProMinder, the native Android version of Annoying Reminder: Kotlin + Jetpack Compose, Android 10 and up. The full
 plan is in [docs/android-plan.md](../docs/android-plan.md); what each phase added is in `docs/android-phase-*.md`.
 
 **Phase A ("hello, Android")** is in: logging in with your Supabase email code, the three notification
@@ -35,12 +35,12 @@ SUPABASE_ANON_KEY=eyJ...
 ```
 
 Then sync Gradle, pick the S9 (USB debugging on) or an emulator, and press Run. The debug build installs as
-`com.annoyingreminder.app.debug`, next to the Play Store version.
+`com.prominder.myapp.debug`, next to the Play Store version.
 
 ### Project layout
 
 ```
-android/app/src/main/java/com/annoyingreminder/app/
+android/app/src/main/java/com/prominder/myapp/
   ReminderApp.kt        starts first: the log, the channels, the login
   MainActivity.kt       the app's screen
   auth/                 Supabase email-code login (plain HTTPS), keeping you logged in
@@ -74,7 +74,7 @@ Without them the app builds but its login screen says it has no Supabase setting
 [play.google.com/console](https://play.google.com/console) → sign up as a **personal** account ($25 once),
 and verify your identity. Then:
 
-1. **Create app**: name *Annoying Reminder*, app (not game), free.
+1. **Create app**: name *ProMinder*, package name `com.prominder.myapp` (permanent), app (not game), free.
 2. **Privacy policy** (App content → Privacy policy):
    `https://github.com/MordechayMeriin/Annoying-Reminder/blob/main/docs/privacy-policy.md`
    (it's live once this branch is merged into `main`).
@@ -92,7 +92,7 @@ Make it in a browser terminal: open [shell.cloud.google.com](https://shell.cloud
 Shell, free; it has Java) and run, choosing your own password:
 
 ```bash
-keytool -genkeypair -v -keystore upload.jks -alias upload -keyalg RSA -keysize 4096 -validity 10000 -dname "CN=Annoying Reminder"
+keytool -genkeypair -v -keystore upload.jks -alias upload -keyalg RSA -keysize 4096 -validity 10000 -dname "CN=ProMinder"
 ```
 
 ```bash
@@ -127,7 +127,7 @@ Google's API can't upload an app's very first build, so:
 1. [Google Cloud console](https://console.cloud.google.com) → a project (any) → enable the **Google Play
    Android Developer API** → IAM → Service accounts → create one (no roles) → Keys → Add key → JSON.
 2. Play Console → **Users and permissions** → Invite new users → the service account's email → under
-   *App permissions* add Annoying Reminder → tick **Release apps to testing tracks** → Invite.
+   *App permissions* add ProMinder → tick **Release apps to testing tracks** → Invite.
 3. GitHub secret `PLAY_SERVICE_ACCOUNT_JSON`: the whole JSON file's contents. Then delete the file.
 
 From then on every merge into `main` that touches `android/` lands on your phone through the Play Store

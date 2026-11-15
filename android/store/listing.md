@@ -8,12 +8,12 @@ and [the privacy policy](../../docs/privacy-policy.md) change with it.
 
 Only needed if the Console asks for it before an internal testing rollout.
 
-- **App name:** Annoying Reminder
+- **App name:** ProMinder
 - **Short description** (80 characters max):
   `A personal ADHD assistant: one tap to start, gentle check-ins, alarms that ring.`
 - **Full description:**
 
-  > Annoying Reminder is a personal assistant for getting things started, kept going and come back to.
+  > ProMinder is a personal assistant for getting things started, kept going and come back to.
   > Say a task once, in plain Hebrew or English, and it works out the first step, proposes Today's 3 every
   > morning, and checks in with one-tap buttons: Start 5 minutes, Done, Later.
   >

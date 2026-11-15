@@ -1,8 +1,8 @@
-# Privacy policy: Annoying Reminder (Android)
+# Privacy policy: ProMinder (Android)
 
 *Last updated: 13 November 2026*
 
-Annoying Reminder is a personal assistant app built and used by one person for their own account. There is
+ProMinder (the Android app of Annoying Reminder) is a personal assistant app built and used by one person for their own account. There is
 no sign-up: only the owner's existing account can log in. This page says what the app does with data.
 
 ## What the app keeps, and where

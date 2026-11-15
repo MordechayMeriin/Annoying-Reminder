@@ -13,5 +13,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "AnnoyingReminder"
+rootProject.name = "ProMinder"
 include(":app")

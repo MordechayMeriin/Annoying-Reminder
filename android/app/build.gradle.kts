@@ -26,12 +26,12 @@ fun setting(name: String, default: String = ""): String =
         ?: default
 
 android {
-    namespace = "com.annoyingreminder.app"
+    namespace = "com.prominder.myapp"
     compileSdk = 36
 
     defaultConfig {
         // The app's permanent identity on Google Play. Never change it after the first upload.
-        applicationId = "com.annoyingreminder.app"
+        applicationId = "com.prominder.myapp"
         minSdk = 29 // Android 10: the Galaxy S9
         targetSdk = 36 // What Google Play currently requires
         // Every upload to Play needs a higher versionCode; CI passes the run number.
@@ -82,7 +82,12 @@ android {
     testOptions {
         unitTests {
             isIncludeAndroidResources = true // Robolectric (screenshot tests) needs the resources
-            all { it.systemProperty("robolectric.pixelCopyRenderMode", "hardware") }
+            all { test ->
+                test.systemProperty("robolectric.pixelCopyRenderMode", "hardware")
+                // Robolectric downloads Android's system jars from inside the test JVM. Pass on a trust store set for
+                // Gradle (e.g. systemProp.javax.net.ssl.trustStoreType=Windows-ROOT behind an HTTPS filter); CI sets none.
+                System.getProperty("javax.net.ssl.trustStoreType")?.let { test.systemProperty("javax.net.ssl.trustStoreType", it) }
+            }
         }
     }
 }
