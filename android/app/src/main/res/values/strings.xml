@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Reminder</string>
+    <string name="app_name">ProMinder</string>
     <string name="channel_normal">Normal</string>
     <string name="channel_normal_desc">Check-ins and everyday reminders.</string>
     <string name="channel_urgent">Urgent</string>

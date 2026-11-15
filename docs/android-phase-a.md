@@ -17,7 +17,7 @@ sat untouched with the screen off (the Doze test). The result shows on the home 
 ## What's new
 
 - **`android/`**: a Gradle project (Kotlin 2.2, Compose, Material 3), `minSdk 29` (Android 10, the S9),
-  `targetSdk 36` (Play's current requirement). Application id `com.annoyingreminder.app`, permanent once
+  `targetSdk 36` (Play's current requirement). Application id `com.prominder.myapp` (renamed from `com.annoyingreminder.app` before the first Play upload), permanent once
   uploaded. Debug builds get `.debug` appended, so they can sit next to the Play version.
 - **Login** (`auth/`): Supabase's email code over plain HTTPS (OkHttp), the same flow and account as the web
   app, with `create_user: false` so nobody else can sign up. The session is kept in private storage
