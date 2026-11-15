@@ -24,6 +24,19 @@ touches `android/`:
 Locally (optional, needs JDK 17 and the Android SDK): `cd android && ./gradlew :app:testDebugUnitTest`,
 `./gradlew :app:recordRoborazziDebug` (screenshots into `app/screenshots/`), `./gradlew :app:assembleDebug`.
 
+### Running it from Android Studio
+
+Open the `android/` folder (not the repo root). For login to work, add the web app's two Supabase values
+to `android/local.properties`, which Android Studio creates and git ignores:
+
+```properties
+SUPABASE_URL=https://xxxx.supabase.co
+SUPABASE_ANON_KEY=eyJ...
+```
+
+Then sync Gradle, pick the S9 (USB debugging on) or an emulator, and press Run. The debug build installs as
+`com.annoyingreminder.app.debug`, next to the Play Store version.
+
 ### Project layout
 
 ```

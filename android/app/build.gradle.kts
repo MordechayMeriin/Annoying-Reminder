@@ -1,4 +1,5 @@
 import java.io.File
+import java.util.Properties
 
 plugins {
     alias(libs.plugins.android.application)
@@ -8,9 +9,21 @@ plugins {
     alias(libs.plugins.roborazzi)
 }
 
-/** A build setting from a Gradle property (-PNAME=…) or an environment variable (CI), else [default]. */
+/** android/local.properties: this machine's own settings (Android Studio keeps sdk.dir there; git ignores it). */
+val localProperties = Properties().apply {
+    val file = rootProject.file("local.properties")
+    if (file.exists()) file.inputStream().use { load(it) }
+}
+
+/**
+ * A build setting from a Gradle property (-PNAME=…), android/local.properties (your PC),
+ * or an environment variable (CI), else [default].
+ */
 fun setting(name: String, default: String = ""): String =
-    (project.findProperty(name) as String?) ?: System.getenv(name) ?: default
+    (project.findProperty(name) as String?)
+        ?: localProperties.getProperty(name)
+        ?: System.getenv(name)
+        ?: default
 
 android {
     namespace = "com.annoyingreminder.app"
