@@ -17,7 +17,7 @@ data class Session(
 }
 
 /** Something went wrong logging in; [message] is written for you, not for a developer. */
-class AuthException(message: String, val kind: Kind = Kind.Other) : Exception(message) {
+class AuthException(message: String, val kind: Kind = Kind.Other, cause: Throwable? = null) : Exception(message, cause) {
     enum class Kind {
         /** No connection or Supabase didn't answer: try again later, don't log out. */
         Network,

@@ -92,6 +92,21 @@ class SupabaseAuthTest {
     }
 
     @Test
+    fun `a refused certificate says so, so a filter's missing certificate is easy to spot`() {
+        val e = SupabaseAuth.networkError(javax.net.ssl.SSLHandshakeException("Trust anchor for certification path not found."))
+        assertEquals(AuthException.Kind.Network, e.kind)
+        assertTrue(e.message!!.contains("certificate"))
+        assertTrue(e.message!!.contains("SSLHandshakeException"))
+    }
+
+    @Test
+    fun `an unknown address says the server can't be found`() {
+        val e = SupabaseAuth.networkError(java.net.UnknownHostException("xyz.supabase.co"))
+        assertEquals(AuthException.Kind.Network, e.kind)
+        assertTrue(e.message!!.contains("Can't find"))
+    }
+
+    @Test
     fun `an unconfigured build says so`() = runTest {
         val e = expectAuthError { SupabaseAuth("", "").sendCode("x@example.com") }
         assertTrue(e.message!!.contains("no Supabase settings"))
