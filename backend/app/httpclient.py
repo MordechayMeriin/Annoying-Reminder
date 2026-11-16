@@ -1,5 +1,5 @@
 """
-One shared httpx.AsyncClient, so calls to OpenRouter and Supabase reuse their TLS connections
+One shared httpx.AsyncClient, so calls to OpenRouter and Cognito reuse their TLS connections
 instead of opening a new one each time. Timeouts are passed per request.
 
 An AsyncClient belongs to the event loop it was created in, so a new one is made if the loop

@@ -4,12 +4,10 @@ import asyncio
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-import httpx
 import pytest
 from fakes import FakeStore, ScriptedLLM
-from fastapi import HTTPException
 
-from app import agent, auth, config, httpclient, notify
+from app import agent, config, notify
 from app.logic import ALARM, NORMAL, clip
 
 TZ = ZoneInfo("Asia/Jerusalem")
@@ -97,51 +95,6 @@ def test_clip_cuts_one_long_word_hard():
     assert len(out) == 20 and out.endswith("…")
 
 
-# ---------------------------------------------------------------- auth: Supabase outages
-
-class FakeAuthClient:
-    def __init__(self, status=None, exc=None, body=None):
-        self.status, self.exc, self.body = status, exc, body or {}
-
-    async def get(self, *a, **kw):
-        if self.exc:
-            raise self.exc
-        return httpx.Response(self.status, json=self.body)
-
-
-def owner_check(monkeypatch, client) -> HTTPException | str:
-    monkeypatch.setattr(httpclient, "client", lambda: client)
-    auth._cache.clear()
-    try:
-        return asyncio.run(auth.require_owner("Bearer tok"))
-    except HTTPException as e:
-        return e
-
-
-@pytest.mark.parametrize("status", [500, 502, 503, 429])
-def test_supabase_errors_are_503_not_a_logout(monkeypatch, status):
-    e = owner_check(monkeypatch, FakeAuthClient(status))
-    assert isinstance(e, HTTPException) and e.status_code == 503
-
-
-def test_supabase_unreachable_is_503(monkeypatch):
-    e = owner_check(monkeypatch, FakeAuthClient(exc=httpx.ConnectTimeout("slow")))
-    assert isinstance(e, HTTPException) and e.status_code == 503
-
-
-@pytest.mark.parametrize("status", [401, 403])
-def test_an_invalid_token_is_401(monkeypatch, status):
-    e = owner_check(monkeypatch, FakeAuthClient(status))
-    assert isinstance(e, HTTPException) and e.status_code == 401
-
-
-def test_the_owner_gets_in(monkeypatch):
-    from app.config import get_settings
-
-    owner = get_settings().owner_user_id
-    assert owner_check(monkeypatch, FakeAuthClient(200, body={"id": owner})) == owner
-
-
 # ---------------------------------------------------------------- browser push switch
 
 class Routing:
@@ -177,15 +130,15 @@ def test_browser_off_without_pushover_still_uses_the_browser(monkeypatch):
 def test_send_push_does_nothing_when_switched_off(monkeypatch):
     s = config.replace(config.get_settings(), browser_push=False)
     monkeypatch.setattr(notify, "get_settings", lambda: s)
-    monkeypatch.setattr(notify.db, "fetch_all", lambda *a, **kw: pytest.fail("no DB read when off"))
+    monkeypatch.setattr(notify, "subscriptions", lambda: pytest.fail("no DB read when off"))
     assert notify.send_push("T", "b") == 0
 
 
 def test_webpush_gets_a_timeout_and_high_urgency(monkeypatch):
     sent = []
-    monkeypatch.setattr(notify.db, "fetch_all",
-                        lambda *a, **kw: [{"id": 1, "endpoint": "https://push.example/1", "p256dh": "k", "auth": "a"},
-                                          {"id": 2, "endpoint": "https://push.example/2", "p256dh": "k", "auth": "a"}])
+    monkeypatch.setattr(notify, "subscriptions",
+                        lambda: [{"endpoint": "https://push.example/1", "p256dh": "k", "auth": "a"},
+                                 {"endpoint": "https://push.example/2", "p256dh": "k", "auth": "a"}])
 
     def fake_webpush(**kw):
         sent.append(kw)

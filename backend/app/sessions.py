@@ -15,74 +15,103 @@ from typing import Any
 
 from . import db
 from .config import get_settings
+from .db import pad
 from .logic import actual_minutes, session_end_at
 
-COLUMNS = "id, task_id, started_at, planned_min, ended_at, outcome, end_sent_at, note_closed_at"
+OUTCOMES = ("done", "another", "stopped", "paused")
+
+SESSION = db.Entity(
+    {"id": "int", "task_id": "int", "started_at": "dt", "planned_min": "int", "ended_at": "dt", "outcome": "str",
+     "end_sent_at": "dt", "note_closed_at": "dt"},
+    # GSI1 lists only open sessions; GSI2 a task's sessions.
+    lambda x: {"pk": "sess", "sk": pad(x["id"]), "g2pk": f"sesstask#{x['task_id']}", "g2sk": pad(x["id"]),
+               **({"g1pk": "sess#open", "g1sk": pad(x["id"])} if x.get("ended_at") is None else {})},
+)
+
+
+def _mutate(session_id: int, change) -> dict[str, Any] | None:
+    return db.mutate(SESSION, "sess", pad(session_id), change)
 
 
 def start(task_id: int, planned_min: int) -> dict[str, Any]:
-    return db.fetch_one(
-        f"insert into sessions (task_id, planned_min) values (%s, %s) returning {COLUMNS}",
-        (task_id, planned_min))
+    if planned_min <= 0 or planned_min % 5:
+        raise ValueError("planned_min must be a positive multiple of 5")
+    row = SESSION.row({})
+    row.update(id=db.next_id("session"), task_id=task_id, started_at=db.now_utc(), planned_min=planned_min)
+    db.put(SESSION, row, new=True)
+    return row
 
 
 def get(session_id: int) -> dict[str, Any] | None:
-    return db.fetch_one(f"select {COLUMNS} from sessions where id = %s", (session_id,))
+    return db.get(SESSION, "sess", pad(session_id))
 
 
 def latest() -> dict[str, Any] | None:
     """The most recent session (open or closed): the focus hold, the breadcrumb and the mid-day skip use it."""
-    return db.fetch_one(f"select {COLUMNS} from sessions order by started_at desc, id desc limit 1")
+    rows = db.query_rows(SESSION, "sess", forward=False, limit=1)
+    return rows[0] if rows else None
 
 
 def open_sessions() -> list[dict[str, Any]]:
     """Sessions without an outcome yet (normally at most one)."""
-    return db.fetch_all(f"select {COLUMNS} from sessions where ended_at is null order by started_at")
+    rows = [get(x["id"]) for x in db.query_rows(SESSION, "sess#open", index="GSI1")]
+    return sorted((x for x in rows if x and x["ended_at"] is None), key=lambda x: (x["started_at"], x["id"]))
 
 
 def latest_for_task(task_id: int) -> dict[str, Any] | None:
-    return db.fetch_one(
-        f"select {COLUMNS} from sessions where task_id = %s order by started_at desc, id desc limit 1", (task_id,))
+    rows = db.query_rows(SESSION, f"sesstask#{task_id}", index="GSI2", forward=False, limit=1)
+    return get(rows[0]["id"]) if rows else None
 
 
 def end(session_id: int, outcome: str, ended_at: datetime | None = None) -> dict[str, Any] | None:
     """Record the outcome. None if the session was already closed (e.g. a second tap)."""
-    return db.fetch_one(
-        f"""update sessions set ended_at = coalesce(%s, now()), outcome = %s
-            where id = %s and ended_at is null returning {COLUMNS}""",
-        (ended_at, outcome, session_id))
+    if outcome not in OUTCOMES:
+        raise ValueError(f"Unknown outcome: {outcome}")
+    when = ended_at or db.now_utc()
+    return _mutate(session_id, lambda x: {**x, "ended_at": when, "outcome": outcome} if x["ended_at"] is None else None)
 
 
 def set_planned(session_id: int, planned_min: int) -> dict[str, Any] | None:
     """A new length for an open session (5/15/25/45 or +5). A sent end check-in will come again at the new end."""
-    return db.fetch_one(
-        f"""update sessions set planned_min = %s, end_sent_at = null
-            where id = %s and ended_at is null returning {COLUMNS}""",
-        (planned_min, session_id))
+    if planned_min <= 0 or planned_min % 5:
+        raise ValueError("planned_min must be a positive multiple of 5")
+    return _mutate(session_id, lambda x: {**x, "planned_min": planned_min, "end_sent_at": None}
+                   if x["ended_at"] is None else None)
 
 
 def claim_end(session_id: int) -> bool:
     """Mark the end check-in as sent (before sending, so an overlapping tick can't send it twice)."""
-    row = db.fetch_one(
-        "update sessions set end_sent_at = now() where id = %s and ended_at is null and end_sent_at is null "
-        "returning id", (session_id,))
-    return row is not None
+    now = db.now_utc()
+    return _mutate(session_id, lambda x: {**x, "end_sent_at": now}
+                   if x["ended_at"] is None and x["end_sent_at"] is None else None) is not None
 
 
 def close_note(session_id: int) -> None:
     """The breadcrumb field was answered or dismissed."""
-    db.execute("update sessions set note_closed_at = now() where id = %s and note_closed_at is null", (session_id,))
+    now = db.now_utc()
+    _mutate(session_id, lambda x: {**x, "note_closed_at": now} if x["note_closed_at"] is None else None)
 
 
 def close_notes_for_task(task_id: int) -> None:
     """A resume note was saved another way (the chat): don't offer the field for this task again."""
-    db.execute("update sessions set note_closed_at = now() where task_id = %s and note_closed_at is null",
-               (task_id,))
+    for x in db.query_rows(SESSION, f"sesstask#{task_id}", index="GSI2"):
+        if x["note_closed_at"] is None:
+            close_note(x["id"])
+
+
+def since(start: datetime) -> list[dict[str, Any]]:
+    """Sessions started since `start`, newest first."""
+    out = []
+    for x in db.query_rows(SESSION, "sess", forward=False, page_size=50):
+        if x["started_at"] < start:
+            break
+        out.append(x)
+    return out
 
 
 def stats_since(start: datetime, now: datetime) -> tuple[int, int]:
     """(sessions, minutes) started since `start`: the wins strip and the evening review."""
-    rows = db.fetch_all(f"select {COLUMNS} from sessions where started_at >= %s", (start,))
+    rows = since(start)
     return len(rows), sum(actual_minutes(r, now) for r in rows)
 
 

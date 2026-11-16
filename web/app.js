@@ -1,9 +1,9 @@
-// Pinned to an exact version: an unpinned "@2" can change under you at any time.
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.118.0";
+import { createAuth } from "./cognito.js";
 
 window.__appLoaded = true; // tells index.html's load watchdog the script arrived
 const cfg = window.APP_CONFIG;
-const supabase = createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY);
+const auth = createAuth({ region: cfg.COGNITO_REGION, clientId: cfg.COGNITO_CLIENT_ID });
+window.addEventListener("storage", (e) => auth._syncFromStorage(e));
 const $ = (id) => document.getElementById(id);
 
 // Labels for messages the assistant sent on its own
@@ -96,7 +96,7 @@ function toast(text, ms = 2500, action = null) {
 
 /** fetch() to our API with the login token; throws on errors (and logs out on 401). */
 async function authFetch(path, options = {}) {
-  const { data } = await supabase.auth.getSession();
+  const { data } = await auth.getSession();
   const token = data.session?.access_token;
   const res = await fetch(cfg.API_URL + path, {
     ...options,
@@ -107,7 +107,7 @@ async function authFetch(path, options = {}) {
     },
   });
   if (res.status === 401) {
-    await supabase.auth.signOut();
+    await auth.signOut();
     showLogin();
     throw new Error("Logged out");
   }
@@ -183,33 +183,30 @@ function showLogin() {
 $("email-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const email = $("email").value.trim();
-  // shouldCreateUser:false → only the existing account (yours) can log in.
-  const { error } = await supabase.auth.signInWithOtp({
-    email,
-    options: { shouldCreateUser: false, emailRedirectTo: location.origin },
-  });
-  if (error) {
-    $("login-msg").textContent = error.message;
+  // Sign-up is off in the user pool: only the existing account (yours) can log in.
+  try {
+    await auth.sendCode(email);
+  } catch (err) {
+    $("login-msg").textContent = err.message;
     return;
   }
-  $("login-msg").textContent = "Check your email: enter the code, or tap the link.";
+  $("login-msg").textContent = "Check your email and enter the code.";
   $("email-form").hidden = true;
   $("code-form").hidden = false;
 });
 
 $("code-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const { error } = await supabase.auth.verifyOtp({
-    email: $("email").value.trim(),
-    token: $("code").value.trim(),
-    type: "email",
-  });
-  if (error) $("login-msg").textContent = error.message;
+  try {
+    await auth.verifyCode($("email").value, $("code").value);
+  } catch (err) {
+    $("login-msg").textContent = err.message;
+  }
 });
 
-$("logout").addEventListener("click", () => supabase.auth.signOut());
+$("logout").addEventListener("click", () => auth.signOut());
 
-supabase.auth.onAuthStateChange((_event, session) => {
+auth.onAuthStateChange((_event, session) => {
   if (session) startApp();
   else showLogin();
 });

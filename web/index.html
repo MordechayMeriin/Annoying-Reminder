@@ -19,7 +19,7 @@
     <button id="loading-retry" class="small" hidden>Retry</button>
   </section>
   <script>
-    // If app.js (or the login library it imports) can't load, say so instead of a blank screen.
+    // If app.js (or the login module it imports) can't load, say so instead of a blank screen.
     setTimeout(function () {
       if (window.__appLoaded) return;
       document.getElementById("loading-msg").textContent = "Couldn't load the app. Check your connection.";

@@ -3,7 +3,7 @@
 ProMinder, the native Android version of Annoying Reminder: Kotlin + Jetpack Compose, Android 10 and up. The full
 plan is in [docs/android-plan.md](../docs/android-plan.md); what each phase added is in `docs/android-phase-*.md`.
 
-**Phase A ("hello, Android")** is in: logging in with your Supabase email code, the three notification
+**Phase A ("hello, Android")** is in: logging in with your email code (Cognito), the three notification
 channels, the first-run checklist, the Diagnostics screen, and test buttons for a notification and an
 alarm. There are no tasks yet: those come with Phase B.
 
@@ -26,12 +26,12 @@ Locally (optional, needs JDK 17 and the Android SDK): `cd android && ./gradlew :
 
 ### Running it from Android Studio
 
-Open the `android/` folder (not the repo root). For login to work, add the web app's two Supabase values
+Open the `android/` folder (not the repo root). For login to work, add the web app's two login values
 to `android/local.properties`, which Android Studio creates and git ignores:
 
 ```properties
-SUPABASE_URL=https://xxxx.supabase.co
-SUPABASE_ANON_KEY=eyJ...
+COGNITO_REGION=us-west-2
+COGNITO_CLIENT_ID=...
 ```
 
 Then sync Gradle, pick the S9 (USB debugging on) or an emulator, and press Run. The debug build installs as
@@ -50,7 +50,7 @@ If it's missing, login says the certificate check failed.
 android/app/src/main/java/com/prominder/myapp/
   ReminderApp.kt        starts first: the log, the channels, the login
   MainActivity.kt       the app's screen
-  auth/                 Supabase email-code login (plain HTTPS), keeping you logged in
+  auth/                 Cognito email-code login (plain HTTPS), keeping you logged in
   notify/               the three channels (normal / urgent / alarm), showing notifications
   alarm/                the test alarm: exact alarm → receiver → full-screen alarm; set again after a restart
   setup/                the first-run checklist: what to allow, and the settings screen for each
@@ -64,17 +64,17 @@ android/store/          Play Store texts, icon and feature graphic
 
 These are yours to do, in a browser. Steps 1–3 can start today; Google's identity check can take a few days.
 
-### 1. Repository variables (Supabase)
+### 1. Repository variables (login)
 
 GitHub → the repo → Settings → Secrets and variables → Actions → **Variables** → New repository variable:
 
 | Name | Value |
 |---|---|
-| `SUPABASE_URL` | The same as the web app's (Render → annoying-reminder-web → Environment) |
-| `SUPABASE_ANON_KEY` | The same as the web app's |
+| `COGNITO_REGION` | The same as the web app's (Render → annoying-reminder-web → Environment) |
+| `COGNITO_CLIENT_ID` | The same as the web app's |
 
 They're public by design (the web app sends them to every browser), so they're variables, not secrets.
-Without them the app builds but its login screen says it has no Supabase settings.
+Without them the app builds but its login screen says it has no login settings.
 
 ### 2. Google Play developer account
 
@@ -163,7 +163,7 @@ in 1 min** with the phone locked, and restarting the phone while a 1-hour alarm 
 
 | Kind | Name | Used for |
 |---|---|---|
-| Variable | `SUPABASE_URL`, `SUPABASE_ANON_KEY` | Login (built into the app) |
+| Variable | `COGNITO_REGION`, `COGNITO_CLIENT_ID` | Login (built into the app) |
 | Variable (optional) | `PLAY_RELEASE_STATUS` | `completed` (default) or `draft` |
 | Secret | `ANDROID_UPLOAD_KEYSTORE_BASE64`, `ANDROID_UPLOAD_KEYSTORE_PASSWORD`, `ANDROID_UPLOAD_KEY_ALIAS`, `ANDROID_UPLOAD_KEY_PASSWORD` | Signing the bundle |
 | Secret | `PLAY_SERVICE_ACCOUNT_JSON` | Uploading to Play |

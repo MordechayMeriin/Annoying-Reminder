@@ -1,9 +1,9 @@
 """
-The success measures of the ADHD-assistant work, for a date range, from the existing tables.
-Read-only: it only runs SELECTs.
+The success measures of the ADHD-assistant work, for a date range, from the stored data.
+Read-only: it only reads.
 
     cd backend
-    export DATABASE_URL=...            # the same value as on Render
+    export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_REGION=... DYNAMODB_TABLE=...   # as on Render
     python scripts/metrics.py                          # the last 28 days
     python scripts/metrics.py --from 2026-10-01 --to 2026-11-01
 
@@ -183,52 +183,24 @@ def compute(*, messages: list[dict[str, Any]], events: list[dict[str, Any]], tas
 
 # ---------------------------------------------------------------- database
 
-class _DB:
-    """Plain read-only queries on DATABASE_URL (no app settings needed)."""
+def load(start: date, end: date, tz: ZoneInfo) -> dict[str, Any]:
+    """Read-only: the messages, events, top-level tasks and sessions the measures need, from DynamoDB."""
+    from app import db, sessions, tasks, thread
 
-    def __init__(self, url: str):
-        import psycopg
-        from psycopg.rows import dict_row
-        self.conn = psycopg.connect(url, row_factory=dict_row, prepare_threshold=None, autocommit=True)
-        self.conn.execute("set default_transaction_read_only = on")
-
-    def fetch_all(self, sql: str, params: tuple = ()) -> list[dict[str, Any]]:
-        return list(self.conn.execute(sql, params).fetchall())
-
-    def fetch_one(self, sql: str, params: tuple = ()) -> dict[str, Any] | None:
-        return self.conn.execute(sql, params).fetchone()
-
-
-def _column_exists(db: _DB, table: str, column: str) -> bool:
-    return db.fetch_one(
-        """select 1 as x from information_schema.columns
-           where table_schema = 'public' and table_name = %s and column_name = %s""", (table, column)) is not None
-
-
-def _table_exists(db: _DB, table: str) -> bool:
-    return db.fetch_one(
-        "select 1 as x from information_schema.tables where table_schema = 'public' and table_name = %s",
-        (table,)) is not None
-
-
-def load(db: _DB, start: date, end: date, tz: ZoneInfo) -> dict[str, Any]:
     t0 = datetime.combine(start, time(), tz)
     t1 = datetime.combine(end, time(), tz) + ACTION_WINDOW
-    focus = ", focus_date" if _column_exists(db, "tasks", "focus_date") else ""
-    sessions = []
-    if _table_exists(db, "sessions"):
-        sessions = db.fetch_all("select task_id, started_at from sessions where started_at >= %s and started_at < %s",
-                                (t0, t1))
+    e0 = t0 - timedelta(days=7)
+    events = []
+    for kind in sorted(tasks.EVENT_KINDS):
+        events += [e for e in db.query_rows(tasks.EVENT, f"ev#{kind}", index="GSI1", sk_op="between",
+                                            sk=(db.ts(e0), db.ts(t1)))
+                   if e0 <= e["created_at"] < t1]
+    all_tasks = [t for status in tasks.STATUSES for t in db.query_rows(tasks.TASK, f"task#{status}", index="GSI1")]
     return {
-        "messages": db.fetch_all(
-            """select id, role, kind, task_ids, created_at, content from messages
-               where created_at >= %s and created_at < %s order by created_at""", (t0, t1)),
-        "events": db.fetch_all(
-            """select task_id, kind, note, created_at from task_events
-               where created_at >= %s and created_at < %s order by created_at""", (t0 - timedelta(days=7), t1)),
-        "tasks": db.fetch_all(
-            f"select id, kind, status, due_at, created_at, completed_at{focus} from tasks where parent_id is null"),
-        "sessions": sessions,
+        "messages": [m for m in thread.all_since(t0) if m["created_at"] < t1],
+        "events": sorted(events, key=lambda e: e["created_at"]),
+        "tasks": [t for t in all_tasks if t["parent_id"] is None],
+        "sessions": [x for x in reversed(sessions.since(t0)) if x["started_at"] < t1],
     }
 
 
@@ -242,10 +214,9 @@ def main(argv: list[str] | None = None) -> None:
     tz = ZoneInfo(a.tz)
     end = a.end or datetime.now(tz).date()
     start = a.start or end - timedelta(days=28)
-    url = os.environ.get("DATABASE_URL", "").strip()
-    if not url:
-        sys.exit("Set DATABASE_URL (the same value as on Render).")
-    data = load(_DB(url), start, end, tz)
+    if not os.environ.get("AWS_ACCESS_KEY_ID"):
+        sys.exit("Set AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION and DYNAMODB_TABLE (the values on Render).")
+    data = load(start, end, tz)
     print("\n".join(compute(start=start, end=end, tz=tz, **data).lines()))
 
 

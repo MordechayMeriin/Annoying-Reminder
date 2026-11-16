@@ -3,15 +3,15 @@
 # These values are public by design (they end up in the browser); secrets never go here.
 set -eu
 
-: "${SUPABASE_URL:?Set SUPABASE_URL on the static site}"
-: "${SUPABASE_ANON_KEY:?Set SUPABASE_ANON_KEY on the static site}"
+: "${COGNITO_REGION:?Set COGNITO_REGION on the static site}"
+: "${COGNITO_CLIENT_ID:?Set COGNITO_CLIENT_ID on the static site}"
 : "${API_URL:?Set API_URL on the static site}"
 
 cat > config.js <<EOF
 // Generated at build time by build-config.sh — do not edit or commit.
 window.APP_CONFIG = {
-  SUPABASE_URL: "${SUPABASE_URL}",
-  SUPABASE_ANON_KEY: "${SUPABASE_ANON_KEY}",
+  COGNITO_REGION: "${COGNITO_REGION}",
+  COGNITO_CLIENT_ID: "${COGNITO_CLIENT_ID}",
   API_URL: "${API_URL}",
 };
 EOF

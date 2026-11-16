@@ -1,3 +1,7 @@
+-- NOTE: the app now stores its data in DynamoDB (backend/app/db.py). This is the old Supabase schema,
+-- kept only so backend/scripts/migrate_from_postgres.py can copy an existing database. See
+-- docs/aws-migration.md.
+--
 -- Annoying Reminder — Supabase schema (full, current state)
 -- New project: SQL Editor → New query → paste → Run.
 -- Existing project: run the files in db/migrations/ in order instead (they are idempotent).

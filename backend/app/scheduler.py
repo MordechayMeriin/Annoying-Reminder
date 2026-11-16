@@ -264,11 +264,11 @@ def _after_contact(task: dict, now: datetime, followup: datetime | None, alarmed
 
 def claim_job(job: str, run_date) -> bool:
     """Insert-or-skip, so a job runs at most once per day even if ticks overlap."""
-    row = db.fetch_one(
-        "insert into job_runs (job, run_date) values (%s, %s) on conflict do nothing returning job",
-        (job, run_date),
-    )
-    return row is not None
+    return db.put(JOB_RUN, {"job": job, "run_date": run_date, "ran_at": db.now_utc()}, new=True)
+
+
+JOB_RUN = db.Entity({"job": "str", "run_date": "date", "ran_at": "dt"},
+                    lambda r: {"pk": "job", "sk": f"{r['job']}#{r['run_date'].isoformat()}"})
 
 
 def due_daily_jobs() -> list[str]:

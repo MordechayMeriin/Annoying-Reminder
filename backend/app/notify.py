@@ -75,7 +75,7 @@ def send_push(title: str, body: str, *, task_id: int | None = None, message_id: 
             payload["token"] = make_action_token(task_id, s.action_secret)
 
     sent = 0
-    for sub in db.fetch_all("select id, endpoint, p256dh, auth from push_subscriptions"):
+    for sub in subscriptions():
         try:
             webpush(
                 subscription_info={"endpoint": sub["endpoint"], "keys": {"p256dh": sub["p256dh"], "auth": sub["auth"]}},
@@ -92,13 +92,27 @@ def send_push(title: str, body: str, *, task_id: int | None = None, message_id: 
         except WebPushException as e:
             status = getattr(e.response, "status_code", None)
             if status in (404, 410):  # subscription expired or revoked → forget it
-                db.execute("delete from push_subscriptions where id = %s", (sub["id"],))
-                log.info("Removed expired push subscription %s", sub["id"])
+                db.delete("push", sub["endpoint"])
+                log.info("Removed an expired push subscription")
             else:
                 log.warning("Push failed (%s): %s", status, e)
         except requests.RequestException as e:  # timeouts and network errors: try the next browser
             log.warning("Push failed (%s): %s", type(e).__name__, e)
     return sent
+
+
+PUSH_SUBSCRIPTION = db.Entity({"endpoint": "str", "p256dh": "str", "auth": "str", "created_at": "dt"},
+                              lambda p: {"pk": "push", "sk": p["endpoint"]})
+
+
+def subscriptions() -> list[dict]:
+    """Browser push subscriptions (one per device / browser)."""
+    return db.query_rows(PUSH_SUBSCRIPTION, "push")
+
+
+def subscribe(endpoint: str, p256dh: str, auth: str) -> None:
+    """Save a browser's subscription (a new key for a known endpoint replaces the old one)."""
+    db.put(PUSH_SUBSCRIPTION, {"endpoint": endpoint, "p256dh": p256dh, "auth": auth, "created_at": db.now_utc()})
 
 
 PUSHOVER_API = "https://api.pushover.net/1"
