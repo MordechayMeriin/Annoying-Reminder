@@ -15,6 +15,7 @@ import com.prominder.myapp.ui.theme.Palette
 import com.prominder.myapp.ui.theme.ReminderTheme
 import kotlinx.coroutines.launch
 
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
