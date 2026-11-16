@@ -37,6 +37,13 @@ SUPABASE_ANON_KEY=eyJ...
 Then sync Gradle, pick the S9 (USB debugging on) or an emulator, and press Run. The debug build installs as
 `com.prominder.myapp.debug`, next to the Play Store version.
 
+**Behind an HTTPS filter (NetFree, Rimon, etc.).** The filter reads secure traffic by putting its own
+certificate in the middle. The app trusts certificates installed on the device
+(`res/xml/network_security_config.xml`), but the certificate must be installed there: on the phone it
+usually already is (the filter's setup does it), while an emulator starts without it. Install it in the
+emulator under Settings → Security → Encryption & credentials → Install a certificate → CA certificate.
+If it's missing, login says the certificate check failed.
+
 ### Project layout
 
 ```

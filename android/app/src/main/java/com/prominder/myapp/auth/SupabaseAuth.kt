@@ -1,6 +1,9 @@
 package com.prominder.myapp.auth
 
 import java.io.IOException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
+import javax.net.ssl.SSLException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
@@ -87,7 +90,7 @@ class SupabaseAuth(
                     text
                 }
             } catch (e: IOException) {
-                throw AuthException("Can't reach Supabase. Check the internet connection and try again.", AuthException.Kind.Network)
+                throw networkError(e)
             }
         }
 
@@ -106,6 +109,25 @@ class SupabaseAuth(
     companion object {
         private val JSON = Json { ignoreUnknownKeys = true }
         private val JSON_TYPE = "application/json".toMediaType()
+
+        /**
+         * Says what kind of connection failure it was, since "no internet", "address not found" and
+         * "certificate refused" need different fixes. The original error stays attached as the cause.
+         */
+        internal fun networkError(e: IOException): AuthException {
+            val message = when (e) {
+                is SSLException ->
+                    "The secure connection to Supabase was refused (certificate check failed). " +
+                        "If a filter or VPN is on (NetFree, Rimon, etc.), install its certificate on this device and try again."
+                is UnknownHostException ->
+                    "Can't find Supabase's server. Check the internet connection, or whether a filter is blocking supabase.co."
+                is SocketTimeoutException ->
+                    "Supabase didn't answer in time. Check the internet connection and try again."
+                else -> "Can't reach Supabase. Check the internet connection and try again."
+            }
+            val detail = listOfNotNull(e::class.java.simpleName, e.message).joinToString(": ")
+            return AuthException("$message\n($detail)", AuthException.Kind.Network, e)
+        }
 
         /** Turns Supabase's error answer into a sentence for the login screen. */
         internal fun errorFor(status: Int, body: String): AuthException {

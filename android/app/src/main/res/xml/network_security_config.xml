@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Trust certificates the user installed on the phone, as well as Android's built-in ones.
+
+  HTTPS-filtering services (NetFree, Rimon and similar, often running as a VPN) read secure traffic by
+  putting their own certificate in the middle, which the user installs on the phone. Chrome accepts it,
+  so the web app works; an app accepts it only when it says so here. Without this the login fails with
+  a certificate error ("Can't reach Supabase") on a filtered connection.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
