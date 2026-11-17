@@ -65,11 +65,93 @@ class ScreenshotTest {
     fun home() = shot("4_home") {
         HomeScreen(
             HomeState(
-                email = "me@example.com", setupDone = 2, setupTotal = 4,
-                pendingAlarm = "Test alarm set for 15:04:00",
-                lastAlarmResult = "Set for 2026-11-13 14:00:00, rang on time",
+                focus = listOf(
+                    FocusItem(1, "Write the quarterly report", "Today 15:00 · Important · ~25 min", done = false),
+                    FocusItem(2, "Call the plumber", "", done = true),
+                    FocusItem(3, "Book flights", "Tomorrow 09:00", done = false),
+                ),
+                messages = listOf(
+                    ChatItem(1, "assistant", "morning", "Good morning! Today's 3: the report, the plumber and the flights. " +
+                        "Start with the report's outline?", "07:30", day = "Today"),
+                    ChatItem(2, "user", "chat", "yes, after coffee", "07:41"),
+                    ChatItem(3, "user", "event", "[Marked done: Call the plumber]", "09:12"),
+                    ChatItem(4, "user", "event", "[Later: Book flights — next check-in Tue 12:00]", "10:00"),
+                ),
+                openCount = 12, setupDone = 3, setupTotal = 4,
             ),
-            {}, {}, {}, {}, {}, {}, {}, {},
+            {}, {}, {}, {}, {}, {}, {}, {}, {},
+        )
+    }
+
+    @Test
+    fun home_empty() = shot("4b_home_empty") {
+        HomeScreen(HomeState(setupDone = 4, setupTotal = 4, notice = "Later: next check-in Today 12:00"), {}, {}, {}, {}, {}, {}, {}, {}, {})
+    }
+
+    @Test
+    fun handover() = shot("8_handover") {
+        HandoverScreen(HandoverState(alreadyHandedOver = false), {}, {})
+    }
+
+    @Test
+    fun handover_restore() = shot("8b_handover_restore") {
+        HandoverScreen(HandoverState(alreadyHandedOver = true, lastBackup = "Today 14:02", message = "Can't reach the server."), {}, {})
+    }
+
+    private val tasks = listOf(
+        TaskItem(1, "Pay the electricity bill", "Yesterday 18:00", overdue = true),
+        TaskItem(2, "Write the quarterly report", "Today 15:00 · Important", inFocus = true),
+        TaskItem(3, "Standup", "📅 Meeting · Today 16:45 · 🔁 Sun–Thu"),
+        TaskItem(4, "Outline", "", parent = "Step of: Write the quarterly report"),
+        TaskItem(5, "Stop work", "⛔ Hard stop · Today 19:00", canBeDone = false),
+    )
+
+    @Test
+    fun tasks_today() = shot("9_tasks_today") {
+        TasksScreen(TasksState(0, tasks.take(4), listOf(TaskItem(6, "Dentist", "📅 Meeting · Thu 19 Nov 10:00")), tasks), {}, {}, {}, {}, {})
+    }
+
+    @Test
+    fun tasks_all() = shot("9b_tasks_all") {
+        TasksScreen(TasksState(1, emptyList(), emptyList(), tasks), {}, {}, {}, {}, {})
+    }
+
+    @Test
+    fun task_detail() = shot("10_task") {
+        TaskDetailScreen(
+            TaskDetailState(
+                id = 2, title = "Write the quarterly report", meta = "Today 15:00 · Important · ~25 min",
+                nextAction = "Open the doc and write three headings", resumeNote = "Stopped at the intro",
+                description = "For Dana. Numbers are in the shared sheet.", inFocus = true,
+                steps = listOf(TaskItem(4, "Outline", ""), TaskItem(7, "Charts", "")),
+                history = listOf(
+                    HistoryItem("Postponed", "Today 10:00", "later (button)"),
+                    HistoryItem("▶ Session started", "Yesterday 16:00"),
+                ),
+            ),
+            {}, {}, {}, {}, {}, {}, {}, {}, {}, {},
+        )
+    }
+
+    @Test
+    fun task_form() = shot("11_task_form") {
+        TaskFormScreen(
+            "New task",
+            com.prominder.myapp.data.TaskForm("Dentist", kind = "meeting",
+                dueAt = java.time.ZonedDateTime.of(2026, 11, 19, 10, 0, 0, 0, ZoneId.of("Asia/Jerusalem")).toInstant(), recurrence = null),
+            ZoneId.of("Asia/Jerusalem"), { null }, {},
+        )
+    }
+
+    @Test
+    fun settings() = shot("12_settings") {
+        val s = com.prominder.myapp.data.AppSettings(mapOf("morning_time" to "08:00"))
+        SettingsScreen(
+            com.prominder.myapp.data.SettingSpecs.ALL.map {
+                SettingItem(it.key, it.label, it.help, it.group, it.kind, s.raw(it.key), it.key !in s.overrides,
+                    com.prominder.myapp.data.SettingSpecs.canonical(it, it.default))
+            },
+            listOf(1L to "Shorter messages"), { _, _ -> null }, {}, {},
         )
     }
 
@@ -91,7 +173,8 @@ class ScreenshotTest {
                 "2026-11-13 14:00:01 [alarm] Test alarm rang. Set for 2026-11-13 14:00:00, rang on time",
                 "2026-11-13 14:00:09 [alarm] Alarm dismissed from the alarm screen",
             ),
-            onShare = {}, onClear = {}, onBack = {},
+            onShare = {}, onClear = {}, onBack = {}, onSyncNow = {},
+            tests = PhoneTests(pendingAlarm = "Test alarm set for 15:04:00", lastAlarmResult = "Set for 2026-11-13 14:00:00, rang on time"),
         )
     }
 

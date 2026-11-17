@@ -276,6 +276,8 @@ you share that log and the real conversation, and we see exactly what happened.
 untouched with the screen off for an hour (that's the Doze test).
 
 ### Phase B: the handover — your data moves to the phone
+*Built: see [android-phase-b.md](android-phase-b.md). The backup went to the existing backend (Render + DynamoDB) instead of a Lambda + Supabase; the reasons are there.*
+
 - Room schema mirroring `db/schema.sql`.
 - Supabase: migration `010` adds `updated_at` to every table. Additive, so the old server could still
   read the data in an emergency.

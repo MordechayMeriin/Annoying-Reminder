@@ -1,0 +1,271 @@
+package com.prominder.myapp.ui
+
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import com.prominder.myapp.data.AppSettings
+import com.prominder.myapp.data.DayMath
+import com.prominder.myapp.data.EventRow
+import com.prominder.myapp.data.MessageRow
+import com.prominder.myapp.data.OPEN
+import com.prominder.myapp.data.SettingException
+import com.prominder.myapp.data.SettingSpecs
+import com.prominder.myapp.data.Store
+import com.prominder.myapp.data.TaskForm
+import com.prominder.myapp.data.TaskLists
+import com.prominder.myapp.data.TaskRow
+import com.prominder.myapp.data.Times
+import com.prominder.myapp.data.startOfDay
+import com.prominder.myapp.diag.Diag
+import java.time.Instant
+import java.time.ZoneId
+import kotlinx.coroutines.launch
+
+/*
+ * The screens wired to the phone's database: each route watches the rows it shows (so a change anywhere shows at
+ * once) and turns taps into Store calls. The screens themselves only get plain values (and are screenshot-tested).
+ */
+
+@Composable
+private fun settingsOf(store: Store): AppSettings =
+    remember(store) { store.watchSettings() }.collectAsState(AppSettings.DEFAULTS).value
+
+@Composable
+fun HomeRoute(
+    store: Store,
+    setupDone: Int,
+    setupTotal: Int,
+    notice: String?,
+    onNotice: (String?) -> Unit,
+    go: (Route) -> Unit,
+    onOpenChecklist: () -> Unit,
+    onLogout: () -> Unit,
+) {
+    val scope = rememberCoroutineScope()
+    val settings = settingsOf(store)
+    val zone = settings.zone
+    val now = store.now()
+    val day = store.focusDay(settings).toString()
+    val open by remember { store.dao.watchOpenTasks() }.collectAsState(emptyList())
+    val focusRows by remember(day) { store.dao.watchFocusTasks(day) }.collectAsState(emptyList())
+    val todayStart = Times.format(now.atZone(zone).startOfDay())
+    val doneEvents by remember(todayStart) { store.dao.watchDoneSince(todayStart) }.collectAsState(emptyList())
+    val messages by remember { store.dao.watchLatestMessages(MESSAGES_SHOWN) }.collectAsState(emptyList())
+    var picking by rememberSaveable { mutableStateOf(false) }
+
+    val focus = TaskLists.focus(focusRows, day)
+    val done = TaskLists.doneToday(focus, doneEvents)
+    HomeScreen(
+        state = HomeState(
+            focus = focus.map { FocusItem(it.id, it.title, Format.taskMeta(it, zone, now), it.id in done) },
+            messages = chatItems(messages, zone, now),
+            openCount = open.count { it.parentId == null },
+            setupDone = setupDone,
+            setupTotal = setupTotal,
+            notice = notice,
+        ),
+        onOpenTasks = { go(Route.Tasks) },
+        onOpenTask = { go(Route.Task(it)) },
+        onDone = { id -> scope.launch { store.complete(id); onNotice("Done ✓") } },
+        onPickFocus = { picking = true },
+        onNewTask = { go(Route.NewTask()) },
+        onOpenSettings = { go(Route.Settings) },
+        onOpenChecklist = onOpenChecklist,
+        onOpenDiagnostics = { go(Route.Diagnostics) },
+        onLogout = onLogout,
+    )
+    if (picking) {
+        val candidates = TaskLists.all(open.filter { it.kind == "task" }).map { it.id to it.title }
+        FocusPickerDialog(
+            candidates = candidates,
+            selected = focus.filter { it.status == OPEN }.map { it.id },
+            onSave = { ids -> picking = false; scope.launch { store.setFocus(ids, store.focusDay(store.settings())) } },
+            onDismiss = { picking = false },
+        )
+    }
+}
+
+/** The chat, with a day separator on each day's first message. */
+internal fun chatItems(rows: List<MessageRow>, zone: ZoneId, now: Instant): List<ChatItem> {
+    var lastDay: java.time.LocalDate? = null
+    return rows.map { m ->
+        val at = Times.parseOrNull(m.createdAt) ?: now
+        val d = at.atZone(zone).toLocalDate()
+        val sep = if (d != lastDay) Format.day(at, zone, now) else null
+        lastDay = d
+        ChatItem(m.id, m.role, m.kind, m.content, Format.clock(at, zone), sep)
+    }
+}
+
+@Composable
+fun TasksRoute(store: Store, go: (Route) -> Unit, onBack: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    val settings = settingsOf(store)
+    val zone = settings.zone
+    val now = store.now()
+    val open by remember { store.dao.watchOpenTasks() }.collectAsState(emptyList())
+    var tab by rememberSaveable { mutableStateOf(0) }
+    val day = store.focusDay(settings).toString()
+    val titles = open.associate { it.id to it.title }
+    val endOfToday = DayMath.dayBounds(now.atZone(zone)).second
+    fun item(t: TaskRow) = taskItem(t, zone, now, day, titles)
+    TasksScreen(
+        state = TasksState(
+            tab = tab,
+            today = TaskLists.today(open, endOfToday).map(::item),
+            upcoming = TaskLists.upcoming(open, endOfToday).map(::item),
+            all = TaskLists.all(open).map(::item),
+        ),
+        onTab = { tab = it },
+        onOpen = { go(Route.Task(it)) },
+        onDone = { id -> scope.launch { store.complete(id) } },
+        onNew = { go(Route.NewTask()) },
+        onBack = onBack,
+    )
+}
+
+internal fun taskItem(t: TaskRow, zone: ZoneId, now: Instant, focusDay: String, titles: Map<Long, String>) = TaskItem(
+    id = t.id,
+    title = t.title,
+    meta = Format.taskMeta(t, zone, now),
+    overdue = TaskLists.overdue(t, now),
+    inFocus = t.focusDate == focusDay,
+    parent = t.parentId?.let { p -> titles[p]?.let { "Step of: $it" } ?: "A step" },
+    canBeDone = t.kind != "fence",
+)
+
+@Composable
+fun TaskDetailRoute(store: Store, id: Long, onNotice: (String?) -> Unit, go: (Route) -> Unit, onBack: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    val settings = settingsOf(store)
+    val zone = settings.zone
+    val now = store.now()
+    val task by remember(id) { store.dao.watchTask(id) }.collectAsState(null)
+    val steps by remember(id) { store.dao.watchSubtasks(id) }.collectAsState(emptyList())
+    val events by remember(id) { store.dao.watchEvents(id, 30) }.collectAsState(emptyList())
+    val t = task ?: run {
+        Muted("Loading…")
+        return
+    }
+    val parent by remember(t.parentId) { store.dao.watchTask(t.parentId ?: -1) }.collectAsState(null)
+    val parentTitle = parent?.title
+    val day = store.focusDay(settings).toString()
+    TaskDetailScreen(
+        state = TaskDetailState(
+            id = t.id,
+            title = t.title,
+            meta = Format.taskMeta(t, zone, now),
+            status = t.status,
+            kind = t.kind,
+            parent = parentTitle?.let { "Step of: $it" },
+            nextAction = t.nextAction,
+            blocked = t.blockedReason,
+            resumeNote = t.resumeNote,
+            description = t.description.orEmpty(),
+            inFocus = t.focusDate == day,
+            steps = steps.map { taskItem(it, zone, now, day, emptyMap()).copy(parent = null) },
+            history = events.map { historyItem(it, zone, now) },
+        ),
+        onSaveDescription = { text -> scope.launch { store.setDescription(id, text) } },
+        onDone = { scope.launch { store.complete(id); onNotice("Done ✓: ${t.title}"); onBack() } },
+        onLater = {
+            scope.launch {
+                val at = store.later(id)
+                onNotice(at?.let { "Later: next check-in ${Format.time(it, zone, store.now())}" })
+                onBack()
+            }
+        },
+        onToggleFocus = {
+            scope.launch {
+                if (!store.toggleFocus(id)) onNotice("Today's 3 is full. Take one out first.")
+            }
+        },
+        onEdit = { go(Route.EditTask(id)) },
+        onCancelTask = { scope.launch { store.cancel(id); onNotice("Cancelled: ${t.title}"); onBack() } },
+        onAddStep = { title -> scope.launch { store.create(TaskForm(title.trim()), parentId = id) } },
+        onOpenStep = { go(Route.Task(it)) },
+        onDoneStep = { sid -> scope.launch { store.complete(sid) } },
+        onBack = onBack,
+    )
+}
+
+private fun historyItem(e: EventRow, zone: ZoneId, now: Instant) = HistoryItem(
+    label = Format.EVENT_LABELS[e.kind] ?: e.kind,
+    time = Format.time(e.createdAt, zone, now).orEmpty(),
+    note = listOfNotNull(e.note, e.avoidReason).joinToString(" · ").ifEmpty { null },
+)
+
+@Composable
+fun TaskFormRoute(store: Store, editId: Long?, parentId: Long?, onSaved: (Long) -> Unit, onBack: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    val settings = settingsOf(store)
+    // Loaded once (not watched): the form edits its own copy.
+    val loaded by produceState<TaskRow?>(null, editId) { value = editId?.let { store.dao.task(it) } }
+    val existing = loaded
+    if (editId != null && existing == null) {
+        Muted("Loading…")
+        return
+    }
+    val initial = existing?.let {
+        TaskForm(it.title, it.kind, it.priority, Times.parseOrNull(it.dueAt), it.recurrence, it.nextAction, it.description, it.estimateMin)
+    } ?: TaskForm("")
+    TaskFormScreen(
+        heading = when {
+            existing != null -> "Edit task"
+            parentId != null -> "New step"
+            else -> "New task"
+        },
+        initial = initial,
+        zone = settings.zone,
+        onSave = { form ->
+            // The form checked it already; the store checks again and throws only on a bug.
+            scope.launch {
+                try {
+                    val row = if (existing != null) store.edit(existing.id, form) else store.create(form, parentId)
+                    Diag.log("data", if (existing != null) "Task ${existing.id} edited" else "Task ${row?.id} added")
+                    row?.let { onSaved(it.id) }
+                } catch (e: IllegalArgumentException) {
+                    Diag.log("data", "Task not saved: ${e.message}")
+                }
+            }
+            null
+        },
+        onBack = onBack,
+    )
+}
+
+@Composable
+fun SettingsRoute(store: Store, onBack: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    val settings = settingsOf(store)
+    val prefs by remember { store.dao.watchPreferences() }.collectAsState(emptyList())
+    val items = SettingSpecs.ALL.map { spec ->
+        val default = SettingSpecs.canonical(spec, spec.default)
+        SettingItem(spec.key, spec.label, spec.help, spec.group, spec.kind, settings.raw(spec.key), spec.key !in settings.overrides, default)
+    }
+    SettingsScreen(
+        items = items,
+        preferences = prefs.map { it.id to it.text },
+        onSave = { key, raw ->
+            // Checked here first, so a wrong value is reported in the dialog; saved in the background.
+            val spec = SettingSpecs.BY_KEY.getValue(key)
+            try {
+                raw?.let { SettingSpecs.canonical(spec, it) }
+                scope.launch { store.saveSetting(key, raw) }
+                null
+            } catch (e: SettingException) {
+                e.message
+            }
+        },
+        onDeletePreference = { id -> scope.launch { store.deletePreference(id) } },
+        onBack = onBack,
+    )
+}
+
+private const val MESSAGES_SHOWN = 300

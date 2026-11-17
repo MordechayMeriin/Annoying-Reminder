@@ -3,6 +3,7 @@ Annoying Reminder API.
 
 Public:   GET  /health, GET /config/push
 Login:    POST /auth/google          (the owner's Google ID token → the app's own login token)
+Phone:    GET /sync/status, POST /sync/restore, POST /sync/upload   (the Android app's backup, sync.py)
 Cron:     POST /tick                (X-Cron-Secret header)
 Buttons:  POST /actions             (signed token from the notification: ▶ Start / ✓ Done / ▶ Another round)
 Owner:    everything else           (that login token, or a Cognito login + OWNER_USER_ID check), incl. GET/PATCH /settings,
@@ -11,6 +12,9 @@ Owner:    everything else           (that login token, or a Cognito login + OWNE
           GET /preferences, DELETE /preferences/{id}
 
 Writing in the chat or acting on a task stops any repeating Pushover alarm (you've seen it).
+
+After the handover (the phone's first restore, see sync.py) the phone owns the data: /tick does nothing and
+every web-app endpoint answers 409, so the two apps can't drift apart.
 
 POST /chat answers with a short Server-Sent Events stream of progress, so the app can show what's
 happening: received → thinking → tool … → thinking → done (or error). The reply itself arrives whole
@@ -25,14 +29,14 @@ import time
 from collections import deque
 from contextlib import asynccontextmanager
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import (actions, agent, auth, db, httpclient, notify, preferences, prompting, scheduler, sessions, tasks, thread,
-               user_settings)
+from . import (actions, agent, auth, db, httpclient, notify, preferences, prompting, scheduler, sessions, sync, tasks,
+               thread, user_settings)
 from .auth import require_cron, require_owner
 from .config import SPECS, get_settings
 from .llm import LLMLimitReached, LLMUnavailable
@@ -57,12 +61,31 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Annoying Reminder", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
+
+# Still open after the handover: the phone's login and backup, and the timer (which then does nothing).
+_OPEN_AFTER_HANDOVER = ("/health", "/config/push", "/auth/google", "/sync/", "/tick")
+HANDED_OVER = ("Your data now lives in the ProMinder Android app, so this web app is switched off. "
+               "Use the app on your phone.")
+
+
+@app.middleware("http")
+async def web_app_switched_off(request: Request, call_next):
+    """After the handover, the web app's endpoints refuse (see sync.py), so nothing writes a second copy."""
+    path = request.url.path
+    if (request.method != "OPTIONS" and not path.startswith(_OPEN_AFTER_HANDOVER)
+            and await run_in_threadpool(sync.handed_over)):
+        return JSONResponse({"detail": HANDED_OVER}, status_code=409)
+    return await call_next(request)
+
+
+# Added last, so it wraps the check above: the web app can read the 409's message.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[settings.web_origin],
     allow_methods=["GET", "POST", "PATCH", "DELETE"],
     allow_headers=["Authorization", "Content-Type"],
 )
+
 
 
 # ---------------------------------------------------------------- public
@@ -105,12 +128,48 @@ async def auth_google(body: GoogleSignInIn):
     return {"token": token, "expiresAt": expires, "email": email}
 
 
+# ---------------------------------------------------------------- the phone's backup (sync.py)
+
+class RestoreIn(BaseModel):
+    handover: bool = False
+    device: str = Field(default="", max_length=200)
+
+
+class UploadIn(BaseModel):
+    device: str = Field(default="", max_length=200)
+    tables: dict[str, list[dict]] = Field(default_factory=dict)
+    # table → keys: ids; a setting's key; a focus date; an event's [task_id, created_at, rid]
+    deletes: dict[str, list] = Field(default_factory=dict)
+
+
+@app.get("/sync/status", dependencies=[Depends(require_owner)])
+def sync_status():
+    return sync.status()
+
+
+@app.post("/sync/restore", dependencies=[Depends(require_owner)])
+def sync_restore(body: RestoreIn):
+    """Everything the phone keeps, for an empty phone. handover=true: from now on the phone owns the data."""
+    return sync.restore(handover=body.handover, device=body.device)
+
+
+@app.post("/sync/upload", dependencies=[Depends(require_owner)])
+def sync_upload(body: UploadIn):
+    """What the phone changed since its last upload. The phone's copy wins."""
+    try:
+        return sync.upload(body.tables, body.deletes, device=body.device)
+    except sync.SyncError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from None
+
+
 # ---------------------------------------------------------------- cron
 
 @app.post("/tick", dependencies=[Depends(require_cron)])
 async def tick(background: BackgroundTasks):
     # Deciding WHEN is fast and synchronous; writing the message (LLM) runs after the response,
     # so cron-job.org never times out.
+    if await run_in_threadpool(sync.handed_over):
+        return {"handedOver": True, "contacting": [], "sessionEnds": [], "jobs": []}   # the phone reminds now
     await run_in_threadpool(user_settings.load)
     await run_in_threadpool(preferences.load)
     task_ids = await run_in_threadpool(scheduler.plan_tick)

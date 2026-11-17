@@ -5,7 +5,13 @@ plan is in [docs/android-plan.md](../docs/android-plan.md); what each phase adde
 
 **Phase A ("hello, Android")** is in: signing in with Google (only your account gets in), the three notification
 channels, the first-run checklist, the Diagnostics screen, and test buttons for a notification and an
-alarm. There are no tasks yet: those come with Phase B.
+alarm.
+
+**Phase B (the handover)** is in: the phone keeps your tasks, Today's 3, the chat history and your settings in its
+own database, works offline, and backs them up to the server a few minutes after each change. The first time you
+open it, *Move your data to this phone* does the handover (the web app switches off); after a reinstall the same
+screen restores the backup. Details: [docs/android-phase-b.md](../docs/android-phase-b.md). Reminders come back in
+Phase C, the assistant in Phase D.
 
 ## How it's built
 
@@ -54,11 +60,15 @@ android/app/src/main/java/com/prominder/myapp/
   ReminderApp.kt        starts first: the log, the channels, the login
   MainActivity.kt       the app's screen
   auth/                 Google sign-in (Credential Manager), the backend's login token, keeping you logged in
+  data/                 your data: the Room database, the task rules (Store), dates, settings
+  sync/                 the backup: restore (the handover), upload, the WorkManager job
   notify/               the three channels (normal / urgent / alarm), showing notifications
   alarm/                the test alarm: exact alarm → receiver → full-screen alarm; set again after a restart
   setup/                the first-run checklist: what to allow, and the settings screen for each
   diag/                 the Diagnostics log
-  ui/                   the screens (Compose): login, home, checklist, diagnostics, alarm
+  ui/                   the screens (Compose): login, handover, home, tasks, task, form, settings, checklist,
+                        diagnostics, alarm
+android/app/schemas/    each database version's schema (Room), for future migrations
 android/app/src/test/   tests, including the screenshot tests (ui/ScreenshotTest.kt)
 android/store/          Play Store texts, icon and feature graphic
 ```

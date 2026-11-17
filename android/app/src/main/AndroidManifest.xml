@@ -2,7 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- Logging in (Cognito). Later: sync and the LLM, through the Lambda. -->
+    <!-- Logging in, the backup (sync), and later the LLM: all through the backend. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- Android 13+ asks before an app may show notifications. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />

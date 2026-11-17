@@ -11,6 +11,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -20,6 +21,10 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.prominder.myapp.BuildConfig
+import com.prominder.myapp.ReminderApp
+import com.prominder.myapp.data.Store
+import com.prominder.myapp.data.Times
+import com.prominder.myapp.sync.SyncException
 import com.prominder.myapp.alarm.TestAlarm
 import com.prominder.myapp.auth.AuthException
 import com.prominder.myapp.auth.AuthRepository
@@ -31,6 +36,10 @@ import com.prominder.myapp.setup.CheckId
 import com.prominder.myapp.setup.Checklist
 import com.prominder.myapp.setup.DeviceFacts
 import com.prominder.myapp.setup.DeviceSetup
+import java.time.Instant
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /** Logged out → the login screen; logged in → home, the checklist and Diagnostics. */
@@ -71,23 +80,82 @@ private fun LoginRoute(auth: AuthRepository) {
     )
 }
 
-private enum class Screen { Home, Checklist, Diagnostics }
-
+/** Logged in: the handover first (the phone has none of your data yet), then the app itself. */
 @Composable
 private fun SignedInRoute(auth: AuthRepository, session: Session) {
     val context = LocalContext.current
+    val app = context.applicationContext as ReminderApp
+    var hasData by remember { mutableStateOf<Boolean?>(null) }
+    LaunchedEffect(Unit) { hasData = app.store.hasData() }
+    when (hasData) {
+        null -> Muted("Loading…")
+        false -> HandoverRoute(app, onDone = { hasData = true }, onLogout = { logout(context, auth) })
+        true -> MainRoutes(app, auth, session)
+    }
+}
+
+@Composable
+private fun HandoverRoute(app: ReminderApp, onDone: () -> Unit, onLogout: () -> Unit) {
     val scope = rememberCoroutineScope()
-    var screen by rememberSaveable { mutableStateOf(Screen.Home) }
+    var state by remember { mutableStateOf(HandoverState()) }
+    LaunchedEffect(Unit) {
+        // Only to choose the wording (move or restore); the button works either way.
+        state = try {
+            val st = app.sync.status()
+            state.copy(alreadyHandedOver = st.handedOverAt != null,
+                lastBackup = Times.parseOrNull(st.lastUploadAt)?.let { Format.time(it, java.time.ZoneId.systemDefault(), Instant.now()) })
+        } catch (e: SyncException) {
+            state
+        }
+    }
+    HandoverScreen(
+        state = state,
+        onMove = {
+            state = state.copy(busy = true, message = "Downloading… The server can take a minute to wake up.")
+            scope.launch {
+                try {
+                    val r = app.sync.restore(handover = true)
+                    Diag.log("sync", "Handover done: ${r.tasks} tasks, ${r.messages} messages on the phone")
+                    onDone()
+                } catch (e: SyncException) {
+                    state = state.copy(busy = false, message = e.message)
+                }
+            }
+        },
+        onLogout = onLogout,
+    )
+}
+
+private fun logout(context: Context, auth: AuthRepository) {
+    auth.logout()
+    CoroutineScope(Dispatchers.Main).launch { GoogleSignIn.forget(context) }
+}
+
+@Composable
+private fun MainRoutes(app: ReminderApp, auth: AuthRepository, session: Session) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var stack by rememberSaveable { mutableStateOf(listOf(Route.Home.key)) }
+    val route = Route.parse(stack.last())
+    fun go(r: Route) { stack = stack + r.key }
+    fun back() { if (stack.size > 1) stack = stack.dropLast(1) }
     var facts by remember { mutableStateOf(DeviceSetup.facts(context)) }
     var notice by remember { mutableStateOf<String?>(null) }
-    // The log changes whenever something happens (an alarm rings, a setting is opened): reload then.
+    var testNotice by remember { mutableStateOf<String?>(null) }
+    // The log changes whenever something happens (an alarm rings, a backup runs): reload then.
     val logVersion by Diag.log.version.collectAsStateWithLifecycle()
 
     LaunchedEffect(Unit) {
         // Right after the first login, the checklist opens by itself, once.
         if (!DeviceSetup.checklistSeen(context)) {
             DeviceSetup.markChecklistSeen(context)
-            screen = Screen.Checklist
+            go(Route.Checklist)
+        }
+    }
+    LaunchedEffect(notice) {
+        if (notice != null) {
+            delay(5000)
+            notice = null
         }
     }
     // Coming back from a settings screen: check again.
@@ -100,36 +168,28 @@ private fun SignedInRoute(auth: AuthRepository, session: Session) {
         if (!granted) DeviceSetup.open(context, CheckId.NOTIFICATIONS, facts)
     }
 
-    BackHandler(enabled = screen != Screen.Home) { screen = Screen.Home }
+    BackHandler(enabled = stack.size > 1) { back() }
 
     val items = Checklist.build(facts)
-    when (screen) {
-        Screen.Home -> {
-            // Recomputed with the log so a ringing alarm updates the screen.
-            val pending = remember(logVersion) { TestAlarm.pending(context) }
-            val last = remember(logVersion) { TestAlarm.lastResult(context) }
-            HomeScreen(
-                state = HomeState(
-                    email = session.email,
-                    setupDone = Checklist.doneCount(items),
-                    setupTotal = items.size,
-                    pendingAlarm = pending?.let {
-                        "Test alarm set for ${Diag.log.format(it.at).substringAfter(' ')}" + if (it.exact) "" else " (inexact)"
-                    },
-                    lastAlarmResult = last,
-                    notice = notice,
-                ),
-                onOpenChecklist = { screen = Screen.Checklist },
-                onOpenDiagnostics = { screen = Screen.Diagnostics },
-                onNotifyNow = { notice = notifyNotice(context, urgent = false) },
-                onUrgentNow = { notice = notifyNotice(context, urgent = true) },
-                onAlarmIn1Min = { notice = alarmNotice(context, 60_000L, facts) },
-                onAlarmIn1Hour = { notice = alarmNotice(context, 3_600_000L, facts) },
-                onCancelAlarm = { TestAlarm.cancel(context); notice = null },
-                onLogout = { auth.logout(); scope.launch { GoogleSignIn.forget(context) } },
-            )
-        }
-        Screen.Checklist -> ChecklistScreen(
+    when (route) {
+        Route.Home -> HomeRoute(
+            store = app.store,
+            setupDone = Checklist.doneCount(items),
+            setupTotal = items.size,
+            notice = notice,
+            onNotice = { notice = it },
+            go = ::go,
+            onOpenChecklist = { go(Route.Checklist) },
+            onLogout = { logout(context, auth) },
+        )
+        Route.Tasks -> TasksRoute(app.store, ::go, ::back)
+        is Route.Task -> TaskDetailRoute(app.store, route.id, onNotice = { notice = it }, go = ::go, onBack = ::back)
+        is Route.NewTask -> TaskFormRoute(app.store, null, route.parentId,
+            onSaved = { id -> stack = stack.dropLast(1) + if (route.parentId == null) listOf(Route.Task(id).key) else emptyList() },
+            onBack = ::back)
+        is Route.EditTask -> TaskFormRoute(app.store, route.id, null, onSaved = { back() }, onBack = ::back)
+        Route.Settings -> SettingsRoute(app.store, ::back)
+        Route.Checklist -> ChecklistScreen(
             items = items,
             onOpen = { id ->
                 if (id == CheckId.NOTIFICATIONS && Build.VERSION.SDK_INT >= 33) {
@@ -142,20 +202,57 @@ private fun SignedInRoute(auth: AuthRepository, session: Session) {
                 if (id == CheckId.SAMSUNG_SLEEP) DeviceSetup.setSamsungConfirmed(context, checked)
                 facts = DeviceSetup.facts(context)
             },
-            onBack = { screen = Screen.Home },
+            onBack = ::back,
         )
-        Screen.Diagnostics -> {
+        Route.Diagnostics -> {
             val lines = remember(logVersion) { Diag.log.lines() }
-            val summary = diagnosticsFacts(context, session, facts, logVersion)
+            val syncFacts by produceState(emptyList<Pair<String, String>>(), logVersion) { value = syncFacts(app) }
+            val summary = diagnosticsFacts(context, session, facts, logVersion) + syncFacts
+            val pending = remember(logVersion) { TestAlarm.pending(context) }
             DiagnosticsScreen(
                 facts = summary,
                 logLines = lines,
                 onShare = { share(context, summary, lines) },
                 onClear = { Diag.log.clear() },
-                onBack = { screen = Screen.Home },
+                onBack = ::back,
+                onSyncNow = {
+                    scope.launch {
+                        try {
+                            app.sync.upload(force = true)
+                        } catch (e: SyncException) {
+                            app.sync.recordError(e.message.orEmpty())
+                            Diag.log("sync", "Backup failed: ${e.message?.lineSequence()?.first()}")
+                        }
+                    }
+                },
+                tests = PhoneTests(
+                    pendingAlarm = pending?.let {
+                        "Test alarm set for ${Diag.log.format(it.at).substringAfter(' ')}" + if (it.exact) "" else " (inexact)"
+                    },
+                    lastAlarmResult = remember(logVersion) { TestAlarm.lastResult(context) },
+                    notice = testNotice,
+                    onNotifyNow = { testNotice = notifyNotice(context, urgent = false) },
+                    onUrgentNow = { testNotice = notifyNotice(context, urgent = true) },
+                    onAlarmIn1Min = { testNotice = alarmNotice(context, 60_000L, facts) },
+                    onAlarmIn1Hour = { testNotice = alarmNotice(context, 3_600_000L, facts) },
+                    onCancelAlarm = { TestAlarm.cancel(context); testNotice = null },
+                ),
             )
         }
     }
+}
+
+/** The backup's state, for Diagnostics. */
+private suspend fun syncFacts(app: ReminderApp): List<Pair<String, String>> {
+    val dao = app.store.dao
+    fun at(text: String?) = Times.parseOrNull(text)?.let { Diag.log.format(it.toEpochMilli()) } ?: "never"
+    return listOf(
+        "On the phone" to "${dao.taskCount()} tasks, ${dao.messageCount()} messages",
+        "Handed over" to at(dao.meta(Store.META_HANDED_OVER_AT)),
+        "Restored" to at(dao.meta(Store.META_RESTORED_AT)),
+        "Last backup" to at(dao.meta(Store.META_LAST_UPLOAD_AT)),
+        "Waiting for backup" to "${app.sync.pending()} changes",
+    ) + listOfNotNull(dao.meta(Store.META_LAST_SYNC_ERROR)?.takeIf { it.isNotBlank() }?.let { "Last backup error" to it })
 }
 
 private fun notifyNotice(context: Context, urgent: Boolean): String? =
