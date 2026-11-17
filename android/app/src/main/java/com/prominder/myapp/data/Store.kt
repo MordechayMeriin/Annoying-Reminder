@@ -196,6 +196,7 @@ class Store(
                 dao.deleteSetting(key)
                 tombstone("settings", JsonPrimitive(key))
             } else {
+                dirty = true
                 dao.upsertSettings(listOf(SettingRow(key, value, nowText(), seq)))
             }
         }
@@ -216,38 +217,61 @@ class Store(
      */
     private var seq: Long = 0
 
-    private suspend fun <T> write(block: suspend () -> T): T {
-        val result = db.withTransaction {
+    /** Whether the current transaction wrote a row (a tick that changed nothing doesn't schedule a backup). */
+    private var dirty = false
+
+    /** One change: a transaction whose rows all get the same new change number. The tick (remind/) uses it too. */
+    internal suspend fun <T> write(block: suspend () -> T): T {
+        val (result, changed) = db.withTransaction {
             seq = (dao.meta(META_SEQ)?.toLongOrNull() ?: 0) + 1
+            dirty = false
             dao.setMeta(MetaRow(META_SEQ, seq.toString()))
-            block()
+            block() to dirty
         }
-        onChange()
+        if (changed) onChange()
         return result
     }
 
-    private suspend fun putTask(row: TaskRow) = dao.upsertTasks(listOf(row.copy(seq = seq)))
+    internal suspend fun putTask(row: TaskRow) {
+        dirty = true
+        dao.upsertTasks(listOf(row.copy(seq = seq)))
+    }
 
-    private suspend fun addEvent(taskId: Long, kind: String, note: String? = null) {
+    internal suspend fun putSession(row: SessionRow) {
+        dirty = true
+        dao.upsertSessions(listOf(row.copy(seq = seq)))
+    }
+
+    internal suspend fun addEvent(taskId: Long, kind: String, note: String? = null) {
+        dirty = true
         dao.upsertEvents(listOf(EventRow(taskId, kind, note?.take(500), null, nowText(), rid(), seq)))
     }
 
-    /** thread.add_event: something you did outside the chat, written as your own message so the assistant reads it. */
-    private suspend fun addChatEvent(text: String, taskIds: List<Long>) {
+    /** thread.add: a message in the chat. Chips as JSON text (Chips.encode). */
+    internal suspend fun addMessage(role: String, content: String, kind: String, taskIds: List<Long> = emptyList(),
+                                    chips: String = "[]", model: String? = null): MessageRow {
+        dirty = true
         val ids = taskIds.distinct()
-        dao.upsertMessages(listOf(MessageRow(nextId(META_MESSAGE_COUNTER, dao.maxMessageId()), "user", text, "event",
-            ids.firstOrNull(), ids, "[]", null, nowText(), seq)))
+        val row = MessageRow(nextId(META_MESSAGE_COUNTER, dao.maxMessageId()), role, content, kind, ids.firstOrNull(), ids,
+            chips, model, nowText(), seq)
+        dao.upsertMessages(listOf(row))
+        return row
+    }
+
+    /** thread.add_event: something you did outside the chat, written as your own message so the assistant reads it. */
+    internal suspend fun addChatEvent(text: String, taskIds: List<Long>) {
+        addMessage("user", text, "event", taskIds)
     }
 
     private suspend fun descriptionChanged(old: TaskRow, newText: String?) {
         if (!old.description.isNullOrEmpty() && old.description != newText) addEvent(old.id, "description_changed", old.description)
     }
 
-    private suspend fun closeSessions(taskId: Long, outcome: String) {
-        dao.upsertSessions(dao.openSessions(taskId).map { it.copy(endedAt = nowText(), outcome = outcome, seq = seq) })
+    internal suspend fun closeSessions(taskId: Long, outcome: String) {
+        dao.openSessions(taskId).forEach { putSession(it.copy(endedAt = nowText(), outcome = outcome)) }
     }
 
-    private suspend fun setFocusIn(ids: List<Long>, day: LocalDate): List<TaskRow> {
+    internal suspend fun setFocusIn(ids: List<Long>, day: LocalDate): List<TaskRow> {
         val date = day.toString()
         val wanted = ids.distinct().take(FOCUS_MAX)
         for (t in dao.focusTasks(date)) {
@@ -261,12 +285,15 @@ class Store(
             putTask(new)
             out += new
         }
+        dirty = true
         dao.upsertFocus(listOf(FocusRow(date, out.map { it.id }, seq)))
         return out
     }
 
-    private suspend fun tombstone(table: String, key: kotlinx.serialization.json.JsonElement) =
+    private suspend fun tombstone(table: String, key: kotlinx.serialization.json.JsonElement) {
+        dirty = true
         dao.insertTombstone(Tombstone(table, key.toString(), seq))
+    }
 
     /** The next id: after both the backup's counter and the highest id here (as db.next_id did on the server). */
     private suspend fun nextId(counter: String, maxId: Long): Long {
@@ -275,7 +302,7 @@ class Store(
         return id
     }
 
-    private fun nowText() = Times.format(clock())
+    internal fun nowText() = Times.format(clock())
 
     private fun check(form: TaskForm) {
         require(form.title.isNotBlank()) { "The title is empty." }

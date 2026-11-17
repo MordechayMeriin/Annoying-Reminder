@@ -210,24 +210,37 @@ object Logic {
      * May a due task be contacted about now? Null = now, else the moment to postpone its remind_at to.
      * kind 'session' = the check-in at the end of a focus session. The latest postponement wins.
      */
-    fun contactDecision(task: TaskRow, state: ContactState, now: ZonedDateTime, g: Guardrails): Instant? {
+    fun contactDecision(task: TaskRow, state: ContactState, now: ZonedDateTime, g: Guardrails): Instant? =
+        contactReasons(task, state, now, g).maxOfOrNull { it.until }
+
+    /** One rule that holds a contact back, and until when (for the Diagnostics tick log). */
+    data class Hold(val reason: String, val until: Instant)
+
+    /** Every rule that holds this contact back now (none = send). [contactDecision] takes the latest. */
+    fun contactReasons(task: TaskRow, state: ContactState, now: ZonedDateTime, g: Guardrails): List<Hold> {
         val nowI = now.toInstant()
-        val later = mutableListOf<Instant>()
-        g.restUntil?.invoke(now)?.let { later += it }
-        if (inQuietHours(now, g.quietStart, g.quietEnd)) later += quietEndAfter(now, g.quietEnd).toInstant()
-        task.blocked?.let { if (it > nowI) later += it }
+        val later = mutableListOf<Hold>()
+        g.restUntil?.invoke(now)?.let { later += Hold("Shabbat / holiday", it) }
+        if (inQuietHours(now, g.quietStart, g.quietEnd)) later += Hold("quiet hours", quietEndAfter(now, g.quietEnd).toInstant())
+        task.blocked?.let { if (it > nowI) later += Hold("blocked", it) }
         val fixed = task.kind == "meeting" || task.kind == "fence"
-        if (!fixed && task.kind != "session") state.focusHoldUntil?.let { if (it > nowI) later += it }
+        if (!fixed && task.kind != "session") state.focusHoldUntil?.let { if (it > nowI) later += Hold("focus session", it) }
         if (!fixed) {
             if (state.lastProactiveAt != null && task.kind != "session") {
                 val gapEnd = state.lastProactiveAt.plus(Duration.ofMinutes(g.minGapMin.toLong()))
-                if (gapEnd > nowI) later += gapEnd
+                if (gapEnd > nowI) {
+                    val waited = Duration.between(state.lastProactiveAt, nowI).toMinutes()
+                    later += Hold("min gap, $waited of ${g.minGapMin} min", gapEnd)
+                }
             }
-            if (state.sentToday >= g.maxPerDay) later += nextMorning(now, g).toInstant()
+            if (state.sentToday >= g.maxPerDay) later += Hold("daily cap, ${state.sentToday} of ${g.maxPerDay}", nextMorning(now, g).toInstant())
             val perTask = if (escalates(task, nowI)) g.maxPerTaskPerDay else minOf(1, g.maxPerTaskPerDay)
-            if (!task.remindRequested && (state.sentTodayByTask[task.id] ?: 0) >= perTask) later += nextMorning(now, g).toInstant()
+            val sent = state.sentTodayByTask[task.id] ?: 0
+            if (!task.remindRequested && sent >= perTask) {
+                later += Hold(if (perTask == 1) "one check-in a day" else "per-task cap, $sent of $perTask", nextMorning(now, g).toInstant())
+            }
         }
-        return later.maxOrNull()
+        return later
     }
 
     /** First moment the daily counters have reset AND quiet hours are over. */

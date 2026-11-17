@@ -41,14 +41,17 @@ data class SettingItem(
     val value: String,
     val isDefault: Boolean,
     val default: String,
+    /** choice: (stored value, label) */
+    val options: List<Pair<String, String>> = emptyList(),
 )
 
 private val WEEKDAY_LABELS = linkedMapOf("sun" to "Sunday", "mon" to "Monday", "tue" to "Tuesday", "wed" to "Wednesday",
     "thu" to "Thursday", "fri" to "Friday", "sat" to "Saturday")
 
 /**
- * ⚙ Settings: the same ones as the web app (they're stored the same way and backed up), minus Pushover and browser
- * notifications, which the phone's own notification channels replace. Plus what you asked of the assistant.
+ * ⚙ Settings: the same ones as the web app (they're stored the same way and backed up), minus Pushover's account and
+ * sounds and browser notifications, which the phone's own notification channels replace (its loudness rules stay,
+ * under "How loud"). Plus what you asked of the assistant.
  */
 @Composable
 fun SettingsScreen(
@@ -116,8 +119,15 @@ private fun SettingLine(s: SettingItem, onToggle: () -> Unit, onEdit: () -> Unit
     }
 }
 
+/** The fixed answers a setting picks from (a radio list instead of typing), or null. */
+private fun choices(s: SettingItem): Map<String, String>? = when (s.kind) {
+    "weekday" -> WEEKDAY_LABELS
+    "choice" -> s.options.toMap()
+    else -> null
+}
+
 private fun display(s: SettingItem): String = when (s.kind) {
-    "weekday" -> WEEKDAY_LABELS[s.value] ?: s.value
+    "weekday", "choice" -> choices(s)?.get(s.value) ?: s.value
     "time_off" -> if (s.value == "off") "Off" else s.value
     "times" -> s.value.ifEmpty { "None" }
     else -> s.value
@@ -134,8 +144,9 @@ private fun EditSettingDialog(s: SettingItem, onSave: (String?) -> String?, onDi
             Column {
                 if (s.help.isNotEmpty()) Muted(s.help)
                 Spacer(Modifier.height(8.dp))
-                if (s.kind == "weekday") {
-                    WEEKDAY_LABELS.forEach { (value, label) ->
+                val options = choices(s)
+                if (options != null) {
+                    options.forEach { (value, label) ->
                         Row(Modifier.fillMaxWidth().clickable { text = value }, verticalAlignment = Alignment.CenterVertically) {
                             RadioButton(selected = text == value, onClick = { text = value })
                             Text(label)
@@ -148,7 +159,7 @@ private fun EditSettingDialog(s: SettingItem, onSave: (String?) -> String?, onDi
                         keyboardOptions = KeyboardOptions(keyboardType = keyboard(s.kind)),
                     )
                 }
-                if (s.kind == "weekday") error?.let { Text(it, color = Palette.Danger) }
+                if (options != null) error?.let { Text(it, color = Palette.Danger) }
                 Muted("Default: ${display(s.copy(value = s.default))}")
             }
         },

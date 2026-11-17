@@ -98,6 +98,13 @@ interface AppDao {
     @Upsert
     suspend fun upsertEvents(rows: List<EventRow>)
 
+    /** A task's events since a moment (text times compare in time order). */
+    @Query("SELECT * FROM events WHERE task_id = :taskId AND created_at >= :since ORDER BY created_at DESC")
+    suspend fun eventsSince(taskId: Long, since: String): List<EventRow>
+
+    @Query("SELECT * FROM events WHERE kind = :kind AND created_at >= :since ORDER BY created_at")
+    suspend fun eventsOfKindSince(kind: String, since: String): List<EventRow>
+
     // ------------------------------------------------------------ messages
 
     @Query("SELECT * FROM (SELECT * FROM messages ORDER BY id DESC LIMIT :limit) ORDER BY id")
@@ -112,6 +119,16 @@ interface AppDao {
     @Upsert
     suspend fun upsertMessages(rows: List<MessageRow>)
 
+    /** Messages since a moment, newest first (the guardrails' counts, today's chat). */
+    @Query("SELECT * FROM messages WHERE created_at >= :since ORDER BY id DESC")
+    suspend fun messagesSince(since: String): List<MessageRow>
+
+    @Query("SELECT * FROM messages WHERE kind IN (:kinds) ORDER BY id DESC LIMIT 1")
+    suspend fun latestOfKinds(kinds: List<String>): MessageRow?
+
+    @Query("SELECT * FROM messages WHERE kind IN (:kinds) AND role = :role ORDER BY id DESC LIMIT 1")
+    suspend fun latestOfKindsBy(kinds: List<String>, role: String): MessageRow?
+
     // ------------------------------------------------------------ sessions, preferences, settings, focus
 
     @Query("SELECT * FROM sessions WHERE task_id = :taskId AND ended_at IS NULL")
@@ -119,6 +136,15 @@ interface AppDao {
 
     @Upsert
     suspend fun upsertSessions(rows: List<SessionRow>)
+
+    @Query("SELECT * FROM sessions ORDER BY id DESC LIMIT 1")
+    suspend fun latestSession(): SessionRow?
+
+    @Query("SELECT * FROM sessions WHERE ended_at IS NULL")
+    suspend fun allOpenSessions(): List<SessionRow>
+
+    @Query("SELECT * FROM sessions WHERE started_at >= :since ORDER BY id DESC")
+    suspend fun sessionsSince(since: String): List<SessionRow>
 
     @Query("SELECT * FROM preferences ORDER BY id")
     fun watchPreferences(): Flow<List<PreferenceRow>>
