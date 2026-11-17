@@ -6,3 +6,4 @@ PyJWT[crypto]>=2.9
 pywebpush>=2.0
 tzdata>=2024.1
 hdate>=1.2,<2
+mangum>=0.19          # the same app on AWS Lambda (app/lambda_app.py)
