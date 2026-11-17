@@ -35,17 +35,22 @@ class RemindersTest {
     private val app: ReminderApp = ApplicationProvider.getApplicationContext()
     private val notifications = app.getSystemService(NotificationManager::class.java)
     private val alarms = app.getSystemService(AlarmManager::class.java)
-    private val store: Store get() = app.store
+    /**
+     * The app's own database, but with the clock fixed at Monday noon: on the real clock a run at 23:00 (quiet
+     * hours) or on Shabbat would rightly hold every reminder back. The receiver uses app.store: the same database.
+     */
+    private val noon: Instant = java.time.ZonedDateTime.of(2026, 11, 9, 12, 0, 0, 0, java.time.ZoneId.of("Asia/Jerusalem")).toInstant()
+    private val store: Store by lazy { Store(app.db, clock = { noon }) }
 
     @Before
     fun setUp() {
         Diag.init(app)
         Channels.ensure(app)
-        runBlocking { store.dao.setMeta(MetaRow(Store.META_RESTORED_AT, Times.format(Instant.now()))) } // after the handover
+        runBlocking { store.dao.setMeta(MetaRow(Store.META_RESTORED_AT, Times.format(noon))) } // after the handover
     }
 
     private fun addDue(title: String, priority: Int = 1): TaskRow = runBlocking {
-        val now = Instant.now()
+        val now = noon
         val row = TaskRow(store.dao.maxTaskId() + 1, title = title, priority = priority, remindAt = Times.format(now.minusSeconds(60)),
             remindRequested = true, createdAt = Times.format(now))
         store.dao.upsertTasks(listOf(row))
@@ -57,7 +62,6 @@ class RemindersTest {
     @Test fun `a due reminder is a notification with Done and Later, and the next tick is an exact alarm`() = runBlocking {
         val t = addDue("Call the plumber")
         Reminders.tick(app, store, "test")
-        // (a daily message may come too, depending on the real time of day the test runs at)
         val n = posted().single { it.extras.getString(Notification.EXTRA_TITLE)!!.contains("Call the plumber") }
         assertEquals(Channels.URGENT, n.channelId) // a reminder you asked for
         assertEquals(listOf("✓ Done", "Later"), n.actions.map { it.title.toString() })
