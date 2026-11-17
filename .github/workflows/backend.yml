@@ -50,12 +50,13 @@ jobs:
     env:
       HAS_ROLE: ${{ vars.AWS_DEPLOY_ROLE_ARN != '' }}
     steps:
+      # Checked out first, always: every step runs in backend/, which only exists after the checkout.
+      - uses: actions/checkout@v4
+
       - name: Not set up yet
         if: env.HAS_ROLE != 'true'
         run: echo "::notice::AWS_DEPLOY_ROLE_ARN isn't set, so nothing was deployed. See docs/android-phase-c.md."
 
-      - uses: actions/checkout@v4
-        if: env.HAS_ROLE == 'true'
       - uses: actions/setup-python@v5
         if: env.HAS_ROLE == 'true'
         with:
