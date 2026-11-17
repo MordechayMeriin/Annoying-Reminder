@@ -169,4 +169,4 @@ in 1 min** with the phone locked, and restarting the phone while a 1-hour alarm 
 | Secret | `PLAY_SERVICE_ACCOUNT_JSON` | Uploading to Play |
 
 The release job runs in a GitHub environment called `play`; the secrets can live either on the repository
-or on that environment.
+or on that environment. 
