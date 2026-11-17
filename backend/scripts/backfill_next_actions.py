@@ -19,7 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import db, tasks  # noqa: E402
+from app import tasks  # noqa: E402
 from app.llm import LLMUnavailable, chat_completion  # noqa: E402
 
 PROMPT = """You help a person with ADHD start their tasks. For the task below, reply with JSON only:
@@ -84,10 +84,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Fill in next actions for existing open tasks.")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args()
-    try:
-        asyncio.run(run(a.dry_run))
-    finally:
-        db.close_pool()
+    asyncio.run(run(a.dry_run))
 
 
 if __name__ == "__main__":

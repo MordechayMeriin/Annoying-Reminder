@@ -33,10 +33,10 @@ class PrefsSessionStore(context: Context) : SessionStore {
 
 /**
  * Who's logged in. The phone has to work offline, so a saved login counts as logged in even when
- * Supabase can't be reached; only Supabase saying "this login is gone" logs you out.
+ * Cognito can't be reached; only Cognito saying "this login is gone" logs you out.
  */
 class AuthRepository(
-    private val api: SupabaseAuth,
+    private val api: CognitoAuth,
     private val store: SessionStore,
     private val nowSeconds: () -> Long = { System.currentTimeMillis() / 1000 },
 ) {
@@ -67,7 +67,7 @@ class AuthRepository(
         if (!current.expiresSoon(nowSeconds())) return current.accessToken
         try {
             val fresh = api.refresh(current.refreshToken)
-            // Supabase doesn't always repeat the email; keep the one we know.
+            // Cognito doesn't repeat the email on a refresh; keep the one we know.
             val merged = fresh.copy(email = fresh.email.ifBlank { current.email })
             store.save(merged)
             _session.value = merged
@@ -83,7 +83,7 @@ class AuthRepository(
     suspend fun logout() {
         val current = _session.value
         signOutLocally()
-        if (current != null) api.logout(current.accessToken)
+        if (current != null) api.logout(current.refreshToken)
     }
 
     private fun signOutLocally() {

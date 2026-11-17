@@ -473,42 +473,25 @@ def test_a_fence_is_learned_from_chat_and_what_now_respects_it(store, monkeypatc
 # ---------------------------------------------------------------- F12: settings and preferences from chat
 
 class SettingsDB:
-    """Just enough of db.* for user_settings.save / load."""
+    """Just enough storage for user_settings."""
 
     def __init__(self):
         self.rows: dict[str, str] = {}
 
-    def fetch_all(self, sql, params=()):
-        return [{"key": k, "value": v} for k, v in self.rows.items()]
+    def stored(self):
+        return dict(self.rows)
 
-    def connect(self):
-        db = self
-
-        class Conn:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *exc):
-                return False
-
-            def transaction(self):
-                return self
-
-            def execute(self, sql, params):
-                if sql.lstrip().startswith("insert"):
-                    db.rows[params[0]] = params[1]
-                else:
-                    for k in params[0]:
-                        db.rows.pop(k, None)
-
-        return Conn()
+    def write(self, to_set, to_reset):
+        self.rows.update(to_set)
+        for k in to_reset:
+            self.rows.pop(k, None)
 
 
 @pytest.fixture
 def settings_db(monkeypatch):
     fake = SettingsDB()
-    monkeypatch.setattr(user_settings.db, "fetch_all", fake.fetch_all)
-    monkeypatch.setattr(user_settings.db, "connect", fake.connect)
+    monkeypatch.setattr(user_settings, "stored", fake.stored)
+    monkeypatch.setattr(user_settings, "write", fake.write)
     return fake
 
 

@@ -2,7 +2,7 @@ package com.prominder.myapp.auth
 
 import kotlinx.serialization.Serializable
 
-/** A Supabase login: what the app keeps so you stay logged in. */
+/** A Cognito login: what the app keeps so you stay logged in. */
 @Serializable
 data class Session(
     val accessToken: String,
@@ -19,9 +19,9 @@ data class Session(
 /** Something went wrong logging in; [message] is written for you, not for a developer. */
 class AuthException(message: String, val kind: Kind = Kind.Other, cause: Throwable? = null) : Exception(message, cause) {
     enum class Kind {
-        /** No connection or Supabase didn't answer: try again later, don't log out. */
+        /** No connection or the login server didn't answer: try again later, don't log out. */
         Network,
-        /** Supabase says the login (refresh token) is no longer valid: log in again. */
+        /** Cognito says the login (refresh token) is no longer valid: log in again. */
         SessionGone,
         Other,
     }

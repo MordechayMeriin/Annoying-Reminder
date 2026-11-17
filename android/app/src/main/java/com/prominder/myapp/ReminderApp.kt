@@ -2,8 +2,8 @@ package com.prominder.myapp
 
 import android.app.Application
 import com.prominder.myapp.auth.AuthRepository
+import com.prominder.myapp.auth.CognitoAuth
 import com.prominder.myapp.auth.PrefsSessionStore
-import com.prominder.myapp.auth.SupabaseAuth
 import com.prominder.myapp.diag.Diag
 import com.prominder.myapp.notify.Channels
 import java.util.concurrent.TimeUnit
@@ -20,7 +20,7 @@ class ReminderApp : Application() {
         logCrashes()
         Channels.ensure(this)
         val http = OkHttpClient.Builder().callTimeout(20, TimeUnit.SECONDS).build()
-        auth = AuthRepository(SupabaseAuth(BuildConfig.SUPABASE_URL, BuildConfig.SUPABASE_ANON_KEY, http), PrefsSessionStore(this))
+        auth = AuthRepository(CognitoAuth(BuildConfig.COGNITO_REGION, BuildConfig.COGNITO_CLIENT_ID, http), PrefsSessionStore(this))
         // Seeing this often without a reason (no restart, no update) means Android keeps closing the app.
         Diag.log("app", "App started (${BuildConfig.VERSION_NAME})")
     }

@@ -5,9 +5,13 @@ import sys
 from pathlib import Path
 
 for key, value in {
-    "DATABASE_URL": "postgresql://test/test",
-    "SUPABASE_URL": "https://example.supabase.co",
-    "SUPABASE_ANON_KEY": "anon",
+    "AWS_REGION": "us-west-2",
+    "DYNAMODB_TABLE": "prominder-test",
+    "COGNITO_USER_POOL_ID": "us-west-2_TESTPOOL",
+    "COGNITO_CLIENT_ID": "testclient",
+    # Never reach a real AWS account from the tests (moto intercepts the calls in test_dynamo_store.py).
+    "AWS_ACCESS_KEY_ID": "testing",
+    "AWS_SECRET_ACCESS_KEY": "testing",
     "OWNER_USER_ID": "00000000-0000-0000-0000-000000000000",
     "CRON_SECRET": "cron",
     "ACTION_SECRET": "action",

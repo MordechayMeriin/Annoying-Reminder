@@ -12,6 +12,7 @@ import logging
 from typing import Any
 
 from . import db
+from .db import pad
 
 log = logging.getLogger("preferences")
 
@@ -20,12 +21,15 @@ MAX_CHARS = 200
 
 _cache: list[dict[str, Any]] = []
 
+PREFERENCE = db.Entity({"id": "int", "text": "str", "created_at": "dt"},
+                       lambda p: {"pk": "pref", "sk": pad(p["id"])})
+
 
 def load() -> None:
     """Read the stored preferences into memory. Keeps the previous ones if the database is unreachable."""
     global _cache
     try:
-        _cache = db.fetch_all("select id, text, created_at from preferences order by id")
+        _cache = db.query_rows(PREFERENCE, "pref")
     except Exception:
         log.exception("Could not load preferences; keeping the current ones")
 
@@ -44,15 +48,16 @@ def add(text: str) -> dict[str, Any]:
             return row  # already known
     if len(items()) >= MAX_ITEMS:
         raise ValueError(f"There are already {MAX_ITEMS} saved preferences. The user can delete some under ⚙ Settings.")
-    row = db.fetch_one("insert into preferences (text) values (%s) returning id, text, created_at", (text,))
+    row = {"id": db.next_id("preference"), "text": text, "created_at": db.now_utc()}
+    db.put(PREFERENCE, row, new=True)
     load()
     return row
 
 
 def delete(pref_id: int) -> bool:
-    row = db.fetch_one("delete from preferences where id = %s returning id", (pref_id,))
+    deleted = db.delete("pref", pad(pref_id))
     load()
-    return row is not None
+    return deleted
 
 
 def prompt_text() -> str:

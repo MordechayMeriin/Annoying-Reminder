@@ -12,11 +12,18 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: "3.12.8"
-      - key: DATABASE_URL
+      # AWS (DynamoDB + Cognito): the values scripts/aws_setup.py prints
+      - key: AWS_REGION
         sync: false
-      - key: SUPABASE_URL
+      - key: DYNAMODB_TABLE
         sync: false
-      - key: SUPABASE_ANON_KEY
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: COGNITO_USER_POOL_ID
+        sync: false
+      - key: COGNITO_CLIENT_ID
         sync: false
       - key: OWNER_USER_ID
         sync: false
@@ -55,9 +62,9 @@ services:
     buildCommand: sh build-config.sh
     staticPublishPath: .
     envVars:
-      - key: SUPABASE_URL
+      - key: COGNITO_REGION
         sync: false
-      - key: SUPABASE_ANON_KEY
+      - key: COGNITO_CLIENT_ID
         sync: false
       - key: API_URL
         sync: false

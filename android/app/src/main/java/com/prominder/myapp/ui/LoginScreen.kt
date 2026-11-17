@@ -31,11 +31,11 @@ data class LoginState(
     val codeSent: Boolean = false,
     val busy: Boolean = false,
     val message: String? = null,
-    /** False when the build has no Supabase URL / key (see android/README.md). */
+    /** False when the build has no Cognito region / app client id (see android/README.md). */
     val configured: Boolean = true,
 )
 
-/** Log in with the code Supabase emails you: the same account and the same flow as the web app. */
+/** Log in with the code Cognito emails you: the same account and the same flow as the web app. */
 @Composable
 fun LoginScreen(
     state: LoginState,
@@ -54,8 +54,8 @@ fun LoginScreen(
             Spacer(Modifier.height(16.dp))
             if (!state.configured) {
                 Text(
-                    "This build has no Supabase settings, so it can't log in. " +
-                        "Set SUPABASE_URL and SUPABASE_ANON_KEY for the build (see android/README.md).",
+                    "This build has no login settings, so it can't log in. " +
+                        "Set COGNITO_REGION and COGNITO_CLIENT_ID for the build (see android/README.md).",
                     color = Palette.Danger,
                 )
                 return@AppCard

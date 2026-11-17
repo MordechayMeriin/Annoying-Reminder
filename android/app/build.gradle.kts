@@ -39,8 +39,8 @@ android {
         versionName = setting("VERSION_NAME", "0.1.0-dev")
 
         // Public by design (the web app ships the same two values to the browser). Secrets never go here.
-        buildConfigField("String", "SUPABASE_URL", "\"${setting("SUPABASE_URL").trimEnd('/')}\"")
-        buildConfigField("String", "SUPABASE_ANON_KEY", "\"${setting("SUPABASE_ANON_KEY")}\"")
+        buildConfigField("String", "COGNITO_REGION", "\"${setting("COGNITO_REGION")}\"")
+        buildConfigField("String", "COGNITO_CLIENT_ID", "\"${setting("COGNITO_CLIENT_ID")}\"")
     }
 
     signingConfigs {

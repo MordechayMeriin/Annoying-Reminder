@@ -271,6 +271,15 @@ def _env(key: str) -> Any:
         raise RuntimeError(f"Invalid environment variable {spec.env}={raw!r}: {e}") from None
 
 
+def aws_region() -> str:
+    """Also used without the full settings (db.py in scripts)."""
+    return _opt("AWS_REGION", "us-west-2")
+
+
+def dynamodb_table() -> str:
+    return _opt("DYNAMODB_TABLE", "prominder")
+
+
 REASONING_EFFORTS = ("minimal", "low", "medium", "high")
 
 
@@ -284,13 +293,14 @@ def _reasoning_effort(value: str) -> str:
 
 @dataclass(frozen=True)
 class Settings:
-    # --- Database (Supabase Postgres, use the *pooler* connection string) ---
-    database_url: str = field(default_factory=lambda: _req("DATABASE_URL"))
+    # --- AWS (DynamoDB + Cognito). Credentials: AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY, read by boto3. ---
+    aws_region: str = field(default_factory=lambda: aws_region())
+    dynamodb_table: str = field(default_factory=lambda: dynamodb_table())
 
-    # --- Auth (Supabase Auth) ---
-    supabase_url: str = field(default_factory=lambda: _req("SUPABASE_URL").rstrip("/"))
-    supabase_anon_key: str = field(default_factory=lambda: _req("SUPABASE_ANON_KEY"))
-    owner_user_id: str = field(default_factory=lambda: _req("OWNER_USER_ID"))
+    # --- Auth (Cognito user pool: the app logs in with an emailed code) ---
+    cognito_user_pool_id: str = field(default_factory=lambda: _req("COGNITO_USER_POOL_ID"))
+    cognito_client_id: str = field(default_factory=lambda: _req("COGNITO_CLIENT_ID"))
+    owner_user_id: str = field(default_factory=lambda: _req("OWNER_USER_ID"))   # your Cognito user's "sub"
 
     # --- Secrets ---
     cron_secret: str = field(default_factory=lambda: _req("CRON_SECRET"))

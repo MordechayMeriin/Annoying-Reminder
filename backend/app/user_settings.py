@@ -20,13 +20,26 @@ log = logging.getLogger("settings")
 def load() -> None:
     """Read the stored overrides into memory. Keeps the previous ones if the database is unreachable."""
     try:
-        rows = db.fetch_all("select key, value from app_settings")
+        rows = stored()
     except Exception:
         log.exception("Could not load settings; keeping the current ones")
         return
-    errors = config.apply_overrides({r["key"]: r["value"] for r in rows if r["key"] in config.SPECS})
+    errors = config.apply_overrides({k: v for k, v in rows.items() if k in config.SPECS})
     for key, msg in errors.items():
         log.warning("Ignoring stored setting %s: %s", key, msg)
+
+
+def stored() -> dict[str, str]:
+    """The saved overrides, by key."""
+    return {r["sk"]: r["value"] for r in db.query("setting")}
+
+
+def write(to_set: dict[str, str], to_reset: list[str]) -> None:
+    """Save and remove overrides, all or nothing."""
+    now = db.ts(db.now_utc())
+    db.transact(
+        puts=[db.to_attr({"pk": "setting", "sk": k, "value": v, "updated_at": now}) for k, v in to_set.items()],
+        deletes=[("setting", k) for k in to_reset])
 
 
 def save(values: dict[str, str | None]) -> dict[str, str]:
@@ -39,15 +52,7 @@ def save(values: dict[str, str | None]) -> dict[str, str]:
     if errors:
         return errors
     to_reset = [k for k, v in values.items() if v is None]
-    with db.connect() as conn, conn.transaction():  # all or nothing
-        for key, value in to_set.items():
-            conn.execute(
-                """insert into app_settings (key, value, updated_at) values (%s, %s, now())
-                   on conflict (key) do update set value = excluded.value, updated_at = now()""",
-                (key, value),
-            )
-        if to_reset:
-            conn.execute("delete from app_settings where key = any(%s)", (to_reset,))
+    write(to_set, to_reset)
     load()
     return {}
 

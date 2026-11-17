@@ -1,6 +1,6 @@
 """
 Run a simulated morning (and then a simulated week) end to end — real scheduler, guardrails, coach, agent and actions — against an
-in-memory database and a scripted LLM. No network, no Supabase, no OpenRouter.
+in-memory database and a scripted LLM. No network, no AWS, no OpenRouter.
 
     cd backend
     python scripts/simulate_tick.py            # LLM answers

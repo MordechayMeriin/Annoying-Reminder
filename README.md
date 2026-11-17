@@ -19,14 +19,15 @@ cleanup, hard stops ("fences"), and settings / preferences said in chat.)
 ## How it works
 
 ```
- Phone (Chrome web app)                Render (free)                         Supabase (free)
- ┌──────────────────────┐   HTTPS   ┌──────────────────────────┐   SQL    ┌──────────────┐
- │ chat (main screen)   │ ────────▶ │ FastAPI                  │ ───────▶ │ Postgres     │
- │ Today's 3 · tasks    │ ◀──push── │  • agent  (OpenRouter)   │          │ (RLS on)     │
+ Phone (Chrome web app)                Render (free)                         AWS (always-free tier)
+ ┌──────────────────────┐   HTTPS   ┌──────────────────────────┐   boto3  ┌──────────────┐
+ │ chat (main screen)   │ ────────▶ │ FastAPI                  │ ───────▶ │ DynamoDB     │
+ │ Today's 3 · tasks    │ ◀──push── │  • agent  (OpenRouter)   │          │ (one table)  │
  │ [▶ Start] [✓ Done]   │           │  • /tick → coach         │          └──────────────┘
- │ ⏱ timer · What now?  │           │  • sessions, What now?   │
- └──────────────────────┘           └──────────────────────────┘
-                                        ▲ every 5 min          └──▶ Pushover (loud, alarms)
+ │ ⏱ timer · What now?  │           │  • sessions, What now?   │          ┌──────────────┐
+ └──────────────────────┘           └──────────────────────────┘          │ Cognito      │
+        │ login: code by email         ▲ every 5 min          └──▶ Pushover │ (login)      │
+        └──────────────────────────────┼──────────────────────────────────▶└──────────────┘
                                   cron-job.org (X-Cron-Secret)
 ```
 
@@ -288,29 +289,29 @@ Smaller prompts get better behaviour from cheaper models. `system.md` (chat), `c
 | Layer | Protection |
 |---|---|
 | OpenRouter key | Server-side only (Render env). Dedicated key with a monthly credit limit. |
-| Login | Supabase Auth, sign-ups disabled, `shouldCreateUser: false`. |
-| API | Every request verified with Supabase **and** checked against `OWNER_USER_ID` → others get 403. |
+| Login | Cognito user pool, a code sent by email, sign-up disabled (only users created by `aws_setup.py`). |
+| API | Every request's token verified (signature, issuer, app client, expiry) **and** checked against `OWNER_USER_ID` → others get 403. |
 | `/tick` | Requires the `X-Cron-Secret` header. |
 | Notification buttons | HMAC-signed, expiring, per-task tokens. |
-| Database | RLS on, no policies → the public anon key can't read anything. |
-| Database grants | The API roles (`anon`, `authenticated`) have no table grants (RLS doesn't cover `TRUNCATE`). |
+| Database | Only the backend reaches DynamoDB, with an IAM user allowed to use this one table and nothing else. The apps never get AWS keys. |
+| Cost | Provisioned capacity sized to the always-free tier, and a $1/month budget alert (`aws_setup.py`). |
 | Spend | Chat rate limit + daily LLM-call cap (`CHAT_PER_MINUTE`, `LLM_CALLS_PER_DAY`). |
 
 ## Setup checklist
 
-### 1. Supabase
-1. Create a project (free plan).
-2. **SQL Editor** → paste [`db/schema.sql`](db/schema.sql) → Run. (Existing project: run the files in
-   [`db/migrations/`](db/migrations/) in order instead; they are idempotent. After `006`, give your
-   existing tasks their first steps once: Render → api service → Shell →
-   `python scripts/backfill_next_actions.py`. `007` adds two columns for focus sessions, `008` three
-   columns for avoided tasks, `009` the model that wrote each message.)
-3. **Authentication → Sign In / Providers**: keep Email enabled, **turn off "Allow new users to sign up"**.
-4. **Authentication → Users → Add user → Create new user** with your email (tick auto-confirm). Copy its **User UID** → `OWNER_USER_ID`.
-5. **Authentication → Emails → Magic Link** template: add `Your code: {{ .Token }}` so you can log in with a code inside the installed app.
-6. **Authentication → URL Configuration**: Site URL = your web app URL (step 3), and add it to Redirect URLs.
-7. **Project Settings → API**: copy Project URL → `SUPABASE_URL`, anon/publishable key → `SUPABASE_ANON_KEY`.
-8. **Connect → Connection string → Session pooler**: copy → `DATABASE_URL` (replace the password).
+### 1. AWS (database and login)
+Everything is created by one script, within AWS's always-free limits (DynamoDB: 25 GB and 25 read / 25
+write units; Cognito: 10,000 monthly users). Moving from the old Supabase setup:
+[docs/aws-migration.md](docs/aws-migration.md).
+
+1. Create an AWS account, and log in to it on your computer as an admin (`aws configure`, or an
+   `AWS_PROFILE`).
+2. `cd backend && pip install boto3 && python scripts/aws_setup.py --email you@example.com`
+   The first run makes AWS email you a verification link (it lets Cognito send your login codes from
+   your address). Click it, then run the same command again with `--create-access-key`.
+3. It prints the values for Render: `AWS_REGION`, `DYNAMODB_TABLE`, `AWS_ACCESS_KEY_ID`,
+   `AWS_SECRET_ACCESS_KEY`, `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`, `OWNER_USER_ID` for the API, and
+   `COGNITO_REGION`, `COGNITO_CLIENT_ID` for the web app.
 
 ### 2. Secrets
 ```bash
@@ -329,7 +330,7 @@ with the default caps the coach uses at most a few dozen calls a day.
 2. Fill in the env vars it asks for. `WEB_ORIGIN` / `API_URL` are the two `.onrender.com` URLs
    (if you don't know them yet, put placeholders, then fix them after the first deploy).
    `VAPID_SUBJECT` = `mailto:your-email`.
-3. The **web** service also asks for `SUPABASE_URL`, `SUPABASE_ANON_KEY` and `API_URL`. Its build
+3. The **web** service also asks for `COGNITO_REGION`, `COGNITO_CLIENT_ID` and `API_URL`. Its build
    ([`web/build-config.sh`](web/build-config.sh)) writes them into `config.js`, so nothing
    project-specific is committed. These values are public by design; secrets go only on the API service.
    After changing them, use **Manual Deploy** on the web service to rebuild.
@@ -342,7 +343,7 @@ with the default caps the coach uses at most a few dozen calls a day.
 4. Turn on failure notifications. The ping also keeps the free Render service from sleeping.
 
 ### 5. Phone
-1. Open the web app URL in Chrome → log in with your email (code or link).
+1. Open the web app URL in Chrome → log in with your email (enter the code from the email).
 2. Tap **Enable notifications** → allow. A test notification should arrive.
 3. Chrome menu ⋮ → **Add to Home screen / Install app** (from Chrome itself, not an APK).
 4. Recommended: Android Settings → Apps → Chrome → Battery → **Unrestricted**, so pushes aren't delayed.
@@ -415,18 +416,18 @@ stay server-side, so they still cap OpenRouter spend even if the login were ever
 ```bash
 cd backend
 python -m venv .venv && . .venv/bin/activate
-pip install -r requirements.txt pytest
-python -m pytest -q                          # no DB or network needed
+pip install -r requirements.txt pytest "moto[dynamodb]"
+python -m pytest -q                          # no AWS or network needed (moto fakes DynamoDB)
 python scripts/simulate_tick.py              # a simulated morning: ticks, a reply, What now?, a session, a meeting
 python scripts/simulate_tick.py --llm-down   # same with OpenRouter "unreachable" → templates
-DATABASE_URL=... python scripts/metrics.py   # success measures for the last 28 days (read-only)
+python scripts/metrics.py                    # success measures for the last 28 days (read-only; AWS_* env vars set)
                                              #   --from 2026-10-01 --to 2026-11-01 for a range
 cp .env.example .env   # fill in, then export the variables
 uvicorn app.main:app --reload
 
 # web app (another terminal)
 cd web
-SUPABASE_URL=... SUPABASE_ANON_KEY=... API_URL=http://localhost:8000 sh build-config.sh
+COGNITO_REGION=... COGNITO_CLIENT_ID=... API_URL=http://localhost:8000 sh build-config.sh
 python -m http.server 5173   # set WEB_ORIGIN=http://localhost:5173 for the backend
 ```
 
@@ -440,8 +441,8 @@ backend/app/
                  meeting digests (week ahead, tomorrow), the re-entry message, the Sunday lines, fences
   jewish_calendar.py  Shabbat / holiday quiet periods (hdate library, pure)
   config.py      settings: env-only secrets + the editable behaviour settings (SPECS)
-  user_settings.py    behaviour settings saved from the app or the chat (app_settings table)
-  preferences.py      what you asked of the assistant in chat (preferences table), in every prompt
+  user_settings.py    behaviour settings saved from the app or the chat
+  preferences.py      what you asked of the assistant in chat, in every prompt
   agent.py       chat agent: likely-topic candidates, playbooks, linking turns to tasks, reply buttons
   tools.py       the 12 tools, validation, text tool-call parsing
   llm_loop.py    tool-calling loop (one retry, one text-call recovery)
@@ -458,12 +459,13 @@ backend/app/
   prompts/       core + playbooks/, system, checkin, daily_morning/checkin/evening/reentry
   llm.py         OpenRouter client: fallback models, daily cap, timeout, 429 → fallback
   notify.py      web push + Pushover (levels, alarms, cancelling them)
-  auth.py        owner-only login check, cron secret
+  db.py          DynamoDB: the single-table layout, versioned read-modify-write, queries
+  auth.py        owner-only login check (Cognito tokens), cron secret
   tokens.py      signed notification-button tokens
 backend/tests/   unit + end-to-end tests (in-memory store, scripted LLM)
-backend/scripts/ simulate_tick (a simulated morning and week), metrics (success measures),
-                 backfill_next_actions (one-off after migration 006), gen_secrets
-db/schema.sql    full schema;  db/migrations/  idempotent upgrades
-web/             static web app (installable, a share target), service worker for push
+backend/scripts/ aws_setup (creates the AWS resources), migrate_from_postgres (one-off from Supabase),
+                 simulate_tick (a simulated morning and week), metrics (success measures), gen_secrets
+db/              the old Supabase schema (only for migrate_from_postgres.py)
+web/             static web app (installable, a share target), service worker for push; cognito.js: login
 render.yaml      Render Blueprint
 ```

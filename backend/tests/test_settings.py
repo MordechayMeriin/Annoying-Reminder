@@ -49,46 +49,29 @@ def test_overrides_change_get_settings():
     config.apply_overrides({"morning_time": "06:45", "timezone": "Europe/London"})
     s = config.get_settings()
     assert s.morning_time == time(6, 45) and s.tz == ZoneInfo("Europe/London")
-    assert s.database_url == "postgresql://test/test"  # env-only values untouched
+    assert s.dynamodb_table == "prominder-test"  # env-only values untouched
 
 
 class FakeDB:
-    """Just enough of db.* for user_settings."""
+    """Just enough storage for user_settings."""
 
     def __init__(self):
         self.rows: dict[str, str] = {}
 
-    def fetch_all(self, sql, params=()):
-        return [{"key": k, "value": v} for k, v in self.rows.items()]
+    def stored(self):
+        return dict(self.rows)
 
-    def connect(self):
-        db = self
-
-        class Conn:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *exc):
-                return False
-
-            def transaction(self):
-                return self
-
-            def execute(self, sql, params):
-                if sql.lstrip().startswith("insert"):
-                    db.rows[params[0]] = params[1]
-                else:
-                    for k in params[0]:
-                        db.rows.pop(k, None)
-
-        return Conn()
+    def write(self, to_set, to_reset):
+        self.rows.update(to_set)
+        for k in to_reset:
+            self.rows.pop(k, None)
 
 
 @pytest.fixture
 def fake_db(monkeypatch):
     fake = FakeDB()
-    monkeypatch.setattr(user_settings.db, "fetch_all", fake.fetch_all)
-    monkeypatch.setattr(user_settings.db, "connect", fake.connect)
+    monkeypatch.setattr(user_settings, "stored", fake.stored)
+    monkeypatch.setattr(user_settings, "write", fake.write)
     return fake
 
 

@@ -28,8 +28,8 @@ defaults:
 
 env:
   # Public values (the web app ships them to every browser), kept as repository *variables*.
-  SUPABASE_URL: ${{ vars.SUPABASE_URL }}
-  SUPABASE_ANON_KEY: ${{ vars.SUPABASE_ANON_KEY }}
+  COGNITO_REGION: ${{ vars.COGNITO_REGION }}
+  COGNITO_CLIENT_ID: ${{ vars.COGNITO_CLIENT_ID }}
   # Every Play upload needs a higher versionCode: the run number followed by the attempt (run 12 → 121,
   # its re-run → 122, run 13 → 131), so it always goes up.
   VERSION_CODE: ${{ github.run_number }}${{ github.run_attempt }}

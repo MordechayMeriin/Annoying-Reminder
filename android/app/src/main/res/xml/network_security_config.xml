@@ -5,7 +5,7 @@
   HTTPS-filtering services (NetFree, Rimon and similar, often running as a VPN) read secure traffic by
   putting their own certificate in the middle, which the user installs on the phone. Chrome accepts it,
   so the web app works; an app accepts it only when it says so here. Without this the login fails with
-  a certificate error ("Can't reach Supabase") on a filtered connection.
+  a certificate error ("Can't reach the login server") on a filtered connection.
 -->
 <network-security-config>
     <base-config cleartextTrafficPermitted="false">

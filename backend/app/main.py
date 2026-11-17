@@ -4,7 +4,7 @@ Annoying Reminder API.
 Public:   GET  /health, GET /config/push
 Cron:     POST /tick                (X-Cron-Secret header)
 Buttons:  POST /actions             (signed token from the notification: ▶ Start / ✓ Done / ▶ Another round)
-Owner:    everything else           (Supabase login + OWNER_USER_ID check), incl. GET/PATCH /settings,
+Owner:    everything else           (Cognito login + OWNER_USER_ID check), incl. GET/PATCH /settings,
           POST /what-now, POST /tasks/{id}/start, POST /sessions/{id}/end, PATCH /sessions/{id},
           POST /sessions/{id}/note, POST /tasks/bulk-action (Move overdue to next week · Drop them · Keep),
           GET /preferences, DELETE /preferences/{id}
@@ -442,11 +442,7 @@ class SubscriptionIn(BaseModel):
 
 @app.post("/push/subscribe", dependencies=[Depends(require_owner)])
 def subscribe(sub: SubscriptionIn):
-    db.execute(
-        """insert into push_subscriptions (endpoint, p256dh, auth) values (%s, %s, %s)
-           on conflict (endpoint) do update set p256dh = excluded.p256dh, auth = excluded.auth""",
-        (sub.endpoint, sub.keys.p256dh, sub.keys.auth),
-    )
+    notify.subscribe(sub.endpoint, sub.keys.p256dh, sub.keys.auth)
     return {"ok": True}
 
 
