@@ -28,3 +28,18 @@ for key, value in {
     os.environ.setdefault(key, value)
 
 sys.path.insert(0, str(Path(__file__).parent))  # so tests can `import fakes`
+
+
+import math  # noqa: E402
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _web_app_not_handed_over():
+    """Most tests have no DynamoDB: the handover check answers "not handed over" from its cache.
+    test_sync.py clears the cache to test the real thing."""
+    from app import sync
+    sync._handover_cache = (math.inf, False)
+    yield
+    sync._handover_cache = (math.inf, False)

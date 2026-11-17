@@ -15,7 +15,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -23,8 +25,22 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.prominder.myapp.ui.theme.Palette
 
+/** Phase A's test buttons, kept here: notifications, the alarm, and the Doze test. */
+data class PhoneTests(
+    /** "Test alarm set for 14:05:00", or null when none is waiting. */
+    val pendingAlarm: String? = null,
+    val lastAlarmResult: String? = null,
+    /** A short answer to the last tap ("Notifications are off: see the checklist"). */
+    val notice: String? = null,
+    val onNotifyNow: () -> Unit = {},
+    val onUrgentNow: () -> Unit = {},
+    val onAlarmIn1Min: () -> Unit = {},
+    val onAlarmIn1Hour: () -> Unit = {},
+    val onCancelAlarm: () -> Unit = {},
+)
+
 /**
- * What the app knows about itself: version, phone, permissions, the last test alarm, and its log.
+ * What the app knows about itself: version, phone, permissions, the backup, the last test alarm, and its log.
  * Share sends all of it as text (paste it into the chat with Claude when something's off).
  */
 @Composable
@@ -34,6 +50,8 @@ fun DiagnosticsScreen(
     onShare: () -> Unit,
     onClear: () -> Unit,
     onBack: () -> Unit,
+    onSyncNow: (() -> Unit)? = null,
+    tests: PhoneTests? = null,
 ) {
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp), contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 8.dp)) {
         item { TopBar("Diagnostics", onBack = onBack) }
@@ -51,6 +69,11 @@ fun DiagnosticsScreen(
                 Button(onClick = onShare, modifier = Modifier.weight(1f)) { Text("Share") }
                 OutlinedButton(onClick = onClear, modifier = Modifier.weight(1f)) { Text("Clear log") }
             }
+            onSyncNow?.let {
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(onClick = it, modifier = Modifier.fillMaxWidth()) { Text("Back up now") }
+            }
+            tests?.let { PhoneTestsCard(it) }
             SectionTitle("Log, newest first")
         }
         if (logLines.isEmpty()) {
@@ -64,5 +87,38 @@ fun DiagnosticsScreen(
             }
         }
         item { Spacer(Modifier.height(24.dp)) }
+    }
+}
+
+@Composable
+private fun PhoneTestsCard(t: PhoneTests) {
+    SectionTitle("Tests")
+    AppCard {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = t.onNotifyNow, modifier = Modifier.weight(1f)) { Text("Notify me now") }
+            OutlinedButton(onClick = t.onUrgentNow, modifier = Modifier.weight(1f)) { Text("Urgent now") }
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = t.onAlarmIn1Min, modifier = Modifier.weight(1f)) { Text("Alarm in 1 min") }
+            OutlinedButton(onClick = t.onAlarmIn1Hour, modifier = Modifier.weight(1f)) { Text("Alarm in 1 hour") }
+        }
+        Spacer(Modifier.height(8.dp))
+        Muted("The Doze test: set the 1-hour alarm, lock the phone and leave it alone. It should ring on time.")
+        t.pendingAlarm?.let {
+            Spacer(Modifier.height(12.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("⏰ $it", modifier = Modifier.weight(1f))
+                TextButton(onClick = t.onCancelAlarm) { Text("Cancel", color = Palette.Muted) }
+            }
+        }
+        t.lastAlarmResult?.let {
+            Spacer(Modifier.height(8.dp))
+            Muted("Last test: $it")
+        }
+        t.notice?.let {
+            Spacer(Modifier.height(8.dp))
+            Text(it, color = Palette.Accent)
+        }
     }
 }

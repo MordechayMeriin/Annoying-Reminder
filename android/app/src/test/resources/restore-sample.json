@@ -1,0 +1,182 @@
+{
+ "tables": {
+  "tasks": [
+   {
+    "id": 1,
+    "parent_id": null,
+    "title": "Write report",
+    "description": "For Dana",
+    "kind": "task",
+    "priority": 1,
+    "status": "open",
+    "due_at": "2026-11-17T13:00:00.000000Z",
+    "remind_at": "2026-11-17T13:00:00.000000Z",
+    "remind_requested": true,
+    "recurrence": null,
+    "nag_count": 0,
+    "escalated": false,
+    "blocked_reason": null,
+    "blocked_until": null,
+    "last_notified_at": null,
+    "created_at": "2026-11-17T17:15:03.443778Z",
+    "completed_at": null,
+    "next_action": "Open the doc",
+    "estimate_min": 25,
+    "focus_date": "2026-11-17",
+    "focus_rank": 1,
+    "resume_note": null,
+    "parked_until": null,
+    "stale_offered_at": null,
+    "avoid_asked_at": null,
+    "avoid_asks": 0,
+    "avoid_reset_at": null
+   },
+   {
+    "id": 2,
+    "parent_id": 1,
+    "title": "Outline",
+    "description": null,
+    "kind": "task",
+    "priority": 1,
+    "status": "open",
+    "due_at": null,
+    "remind_at": null,
+    "remind_requested": false,
+    "recurrence": null,
+    "nag_count": 0,
+    "escalated": false,
+    "blocked_reason": null,
+    "blocked_until": null,
+    "last_notified_at": null,
+    "created_at": "2026-11-17T17:15:03.448330Z",
+    "completed_at": null,
+    "next_action": null,
+    "estimate_min": null,
+    "focus_date": null,
+    "focus_rank": null,
+    "resume_note": null,
+    "parked_until": null,
+    "stale_offered_at": null,
+    "avoid_asked_at": null,
+    "avoid_asks": 0,
+    "avoid_reset_at": null
+   },
+   {
+    "id": 3,
+    "parent_id": null,
+    "title": "Standup",
+    "description": null,
+    "kind": "meeting",
+    "priority": 1,
+    "status": "open",
+    "due_at": "2026-11-18T08:00:00.000000Z",
+    "remind_at": "2026-11-18T07:45:00.000000Z",
+    "remind_requested": true,
+    "recurrence": "weekdays",
+    "nag_count": 0,
+    "escalated": false,
+    "blocked_reason": null,
+    "blocked_until": null,
+    "last_notified_at": null,
+    "created_at": "2026-11-17T17:15:03.453654Z",
+    "completed_at": null,
+    "next_action": null,
+    "estimate_min": null,
+    "focus_date": null,
+    "focus_rank": null,
+    "resume_note": null,
+    "parked_until": null,
+    "stale_offered_at": null,
+    "avoid_asked_at": null,
+    "avoid_asks": 0,
+    "avoid_reset_at": null
+   }
+  ],
+  "events": [
+   {
+    "task_id": 1,
+    "kind": "postponed",
+    "note": "snoozed 60 min",
+    "avoid_reason": null,
+    "created_at": "2026-11-17T17:15:03.455292Z",
+    "rid": "bc84c943"
+   }
+  ],
+  "messages": [
+   {
+    "id": 1,
+    "role": "user",
+    "content": "remind me to write the report",
+    "kind": "chat",
+    "task_id": 1,
+    "task_ids": [
+     1
+    ],
+    "chips": "[]",
+    "model": null,
+    "created_at": "2026-11-17T17:15:03.467427Z"
+   },
+   {
+    "id": 2,
+    "role": "assistant",
+    "content": "בוקר טוב! Morning plan",
+    "kind": "morning",
+    "task_id": 1,
+    "task_ids": [
+     1,
+     2
+    ],
+    "chips": "[{\"label\": \"▶ Start\", \"action\": \"start\", \"task_id\": 1}]",
+    "model": "test/model",
+    "created_at": "2026-11-17T17:15:03.473167Z"
+   }
+  ],
+  "sessions": [
+   {
+    "id": 1,
+    "task_id": 1,
+    "started_at": "2026-11-17T17:15:03.478074Z",
+    "planned_min": 25,
+    "ended_at": "2026-11-17T17:15:03.479615Z",
+    "outcome": "stopped",
+    "end_sent_at": null,
+    "note_closed_at": null
+   }
+  ],
+  "preferences": [
+   {
+    "id": 1,
+    "text": "Shorter messages",
+    "created_at": "2026-11-17T17:15:03.484975Z"
+   }
+  ],
+  "settings": [
+   {
+    "key": "morning_time",
+    "value": "08:00",
+    "updated_at": "2026-11-17T17:15:03.488865Z"
+   }
+  ],
+  "focus": [
+   {
+    "date": "2026-11-17",
+    "ids": [
+     1
+    ]
+   }
+  ]
+ },
+ "counters": {
+  "message": 2,
+  "preference": 1,
+  "session": 1,
+  "task": 3
+ },
+ "status": {
+  "handedOverAt": "2026-11-17T17:15:03.509430Z",
+  "lastUploadAt": null,
+  "lastRestoreAt": "2026-11-17T17:15:03.509430Z",
+  "device": "fixture"
+ },
+ "serverTime": "2026-11-17T17:15:03.509430Z"
+}

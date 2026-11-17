@@ -14,7 +14,7 @@ focus sessions with a timer, "where did you stop?", sharing / dictating tasks, a
 Phase 3 is in: gentler pressure (avoided tasks, de-escalation, re-entry after a lapse), the Sunday
 cleanup, hard stops ("fences"), and settings / preferences said in chat.)
 
-**Android:** a native app is being built in [`android/`](android/README.md), following [the Android plan](docs/android-plan.md). Phase A (login, notifications, alarms, the setup checklist) is in.
+**Android:** a native app is being built in [`android/`](android/README.md), following [the Android plan](docs/android-plan.md). Phase A (login, notifications, alarms, the setup checklist) and Phase B (the handover: your data lives on the phone, backed up to the server; the web app switches off) are in.
 
 ## How it works
 
