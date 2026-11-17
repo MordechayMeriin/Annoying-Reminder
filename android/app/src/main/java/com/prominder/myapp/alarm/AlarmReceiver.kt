@@ -57,14 +57,15 @@ class AlarmReceiver : BroadcastReceiver() {
     /** Work that touches the database, with the receiver kept alive until it's done (goAsync). */
     private fun background(context: Context, block: suspend (ReminderApp) -> Unit) {
         val app = context.applicationContext as ReminderApp
-        val pending = goAsync()
+        // Null when called directly rather than by Android (a test): then there's nothing to keep alive.
+        val pending: PendingResult? = goAsync()
         app.scope.launch {
             try {
                 block(app)
             } catch (e: Exception) {
                 Diag.log("tick", "Failed: ${e::class.java.simpleName}: ${e.message}")
             } finally {
-                pending.finish()
+                pending?.finish()
             }
         }
     }

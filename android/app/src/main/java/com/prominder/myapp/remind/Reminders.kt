@@ -5,6 +5,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import androidx.core.content.edit
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.PeriodicWorkRequestBuilder
@@ -73,7 +74,7 @@ object Reminders {
             Diag.log("tick", "Tick: $reason$late")
             report.lines.forEach { Diag.log("tick", "  $it") }
         }
-        prefs(context).edit().putLong(KEY_LAST, System.currentTimeMillis()).apply()
+        prefs(context).edit { putLong(KEY_LAST, System.currentTimeMillis()) }
         setAlarm(context, report.nextWake)
     }
 
@@ -89,7 +90,7 @@ object Reminders {
         val exact = Build.VERSION.SDK_INT < 31 || am.canScheduleExactAlarms()
         if (exact) am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, ms, fire)
         else am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, ms, fire)
-        prefs(context).edit().putLong(KEY_NEXT, ms).putBoolean(KEY_EXACT, exact).apply()
+        prefs(context).edit { putLong(KEY_NEXT, ms).putBoolean(KEY_EXACT, exact) }
         return Next(ms, exact)
     }
 

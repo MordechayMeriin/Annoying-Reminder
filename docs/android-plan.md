@@ -290,6 +290,10 @@ untouched with the screen off for an hour (that's the Doze test).
 *Done when:* the app shows your real tasks and chat in airplane mode, and reinstalling it restores them.
 
 ### Phase C: reminders
+*Built: see [android-phase-c.md](android-phase-c.md). Extended at your request: the backend left Render for AWS Lambda
+(sign-in, the backup, the alive check). The sun times use hdate's formula so they match the Python tests to the minute;
+KosherJava gives the Hebrew calendar.*
+
 - Port `logic.py` (pure functions, ~1,000 lines) and its tests first. The tests are the spec: a test that
   passes in Python must pass in Kotlin.
 - Port the Shabbat and holiday logic to KosherJava Zmanim, checked against `test_shabbat.py`.
