@@ -32,6 +32,9 @@ object GoogleSignIn {
         val result = try {
             CredentialManager.create(context).getCredential(context, request)
         } catch (e: GetCredentialCancellationException) {
+            // Closing the sheet is a cancellation, but so is Google refusing after you chose an account
+            // ("[16] Account reauth failed"): only the first is silent.
+            cancellationMessage(e.errorMessage?.toString())?.let { throw AuthException(it, cause = e) }
             return null
         } catch (e: NoCredentialException) {
             throw AuthException("There's no Google account on this phone. Add one in Settings → Accounts, then try again.", cause = e)
@@ -52,6 +55,20 @@ object GoogleSignIn {
     /** After logging out: forget the chosen account, so the next sign-in asks which one again. */
     suspend fun forget(context: Context) {
         runCatching { CredentialManager.create(context).clearCredentialState(ClearCredentialStateRequest()) }
+    }
+
+    /** Null when you closed the sheet yourself; otherwise what to tell you. */
+    internal fun cancellationMessage(detail: String?): String? {
+        if (detail.isNullOrBlank() || detail.contains("cancelled by the user", ignoreCase = true)) return null
+        val setup = detail.contains("[16]") || detail.contains("reauth", ignoreCase = true)
+        return if (setup) {
+            "Google closed the sign-in after you chose the account. That usually means Google Cloud doesn't recognise " +
+                "this app yet: check that the Android client's SHA-1 is the app signing key's (not the upload key's), " +
+                "that it's in the same project as the Web client, and that your Gmail is a test user. " +
+                "New settings can take a few minutes to work.\n($detail)"
+        } else {
+            "Google sign-in stopped. Try again.\n($detail)"
+        }
     }
 
     internal fun describe(e: GetCredentialException): String {
