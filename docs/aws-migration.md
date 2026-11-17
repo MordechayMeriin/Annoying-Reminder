@@ -84,15 +84,19 @@ Do it in this order, so nothing the app writes during the switch is lost:
    Ids stay the same, so links in old notifications still work.
 3. **Render → annoying-reminder-api → Environment:** add `AWS_REGION`, `DYNAMODB_TABLE`,
    `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`, and replace
-   `OWNER_USER_ID` with the new value (your Cognito user's id). Delete `DATABASE_URL`, `SUPABASE_URL`,
-   `SUPABASE_ANON_KEY`.
-4. **Render → annoying-reminder-web → Environment:** add `COGNITO_REGION` and `COGNITO_CLIENT_ID`, delete
-   `SUPABASE_URL` and `SUPABASE_ANON_KEY`. Then deploy both services from the branch with this change
-   (or merge it to `main`).
+   `OWNER_USER_ID` with the new value (your Cognito user's id). Save with **Save only** (not "Save and
+   deploy"). Don't delete anything yet: the code running now still needs the Supabase values.
+4. **Render → annoying-reminder-web → Environment:** add `COGNITO_REGION` and `COGNITO_CLIENT_ID`,
+   **Save only**.
 5. **GitHub → Settings → Secrets and variables → Actions → Variables** (for the Android app): add
-   `COGNITO_REGION` and `COGNITO_CLIENT_ID`, delete `SUPABASE_URL` and `SUPABASE_ANON_KEY`.
-6. **Log in again** on the web app and the phone (the old Supabase logins don't carry over). Check that
+   `COGNITO_REGION` and `COGNITO_CLIENT_ID`.
+6. **Merge the pull request.** Render deploys both services from `main` (if auto-deploy is off: each
+   service → **Manual Deploy → Deploy latest commit**). Wait until both show **Live**, and check that
+   `https://<api>.onrender.com/health` returns `{"ok":true}`.
+7. **Log in again** on the web app and the phone (the old Supabase logins don't carry over). Check that
    your chat and tasks are there, then **turn the cron job back on**.
+8. **Clean up:** delete `DATABASE_URL`, `SUPABASE_URL`, `SUPABASE_ANON_KEY` from the API service,
+   `SUPABASE_URL`, `SUPABASE_ANON_KEY` from the web service, and the two `SUPABASE_*` variables in GitHub.
 
 ## If something goes wrong
 
