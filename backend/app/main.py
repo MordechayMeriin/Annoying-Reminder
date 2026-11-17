@@ -2,9 +2,10 @@
 Annoying Reminder API.
 
 Public:   GET  /health, GET /config/push
+Login:    POST /auth/google          (the owner's Google ID token → the app's own login token)
 Cron:     POST /tick                (X-Cron-Secret header)
 Buttons:  POST /actions             (signed token from the notification: ▶ Start / ✓ Done / ▶ Another round)
-Owner:    everything else           (Cognito login + OWNER_USER_ID check), incl. GET/PATCH /settings,
+Owner:    everything else           (that login token, or a Cognito login + OWNER_USER_ID check), incl. GET/PATCH /settings,
           POST /what-now, POST /tasks/{id}/start, POST /sessions/{id}/end, PATCH /sessions/{id},
           POST /sessions/{id}/note, POST /tasks/bulk-action (Move overdue to next week · Drop them · Keep),
           GET /preferences, DELETE /preferences/{id}
@@ -30,7 +31,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import (actions, agent, db, httpclient, notify, preferences, prompting, scheduler, sessions, tasks, thread,
+from . import (actions, agent, auth, db, httpclient, notify, preferences, prompting, scheduler, sessions, tasks, thread,
                user_settings)
 from .auth import require_cron, require_owner
 from .config import SPECS, get_settings
@@ -77,6 +78,31 @@ def push_config():
     s = get_settings()
     enabled = notify.browser_push_on() or (s.browser_push_available and not s.pushover_enabled)
     return {"enabled": enabled, "vapidPublicKey": s.vapid_public_key if enabled else None}
+
+
+# ---------------------------------------------------------------- login (Google sign-in, the Android app)
+
+class GoogleSignInIn(BaseModel):
+    idToken: str = Field(min_length=1, max_length=8192)
+
+
+_login_times: deque[float] = deque()
+_LOGINS_PER_MINUTE = 10
+
+
+@app.post("/auth/google")
+async def auth_google(body: GoogleSignInIn):
+    """Trades the owner's Google ID token for the app's own login token (see auth.py)."""
+    now = time.time()
+    while _login_times and now - _login_times[0] > 60:
+        _login_times.popleft()
+    if len(_login_times) >= _LOGINS_PER_MINUTE:
+        raise HTTPException(status_code=429, detail="Too many attempts. Wait a minute.")
+    _login_times.append(now)
+    email, google_id = await auth.verify_google(body.idToken)
+    token, expires = auth.make_session_token(email, google_id)
+    log.info("Logged in with Google")
+    return {"token": token, "expiresAt": expires, "email": email}
 
 
 # ---------------------------------------------------------------- cron

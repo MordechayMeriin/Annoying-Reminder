@@ -3,7 +3,7 @@
 ProMinder, the native Android version of Annoying Reminder: Kotlin + Jetpack Compose, Android 10 and up. The full
 plan is in [docs/android-plan.md](../docs/android-plan.md); what each phase added is in `docs/android-phase-*.md`.
 
-**Phase A ("hello, Android")** is in: logging in with your email code (Cognito), the three notification
+**Phase A ("hello, Android")** is in: signing in with Google (only your account gets in), the three notification
 channels, the first-run checklist, the Diagnostics screen, and test buttons for a notification and an
 alarm. There are no tasks yet: those come with Phase B.
 
@@ -26,13 +26,16 @@ Locally (optional, needs JDK 17 and the Android SDK): `cd android && ./gradlew :
 
 ### Running it from Android Studio
 
-Open the `android/` folder (not the repo root). For login to work, add the web app's two login values
-to `android/local.properties`, which Android Studio creates and git ignores:
+Open the `android/` folder (not the repo root). For login to work, add the Google client id to
+`android/local.properties`, which Android Studio creates and git ignores:
 
 ```properties
-COGNITO_REGION=us-west-2
-COGNITO_CLIENT_ID=...
+GOOGLE_WEB_CLIENT_ID=1234567890-abc.apps.googleusercontent.com
 ```
+
+Google only signs in builds it knows: a build from Android Studio is signed with your computer's debug key
+and installs as `com.prominder.myapp.debug`, so it needs its own Android client (step 1.3 below, with that
+package name and the SHA-1 from `./gradlew signingReport`).
 
 Then sync Gradle, pick the S9 (USB debugging on) or an emulator, and press Run. The debug build installs as
 `com.prominder.myapp.debug`, next to the Play Store version.
@@ -50,7 +53,7 @@ If it's missing, login says the certificate check failed.
 android/app/src/main/java/com/prominder/myapp/
   ReminderApp.kt        starts first: the log, the channels, the login
   MainActivity.kt       the app's screen
-  auth/                 Cognito email-code login (plain HTTPS), keeping you logged in
+  auth/                 Google sign-in (Credential Manager), the backend's login token, keeping you logged in
   notify/               the three channels (normal / urgent / alarm), showing notifications
   alarm/                the test alarm: exact alarm → receiver → full-screen alarm; set again after a restart
   setup/                the first-run checklist: what to allow, and the settings screen for each
@@ -64,17 +67,36 @@ android/store/          Play Store texts, icon and feature graphic
 
 These are yours to do, in a browser. Steps 1–3 can start today; Google's identity check can take a few days.
 
-### 1. Repository variables (login)
+### 1. Google sign-in
 
-GitHub → the repo → Settings → Secrets and variables → Actions → **Variables** → New repository variable:
+How it works: Google shows its account sheet on the phone and gives the app a token signed by Google. The
+app sends it to the backend (`POST /auth/google`), which checks Google's signature and that the account is
+`OWNER_GOOGLE_EMAIL`, and gives the app its own login for a year. Anyone else's account is refused.
 
-| Name | Value |
-|---|---|
-| `COGNITO_REGION` | The same as the web app's (Render → annoying-reminder-web → Environment) |
-| `COGNITO_CLIENT_ID` | The same as the web app's |
+In the [Google Cloud console](https://console.cloud.google.com), in any project (the one for Play uploads in
+step 5 is fine):
 
-They're public by design (the web app sends them to every browser), so they're variables, not secrets.
-Without them the app builds but its login screen says it has no login settings.
+1. **Google Auth Platform** (APIs & Services → OAuth consent screen) → **Get started**: app name `ProMinder`,
+   your email as support and contact email, audience **External** → Create. Then **Audience → Test users →
+   Add users**: your Gmail address. (Leaving the app in "Testing" is fine: only test users can sign in, and
+   that's only you anyway.)
+2. **Clients → Create client → Web application**, name `ProMinder server` → Create. Copy the **Client ID**
+   (it ends in `.apps.googleusercontent.com`). This is the one the next steps call "the web client id",
+   although there's no web app involved: it's the id the backend checks tokens against.
+3. **Clients → Create client → Android**, name `ProMinder (Play)`, package name `com.prominder.myapp`, and the
+   **SHA-1** from the Play Console: ProMinder → Test and release → **App integrity** → App signing →
+   *App signing key certificate* → SHA-1. (Google Play re-signs the app with that key, so that's the
+   certificate your phone sees.) Create; there's nothing to copy.
+4. **Render → annoying-reminder-api → Environment**: `GOOGLE_CLIENT_ID` = the web client id,
+   `OWNER_GOOGLE_EMAIL` = your Gmail address. Save (Render redeploys).
+5. **GitHub → the repo → Settings → Secrets and variables → Actions → Variables**: `GOOGLE_WEB_CLIENT_ID` =
+   the same web client id. It's public by design (anyone could read it out of the app), so it's a variable,
+   not a secret. Without it the app builds but its login screen says it has no login settings.
+6. Build a new version: Actions → **Android** → Run workflow on `main` with *upload* ticked.
+
+If signing in says "this build isn't registered in Google Cloud", the Android client's package name or SHA-1
+doesn't match (step 3). Optional: the variable `API_URL` points the app at another backend (default
+`https://annoying-reminder-api.onrender.com`).
 
 ### 2. Google Play developer account
 
@@ -163,7 +185,8 @@ in 1 min** with the phone locked, and restarting the phone while a 1-hour alarm 
 
 | Kind | Name | Used for |
 |---|---|---|
-| Variable | `COGNITO_REGION`, `COGNITO_CLIENT_ID` | Login (built into the app) |
+| Variable | `GOOGLE_WEB_CLIENT_ID` | Google sign-in (built into the app) |
+| Variable (optional) | `API_URL` | The backend (default `https://annoying-reminder-api.onrender.com`) |
 | Variable (optional) | `PLAY_RELEASE_STATUS` | `completed` (default) or `draft` |
 | Secret | `ANDROID_UPLOAD_KEYSTORE_BASE64`, `ANDROID_UPLOAD_KEYSTORE_PASSWORD`, `ANDROID_UPLOAD_KEY_ALIAS`, `ANDROID_UPLOAD_KEY_PASSWORD` | Signing the bundle |
 | Secret | `PLAY_SERVICE_ACCOUNT_JSON` | Uploading to Play |

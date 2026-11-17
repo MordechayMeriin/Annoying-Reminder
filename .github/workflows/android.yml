@@ -28,8 +28,10 @@ defaults:
 
 env:
   # Public values (the web app ships them to every browser), kept as repository *variables*.
-  COGNITO_REGION: ${{ vars.COGNITO_REGION }}
-  COGNITO_CLIENT_ID: ${{ vars.COGNITO_CLIENT_ID }}
+  # Google sign-in: the OAuth "Web application" client id (the same as GOOGLE_CLIENT_ID on Render).
+  GOOGLE_WEB_CLIENT_ID: ${{ vars.GOOGLE_WEB_CLIENT_ID }}
+  # Optional: the backend's address (default https://annoying-reminder-api.onrender.com, in app/build.gradle.kts).
+  API_URL: ${{ vars.API_URL }}
   # Every Play upload needs a higher versionCode: the run number followed by the attempt (run 12 → 121,
   # its re-run → 122, run 13 → 131), so it always goes up.
   VERSION_CODE: ${{ github.run_number }}${{ github.run_attempt }}

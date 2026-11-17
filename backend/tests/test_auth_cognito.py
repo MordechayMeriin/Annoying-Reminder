@@ -48,8 +48,8 @@ class FakeKeysClient:
 def keys(monkeypatch):
     client = FakeKeysClient()
     monkeypatch.setattr(httpclient, "client", lambda: client)
-    monkeypatch.setattr(auth, "_keys", {})
-    monkeypatch.setattr(auth, "_keys_at", 0.0)
+    monkeypatch.setattr(auth.cognito_keys, "keys", {})
+    monkeypatch.setattr(auth.cognito_keys, "fetched_at", 0.0)
     return client
 
 

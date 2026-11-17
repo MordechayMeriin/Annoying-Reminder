@@ -17,13 +17,11 @@ val localProperties = Properties().apply {
 
 /**
  * A build setting from a Gradle property (-PNAME=…), android/local.properties (your PC),
- * or an environment variable (CI), else [default].
+ * or an environment variable (CI), else [default]. Blank counts as not set (an unset GitHub variable is blank).
  */
 fun setting(name: String, default: String = ""): String =
-    (project.findProperty(name) as String?)
-        ?: localProperties.getProperty(name)
-        ?: System.getenv(name)
-        ?: default
+    listOf(project.findProperty(name) as String?, localProperties.getProperty(name), System.getenv(name))
+        .firstOrNull { !it.isNullOrBlank() } ?: default
 
 android {
     namespace = "com.prominder.myapp"
@@ -38,9 +36,11 @@ android {
         versionCode = setting("VERSION_CODE", "1").toInt()
         versionName = setting("VERSION_NAME", "0.1.0-dev")
 
-        // Public by design (the web app ships the same two values to the browser). Secrets never go here.
-        buildConfigField("String", "COGNITO_REGION", "\"${setting("COGNITO_REGION")}\"")
-        buildConfigField("String", "COGNITO_CLIENT_ID", "\"${setting("COGNITO_CLIENT_ID")}\"")
+        // Public by design (anyone can read them out of the app). Secrets never go here.
+        // The backend the app logs in to (POST /auth/google).
+        buildConfigField("String", "API_URL", "\"${setting("API_URL", "https://annoying-reminder-api.onrender.com")}\"")
+        // Google sign-in: the OAuth client id of type "Web application" (the same as GOOGLE_CLIENT_ID on Render).
+        buildConfigField("String", "GOOGLE_WEB_CLIENT_ID", "\"${setting("GOOGLE_WEB_CLIENT_ID")}\"")
     }
 
     signingConfigs {
@@ -110,6 +110,9 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.okhttp)
+    implementation(libs.androidx.credentials)
+    implementation(libs.androidx.credentials.play.services)
+    implementation(libs.googleid)
     debugImplementation(libs.compose.ui.tooling)
     debugImplementation(libs.compose.ui.test.manifest)
 

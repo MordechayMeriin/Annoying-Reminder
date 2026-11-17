@@ -12,7 +12,12 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: "3.12.8"
-      # AWS (DynamoDB + Cognito): the values scripts/aws_setup.py prints
+      # Google sign-in (the Android app): see android/README.md, "Google sign-in"
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: OWNER_GOOGLE_EMAIL
+        sync: false
+      # AWS: the values scripts/aws_setup.py prints. The three Cognito ones are optional (the web app's login).
       - key: AWS_REGION
         sync: false
       - key: DYNAMODB_TABLE

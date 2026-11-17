@@ -47,18 +47,18 @@ class ScreenshotTest {
     )
 
     @Test
-    fun login_email() = shot("1_login_email") {
-        LoginScreen(LoginState(email = "me@example.com"), {}, {}, {}, {}, {})
+    fun login() = shot("1_login") {
+        LoginScreen(LoginState(), {})
     }
 
     @Test
-    fun login_code() = shot("2_login_code") {
-        LoginScreen(LoginState(email = "me@example.com", codeSent = true, code = "1234", message = "Check your email for the code."), {}, {}, {}, {}, {})
+    fun login_refused() = shot("2_login_refused") {
+        LoginScreen(LoginState(message = "Only the owner's Google account can use this app. Choose me@example.com instead."), {})
     }
 
     @Test
     fun login_unconfigured() = shot("3_login_unconfigured") {
-        LoginScreen(LoginState(configured = false), {}, {}, {}, {}, {})
+        LoginScreen(LoginState(configured = false), {})
     }
 
     @Test

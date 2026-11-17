@@ -2,27 +2,25 @@ package com.prominder.myapp.auth
 
 import kotlinx.serialization.Serializable
 
-/** A Cognito login: what the app keeps so you stay logged in. */
+/**
+ * A login: the backend's own token, handed out after Google sign-in (POST /auth/google).
+ * A login saved by an older version (Cognito) has other fields, doesn't load, and so asks you to sign in again.
+ */
 @Serializable
 data class Session(
-    val accessToken: String,
-    val refreshToken: String,
-    /** When [accessToken] stops working, in seconds since 1970 (UTC). */
+    val token: String,
+    /** When [token] stops working, in seconds since 1970 (UTC): a year after signing in. */
     val expiresAt: Long,
-    val userId: String,
     val email: String,
 ) {
-    /** True when the access token has expired or will within [marginSeconds]. */
-    fun expiresSoon(nowSeconds: Long, marginSeconds: Long = 60): Boolean = expiresAt - marginSeconds <= nowSeconds
+    fun expired(nowSeconds: Long): Boolean = expiresAt <= nowSeconds
 }
 
-/** Something went wrong logging in; [message] is written for you, not for a developer. */
+/** Something went wrong signing in; [message] is written for you, not for a developer. */
 class AuthException(message: String, val kind: Kind = Kind.Other, cause: Throwable? = null) : Exception(message, cause) {
     enum class Kind {
-        /** No connection or the login server didn't answer: try again later, don't log out. */
+        /** No connection, or the server didn't answer: try again later. */
         Network,
-        /** Cognito says the login (refresh token) is no longer valid: log in again. */
-        SessionGone,
         Other,
     }
 }

@@ -312,6 +312,8 @@ write units; Cognito: 10,000 monthly users). Moving from the old Supabase setup:
 3. It prints the values for Render: `AWS_REGION`, `DYNAMODB_TABLE`, `AWS_ACCESS_KEY_ID`,
    `AWS_SECRET_ACCESS_KEY`, `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`, `OWNER_USER_ID` for the API, and
    `COGNITO_REGION`, `COGNITO_CLIENT_ID` for the web app.
+4. The Android app signs in with Google instead: `GOOGLE_CLIENT_ID` and `OWNER_GOOGLE_EMAIL` for the API.
+   How to get them: [android/README.md → Google sign-in](android/README.md#1-google-sign-in).
 
 ### 2. Secrets
 ```bash
@@ -460,7 +462,7 @@ backend/app/
   llm.py         OpenRouter client: fallback models, daily cap, timeout, 429 → fallback
   notify.py      web push + Pushover (levels, alarms, cancelling them)
   db.py          DynamoDB: the single-table layout, versioned read-modify-write, queries
-  auth.py        owner-only login check (Cognito tokens), cron secret
+  auth.py        owner-only login: Google sign-in (Android) and Cognito tokens (web), cron secret
   tokens.py      signed notification-button tokens
 backend/tests/   unit + end-to-end tests (in-memory store, scripted LLM)
 backend/scripts/ aws_setup (creates the AWS resources), migrate_from_postgres (one-off from Supabase),

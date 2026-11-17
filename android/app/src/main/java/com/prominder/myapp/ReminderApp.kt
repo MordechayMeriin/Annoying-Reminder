@@ -2,7 +2,7 @@ package com.prominder.myapp
 
 import android.app.Application
 import com.prominder.myapp.auth.AuthRepository
-import com.prominder.myapp.auth.CognitoAuth
+import com.prominder.myapp.auth.BackendAuth
 import com.prominder.myapp.auth.PrefsSessionStore
 import com.prominder.myapp.diag.Diag
 import com.prominder.myapp.notify.Channels
@@ -19,8 +19,9 @@ class ReminderApp : Application() {
         Diag.init(this)
         logCrashes()
         Channels.ensure(this)
-        val http = OkHttpClient.Builder().callTimeout(20, TimeUnit.SECONDS).build()
-        auth = AuthRepository(CognitoAuth(BuildConfig.COGNITO_REGION, BuildConfig.COGNITO_CLIENT_ID, http), PrefsSessionStore(this))
+        // Long enough for Render's free plan, which can take most of a minute to wake the server.
+        val http = OkHttpClient.Builder().callTimeout(90, TimeUnit.SECONDS).build()
+        auth = AuthRepository(BackendAuth(BuildConfig.API_URL, http), PrefsSessionStore(this))
         // Seeing this often without a reason (no restart, no update) means Android keeps closing the app.
         Diag.log("app", "App started (${BuildConfig.VERSION_NAME})")
     }

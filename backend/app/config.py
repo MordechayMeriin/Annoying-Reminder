@@ -297,10 +297,17 @@ class Settings:
     aws_region: str = field(default_factory=lambda: aws_region())
     dynamodb_table: str = field(default_factory=lambda: dynamodb_table())
 
-    # --- Auth (Cognito user pool: the app logs in with an emailed code) ---
-    cognito_user_pool_id: str = field(default_factory=lambda: _req("COGNITO_USER_POOL_ID"))
-    cognito_client_id: str = field(default_factory=lambda: _req("COGNITO_CLIENT_ID"))
-    owner_user_id: str = field(default_factory=lambda: _req("OWNER_USER_ID"))   # your Cognito user's "sub"
+    # --- Auth: Google sign-in (the Android app). Both empty: Google sign-in is off. ---
+    # The OAuth client id of type "Web application" in Google Cloud: the app asks Google for a token
+    # addressed to it, and only tokens addressed to it are accepted.
+    google_client_id: str = field(default_factory=lambda: _opt("GOOGLE_CLIENT_ID", ""))
+    # The one Google account allowed in.
+    owner_google_email: str = field(default_factory=lambda: _opt("OWNER_GOOGLE_EMAIL", "").lower())
+
+    # --- Auth: Cognito (the web app's emailed code). Optional: all three empty turns it off. ---
+    cognito_user_pool_id: str = field(default_factory=lambda: _opt("COGNITO_USER_POOL_ID", ""))
+    cognito_client_id: str = field(default_factory=lambda: _opt("COGNITO_CLIENT_ID", ""))
+    owner_user_id: str = field(default_factory=lambda: _opt("OWNER_USER_ID", ""))   # your Cognito user's "sub"
 
     # --- Secrets ---
     cron_secret: str = field(default_factory=lambda: _req("CRON_SECRET"))

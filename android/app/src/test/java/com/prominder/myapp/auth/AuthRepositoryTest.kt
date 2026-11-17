@@ -12,7 +12,7 @@ import org.junit.Test
 class AuthRepositoryTest {
     private val server = MockWebServer().apply { start() }
     private var now = 1_000L
-    private val api = CognitoAuth("us-west-2", "client", nowSeconds = { now }, endpoint = server.url("/").toString())
+    private val api = BackendAuth(server.url("/").toString())
 
     private class MemoryStore(var saved: Session? = null) : SessionStore {
         override fun load() = saved
@@ -24,87 +24,53 @@ class AuthRepositoryTest {
 
     @Test
     fun `a saved login counts as logged in, offline too`() {
-        val store = MemoryStore(Session("a", "r", 5_000, "u", "me@example.com"))
-        val repo = AuthRepository(api, store, nowSeconds = { now })
+        val repo = AuthRepository(api, MemoryStore(Session("t", 5_000, "me@example.com")), nowSeconds = { now })
         assertEquals("me@example.com", repo.session.value?.email)
-    }
-
-    @Test
-    fun `a fresh token is used as is`() = runTest {
-        val repo = AuthRepository(api, MemoryStore(Session("a", "r", 5_000, "u", "e")), nowSeconds = { now })
-        assertEquals("a", repo.accessToken())
+        assertEquals("t", repo.token())
         assertEquals(0, server.requestCount)
     }
 
     @Test
-    fun `an expiring token is refreshed and saved, keeping the email`() = runTest {
-        val store = MemoryStore(Session("old", "r1", 1_030, "u", "me@example.com"))
-        val repo = AuthRepository(api, store, nowSeconds = { now })
-        val token = jwt("u")
-        server.enqueue(MockResponse().setBody("""{"AuthenticationResult":{"AccessToken":"$token","ExpiresIn":3600}}"""))
-        assertEquals(token, repo.accessToken())
-        assertEquals(Session(token, "r1", 4_600, "u", "me@example.com"), store.saved)
+    fun `an expired saved login doesn't count`() {
+        val repo = AuthRepository(api, MemoryStore(Session("t", 900, "e")), nowSeconds = { now })
+        assertNull(repo.session.value)
     }
 
     @Test
-    fun `refresh rejected by Cognito logs out`() = runTest {
-        val store = MemoryStore(Session("old", "r1", 900, "u", "e"))
+    fun `a login that expires while the app runs logs out`() {
+        val store = MemoryStore(Session("t", 2_000, "e"))
         val repo = AuthRepository(api, store, nowSeconds = { now })
-        server.enqueue(MockResponse().setResponseCode(400).setBody("""{"__type":"NotAuthorizedException","message":"Refresh Token has been revoked"}"""))
-        expectError { repo.accessToken() }
+        now = 2_000
+        assertNull(repo.token())
         assertNull(repo.session.value)
         assertNull(store.saved)
     }
 
     @Test
-    fun `refresh failing for lack of internet keeps the login`() = runTest {
-        val saved = Session("old", "r1", 900, "u", "e")
-        val store = MemoryStore(saved)
-        val repo = AuthRepository(api, store, nowSeconds = { now })
-        server.shutdown()
-        expectError { repo.accessToken() }
-        assertEquals(saved, repo.session.value)
-        assertEquals(saved, store.saved)
-    }
-
-    @Test
-    fun `verify logs in and logout forgets`() = runTest {
+    fun `sign in keeps the server's login, logout forgets it`() = runTest {
         val store = MemoryStore()
         val repo = AuthRepository(api, store, nowSeconds = { now })
-        server.enqueue(MockResponse().setBody("""{"ChallengeName":"EMAIL_OTP","Session":"s1"}"""))
-        repo.sendCode("me@example.com")
-        server.enqueue(MockResponse().setBody("""{"AuthenticationResult":{"AccessToken":"${jwt("u")}","RefreshToken":"r","ExpiresIn":3600}}"""))
-        repo.verifyCode("me@example.com", "123456")
-        assertEquals("u", repo.session.value?.userId)
-        assertEquals("me@example.com", repo.session.value?.email)
-        server.enqueue(MockResponse().setBody("{}"))
+        server.enqueue(MockResponse().setBody("""{"token":"ours","expiresAt":99999,"email":"me@example.com"}"""))
+        repo.signIn("google-id-token")
+        assertEquals(Session("ours", 99_999, "me@example.com"), store.saved)
+        assertEquals("ours", repo.token())
         repo.logout()
-        server.takeRequest(); server.takeRequest()
-        assertEquals("AWSCognitoIdentityProviderService.RevokeToken", server.takeRequest().getHeader("X-Amz-Target"))
         assertNull(repo.session.value)
         assertNull(store.saved)
     }
 
     @Test
-    fun `logout works offline`() = runTest {
-        val store = MemoryStore(Session("a", "r", 5_000, "u", "e"))
+    fun `a refused sign in stays logged out`() = runTest {
+        val store = MemoryStore()
         val repo = AuthRepository(api, store, nowSeconds = { now })
-        server.shutdown()
-        repo.logout()
-        assertNull(repo.session.value)
-    }
-
-    private fun jwt(sub: String): String {
-        val enc = java.util.Base64.getUrlEncoder().withoutPadding()
-        return "${enc.encodeToString("{}".toByteArray())}.${enc.encodeToString("""{"sub":"$sub"}""".toByteArray())}.sig"
-    }
-
-    private suspend fun expectError(block: suspend () -> Unit) {
+        server.enqueue(MockResponse().setResponseCode(403).setBody("""{"detail":"Only the owner's Google account can use this app."}"""))
         try {
-            block()
+            repo.signIn("google-id-token")
+            fail("expected an AuthException")
         } catch (e: AuthException) {
-            return
+            assertEquals("Only the owner's Google account can use this app.", e.message)
         }
-        fail("expected an AuthException")
+        assertNull(repo.session.value)
+        assertNull(store.saved)
     }
 }

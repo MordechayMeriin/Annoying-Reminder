@@ -7,43 +7,29 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.prominder.myapp.ui.theme.Palette
 
 data class LoginState(
-    val email: String = "",
-    val code: String = "",
-    /** False: asking for the email. True: the code was sent, asking for it. */
-    val codeSent: Boolean = false,
     val busy: Boolean = false,
     val message: String? = null,
-    /** False when the build has no Cognito region / app client id (see android/README.md). */
+    /** False when the build has no Google client id or server address (see android/README.md). */
     val configured: Boolean = true,
 )
 
-/** Log in with the code Cognito emails you: the same account and the same flow as the web app. */
+/** One button: Google shows its account sheet, and the server lets in only the owner's account. */
 @Composable
 fun LoginScreen(
     state: LoginState,
-    onEmailChange: (String) -> Unit,
-    onCodeChange: (String) -> Unit,
-    onSendCode: () -> Unit,
-    onVerify: () -> Unit,
-    onUseOtherEmail: () -> Unit,
+    onSignIn: () -> Unit,
 ) {
     Column(
         Modifier.fillMaxSize().padding(24.dp),
@@ -55,46 +41,13 @@ fun LoginScreen(
             if (!state.configured) {
                 Text(
                     "This build has no login settings, so it can't log in. " +
-                        "Set COGNITO_REGION and COGNITO_CLIENT_ID for the build (see android/README.md).",
+                        "Set GOOGLE_WEB_CLIENT_ID for the build (see android/README.md).",
                     color = Palette.Danger,
                 )
                 return@AppCard
             }
-            if (!state.codeSent) {
-                OutlinedTextField(
-                    value = state.email,
-                    onValueChange = onEmailChange,
-                    label = { Text("Email") },
-                    singleLine = true,
-                    enabled = !state.busy,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email, imeAction = ImeAction.Send),
-                    keyboardActions = KeyboardActions(onSend = { onSendCode() }),
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Spacer(Modifier.height(12.dp))
-                Button(onClick = onSendCode, enabled = !state.busy && state.email.isNotBlank(), modifier = Modifier.fillMaxWidth()) {
-                    Text("Send login code")
-                }
-            } else {
-                Muted("We emailed a code to ${state.email}.")
-                Spacer(Modifier.height(12.dp))
-                OutlinedTextField(
-                    value = state.code,
-                    onValueChange = onCodeChange,
-                    label = { Text("Code from the email") },
-                    singleLine = true,
-                    enabled = !state.busy,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword, imeAction = ImeAction.Done),
-                    keyboardActions = KeyboardActions(onDone = { onVerify() }),
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Spacer(Modifier.height(12.dp))
-                Button(onClick = onVerify, enabled = !state.busy && state.code.isNotBlank(), modifier = Modifier.fillMaxWidth()) {
-                    Text("Log in")
-                }
-                TextButton(onClick = onUseOtherEmail, enabled = !state.busy, modifier = Modifier.align(Alignment.CenterHorizontally)) {
-                    Text("Use a different email, or send a new code", color = Palette.Muted)
-                }
+            Button(onClick = onSignIn, enabled = !state.busy, modifier = Modifier.fillMaxWidth()) {
+                Text("Sign in with Google")
             }
             if (state.busy) {
                 Spacer(Modifier.height(12.dp))

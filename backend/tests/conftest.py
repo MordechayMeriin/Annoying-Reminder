@@ -13,6 +13,8 @@ for key, value in {
     "AWS_ACCESS_KEY_ID": "testing",
     "AWS_SECRET_ACCESS_KEY": "testing",
     "OWNER_USER_ID": "00000000-0000-0000-0000-000000000000",
+    "GOOGLE_CLIENT_ID": "test-web-client.apps.googleusercontent.com",
+    "OWNER_GOOGLE_EMAIL": "Owner@Example.com",
     "CRON_SECRET": "cron",
     "ACTION_SECRET": "action",
     "OPENROUTER_API_KEY": "sk-test",

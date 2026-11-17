@@ -23,6 +23,7 @@ import com.prominder.myapp.BuildConfig
 import com.prominder.myapp.alarm.TestAlarm
 import com.prominder.myapp.auth.AuthException
 import com.prominder.myapp.auth.AuthRepository
+import com.prominder.myapp.auth.GoogleSignIn
 import com.prominder.myapp.auth.Session
 import com.prominder.myapp.diag.Diag
 import com.prominder.myapp.notify.Notifier
@@ -42,34 +43,31 @@ fun AppRoot(auth: AuthRepository) {
 
 @Composable
 private fun LoginRoute(auth: AuthRepository) {
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var state by remember { mutableStateOf(LoginState(configured = auth.isConfigured)) }
-
-    fun run(block: suspend () -> Unit) {
-        state = state.copy(busy = true, message = null)
-        scope.launch {
-            try {
-                block()
-            } catch (e: AuthException) {
-                state = state.copy(message = e.message)
-            } finally {
-                state = state.copy(busy = false)
-            }
-        }
-    }
+    val configured = auth.isConfigured && BuildConfig.GOOGLE_WEB_CLIENT_ID.isNotBlank()
+    var state by remember { mutableStateOf(LoginState(configured = configured)) }
 
     LoginScreen(
         state = state,
-        onEmailChange = { state = state.copy(email = it, message = null) },
-        onCodeChange = { state = state.copy(code = it, message = null) },
-        onSendCode = {
-            run {
-                auth.sendCode(state.email)
-                state = state.copy(codeSent = true, code = "", message = "Check your email for the code.")
+        onSignIn = {
+            state = state.copy(busy = true, message = null)
+            scope.launch {
+                try {
+                    // Null: you closed Google's sheet.
+                    val idToken = GoogleSignIn.idToken(context, BuildConfig.GOOGLE_WEB_CLIENT_ID)
+                    if (idToken != null) {
+                        state = state.copy(message = "Signing in… The server can take a minute to wake up.")
+                        auth.signIn(idToken)
+                    }
+                } catch (e: AuthException) {
+                    Diag.log("auth", "Sign-in failed: ${e.message}")
+                    state = state.copy(message = e.message)
+                } finally {
+                    state = state.copy(busy = false)
+                }
             }
         },
-        onVerify = { run { auth.verifyCode(state.email, state.code) } },
-        onUseOtherEmail = { state = state.copy(codeSent = false, code = "", message = null) },
     )
 }
 
@@ -128,7 +126,7 @@ private fun SignedInRoute(auth: AuthRepository, session: Session) {
                 onAlarmIn1Min = { notice = alarmNotice(context, 60_000L, facts) },
                 onAlarmIn1Hour = { notice = alarmNotice(context, 3_600_000L, facts) },
                 onCancelAlarm = { TestAlarm.cancel(context); notice = null },
-                onLogout = { scope.launch { auth.logout() } },
+                onLogout = { auth.logout(); scope.launch { GoogleSignIn.forget(context) } },
             )
         }
         Screen.Checklist -> ChecklistScreen(

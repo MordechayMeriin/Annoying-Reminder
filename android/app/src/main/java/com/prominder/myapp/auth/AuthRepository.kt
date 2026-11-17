@@ -6,8 +6,6 @@ import com.prominder.myapp.diag.Diag
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 
 /** Where the login is kept: the app's private storage (not backed up, see allowBackup="false"). */
@@ -32,61 +30,39 @@ class PrefsSessionStore(context: Context) : SessionStore {
 }
 
 /**
- * Who's logged in. The phone has to work offline, so a saved login counts as logged in even when
- * Cognito can't be reached; only Cognito saying "this login is gone" logs you out.
+ * Who's logged in. The login is checked by the server when you sign in; after that it's a saved token,
+ * so the phone counts as logged in offline too, until the token expires (a year) or you log out.
  */
 class AuthRepository(
-    private val api: CognitoAuth,
+    private val api: BackendAuth,
     private val store: SessionStore,
     private val nowSeconds: () -> Long = { System.currentTimeMillis() / 1000 },
 ) {
-    private val _session = MutableStateFlow(store.load())
+    private val _session = MutableStateFlow(store.load()?.takeUnless { it.expired(nowSeconds()) })
     val session: StateFlow<Session?> = _session.asStateFlow()
-    private val refreshLock = Mutex()
 
     val isConfigured: Boolean get() = api.isConfigured
 
-    suspend fun sendCode(email: String) {
-        api.sendCode(email)
-        Diag.log("auth", "Login code sent")
-    }
-
-    suspend fun verifyCode(email: String, code: String) {
-        val s = api.verifyCode(email, code)
+    /** Trades Google's ID token for the server's login and keeps it. Throws [AuthException]. */
+    suspend fun signIn(googleIdToken: String) {
+        val s = api.signIn(googleIdToken)
         store.save(s)
         _session.value = s
-        Diag.log("auth", "Logged in")
+        Diag.log("auth", "Logged in with Google")
     }
 
-    /**
-     * An access token that's good for at least another minute, refreshing it first if needed.
-     * Null when logged out. Throws [AuthException] (Network) when a refresh is needed and fails.
-     */
-    suspend fun accessToken(): String? = refreshLock.withLock {
+    /** The login token for calls to the server; null when logged out. An expired login logs out. */
+    fun token(): String? {
         val current = _session.value ?: return null
-        if (!current.expiresSoon(nowSeconds())) return current.accessToken
-        try {
-            val fresh = api.refresh(current.refreshToken)
-            // Cognito doesn't repeat the email on a refresh; keep the one we know.
-            val merged = fresh.copy(email = fresh.email.ifBlank { current.email })
-            store.save(merged)
-            _session.value = merged
-            Diag.log("auth", "Login refreshed")
-            merged.accessToken
-        } catch (e: AuthException) {
-            Diag.log("auth", "Refresh failed: ${e.message}")
-            if (e.kind == AuthException.Kind.SessionGone) signOutLocally()
-            throw e
+        if (current.expired(nowSeconds())) {
+            Diag.log("auth", "Login expired")
+            logout()
+            return null
         }
+        return current.token
     }
 
-    suspend fun logout() {
-        val current = _session.value
-        signOutLocally()
-        if (current != null) api.logout(current.refreshToken)
-    }
-
-    private fun signOutLocally() {
+    fun logout() {
         store.save(null)
         _session.value = null
         Diag.log("auth", "Logged out")
