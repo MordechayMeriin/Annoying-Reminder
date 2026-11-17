@@ -3,7 +3,10 @@ package com.prominder.myapp.ui.theme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.unit.LayoutDirection
 
 /** The web app's palette (web/style.css): dark, with an amber accent. */
 object Palette {
@@ -36,7 +39,14 @@ private val Colors = darkColorScheme(
     error = Palette.Danger,
 )
 
+/**
+ * The app's words are English, so its layout stays left-to-right even when the phone is set to Hebrew (otherwise
+ * Android mirrors it and moves English sentences' periods to the wrong end). Hebrew text, like chat messages,
+ * still reads right-to-left: each paragraph takes its direction from its own first letters.
+ */
 @Composable
 fun ReminderTheme(content: @Composable () -> Unit) {
-    MaterialTheme(colorScheme = Colors, content = content)
+    CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+        MaterialTheme(colorScheme = Colors, content = content)
+    }
 }

@@ -23,7 +23,7 @@ from . import db
 from .db import Entity, pad
 from .preferences import PREFERENCE
 from .sessions import SESSION
-from .tasks import EVENT, TASK
+from .tasks import EVENT, EVENT_KINDS, TASK
 from .thread import MESSAGE
 
 log = logging.getLogger("sync")
@@ -97,35 +97,19 @@ def _plain(entity: Entity, raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def export_all() -> dict[str, Any]:
-    """Every row the phone keeps, and the id counters. One scan: the table is small."""
+    """
+    Every row the phone keeps, and the id counters. Read with Query only (the backend's AWS user may not Scan,
+    see scripts/aws_setup.py): one partition per kind of item, and the events through their kind index.
+    """
     tables: dict[str, list[dict[str, Any]]] = {name: [] for name in TABLES}
-    counters: dict[str, int] = {}
-    args: dict[str, Any] = {"TableName": db._table(), "ConsistentRead": True}
-    while True:
-        r = db.client().scan(**args)
-        for item in r.get("Items", []):
-            raw = db.from_attr(item)
-            pk = raw["pk"]
-            if pk == "task":
-                tables["tasks"].append(_plain(TASK, raw))
-            elif pk.startswith("ev#") and "rid" in raw:
-                tables["events"].append(_plain(EVENT, raw))
-            elif pk == "msg":
-                tables["messages"].append(_plain(MESSAGE, raw))
-            elif pk == "sess":
-                tables["sessions"].append(_plain(SESSION, raw))
-            elif pk == "pref":
-                tables["preferences"].append(_plain(PREFERENCE, raw))
-            elif pk == "setting":
-                tables["settings"].append({"key": raw["sk"], "value": raw.get("value"),
-                                           "updated_at": raw.get("updated_at")})
-            elif pk == "focus":
-                tables["focus"].append({"date": raw["sk"], "ids": [int(i) for i in raw.get("ids", [])]})
-            elif pk == "counter":
-                counters[raw["sk"]] = int(raw.get("n", 0))
-        if "LastEvaluatedKey" not in r:
-            break
-        args["ExclusiveStartKey"] = r["LastEvaluatedKey"]
+    for pk, table in (("task", "tasks"), ("msg", "messages"), ("sess", "sessions"), ("pref", "preferences")):
+        tables[table] = [_plain(ENTITIES[table], raw) for raw in db.query(pk)]
+    for kind in sorted(EVENT_KINDS):
+        tables["events"] += [_plain(EVENT, raw) for raw in db.query(f"ev#{kind}", index="GSI1")]
+    tables["settings"] = [{"key": raw["sk"], "value": raw.get("value"), "updated_at": raw.get("updated_at")}
+                          for raw in db.query("setting")]
+    tables["focus"] = [{"date": raw["sk"], "ids": [int(i) for i in raw.get("ids", [])]} for raw in db.query("focus")]
+    counters = {raw["sk"]: int(raw.get("n", 0)) for raw in db.query("counter")}
     for name, rows in tables.items():
         rows.sort(key=lambda row: [str(row.get(k)) for k in ("date", "key", "task_id", "created_at", "rid")]
                   if "id" not in row else [row["id"]])
