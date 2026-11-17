@@ -10,8 +10,14 @@ alarm.
 **Phase B (the handover)** is in: the phone keeps your tasks, Today's 3, the chat history and your settings in its
 own database, works offline, and backs them up to the server a few minutes after each change. The first time you
 open it, *Move your data to this phone* does the handover (the web app switches off); after a reinstall the same
-screen restores the backup. Details: [docs/android-phase-b.md](../docs/android-phase-b.md). Reminders come back in
-Phase C, the assistant in Phase D.
+screen restores the backup. Details: [docs/android-phase-b.md](../docs/android-phase-b.md).
+
+**Phase C (reminders)** is in: the phone decides on its own when to remind you, with the server's rules (check-ins,
+meetings, hard stops, the morning plan, mid-day check-ins, the evening review, the week's and tomorrow's meetings,
+quiet hours, Shabbat and holidays, normal / urgent / alarm), template wording, ✓ Done and Later on the
+notification, and a tick log in Diagnostics. The backend moves from Render to AWS Lambda, with a daily email if the
+phone goes silent. Details: [docs/android-phase-c.md](../docs/android-phase-c.md). The assistant comes back in
+Phase D.
 
 ## How it's built
 
@@ -196,7 +202,8 @@ in 1 min** with the phone locked, and restarting the phone while a 1-hour alarm 
 | Kind | Name | Used for |
 |---|---|---|
 | Variable | `GOOGLE_WEB_CLIENT_ID` | Google sign-in (built into the app) |
-| Variable (optional) | `API_URL` | The backend (default `https://annoying-reminder-api.onrender.com`) |
+| Variable (optional) | `API_URL` | The backend: the Lambda function URL once it's set up ([docs/android-phase-c.md](../docs/android-phase-c.md)); default `https://annoying-reminder-api.onrender.com` |
+| Variable | `AWS_DEPLOY_ROLE_ARN`, `AWS_REGION` | Deploying the backend to Lambda (the Backend workflow) |
 | Variable (optional) | `PLAY_RELEASE_STATUS` | `completed` (default) or `draft` |
 | Secret | `ANDROID_UPLOAD_KEYSTORE_BASE64`, `ANDROID_UPLOAD_KEYSTORE_PASSWORD`, `ANDROID_UPLOAD_KEY_ALIAS`, `ANDROID_UPLOAD_KEY_PASSWORD` | Signing the bundle |
 | Secret | `PLAY_SERVICE_ACCOUNT_JSON` | Uploading to Play |

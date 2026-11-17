@@ -6,12 +6,12 @@ import java.time.ZoneId
 
 /**
  * The settings you can change (⚙), ported from backend/app/config.py's SPECS: same keys, defaults, checks and
- * stored text, so a value set on the web app means the same here. Pushover and browser push aren't here: the
- * phone has its own notification channels.
+ * stored text, so a value set on the web app means the same here. Pushover's account, sounds and browser push
+ * aren't here (the phone has its own notification channels); its three loudness settings are ("How loud").
  */
 data class SettingSpec(
     val key: String,
-    /** time | times | time_off | int | float | bool | weekday | timezone */
+    /** time | times | time_off | int | float | bool | weekday | timezone | choice */
     val kind: String,
     val default: String,
     val label: String,
@@ -19,6 +19,8 @@ data class SettingSpec(
     val help: String = "",
     val min: Double? = null,
     val max: Double? = null,
+    /** choice: (stored value, label) */
+    val options: List<Pair<String, String>> = emptyList(),
 )
 
 class SettingException(message: String) : IllegalArgumentException(message)
@@ -29,6 +31,7 @@ object SettingSpecs {
     private const val SHABBAT = "Shabbat & holidays"
     private const val MEET = "Meetings"
     private const val NAG = "Check-ins & limits"
+    private const val LOUD = "How loud"
     private const val APP = "App"
 
     val ALL: List<SettingSpec> = listOf(
@@ -71,6 +74,16 @@ object SettingSpecs {
         SettingSpec("followup_max_days", "int", "7", "Latest follow-up the assistant may pick (days)", NAG, min = 1.0, max = 60.0),
         SettingSpec("reply_link_hours", "float", "3", "A reply refers to the last check-in for (hours)", NAG, min = 0.0, max = 48.0),
 
+        // The web app's Pushover levels, same keys, now the phone's channels: normal → urgent → alarm.
+        SettingSpec("pushover_urgent_after", "int", "1", "Urgent after this many ignored check-ins", LOUD,
+            "Check-ins about a task you keep ignoring get louder. Only reminders you asked for and near deadlines.", 0.0, 20.0),
+        SettingSpec("pushover_alarm_for", "choice", "important", "Alarm for", LOUD,
+            "An alarm rings (on the alarm volume) until you answer it, for up to an hour, never into quiet hours or Shabbat.",
+            options = listOf("critical" to "Critical tasks only", "important" to "Important and critical tasks",
+                "all" to "Any task", "off" to "Never (urgent at most)")),
+        SettingSpec("pushover_alarm_after", "int", "2", "Alarm after this many ignored check-ins", LOUD,
+            "If check-ins stop sooner, the last one is the alarm.", 0.0, 50.0),
+
         SettingSpec("show_model", "bool", "false", "Show which AI model replied", APP,
             "A small grey line under the title, for the latest message only. Empty when code wrote it."),
     )
@@ -93,6 +106,8 @@ object SettingSpecs {
                 "0", "false", "no", "off" -> "false"
                 else -> throw SettingException("use true or false")
             }
+            "choice" -> text.lowercase().takeIf { v -> spec.options.any { it.first == v } }
+                ?: throw SettingException("choose one of: " + spec.options.joinToString(", ") { it.first })
             "timezone" -> runCatching { ZoneId.of(text).id }.getOrNull()?.takeIf { "/" in it || it == "UTC" }
                 ?: throw SettingException("unknown time zone (e.g. Asia/Jerusalem)")
             "int" -> {
@@ -149,6 +164,19 @@ class AppSettings(stored: Map<String, String>) {
     val morningTime: LocalTime get() = time("morning_time")
     val dayResetTime: LocalTime get() = time("day_reset_time")
     val meetingLeadMin: Int get() = int("meeting_lead_min")
+    val eveningTime: LocalTime get() = time("evening_time")
+    val quietStart: LocalTime get() = time("quiet_start")
+    val quietEnd: LocalTime get() = time("quiet_end")
+    val checkinTimes: List<LocalTime> get() = raw("checkin_times").split(",").filter { it.isNotBlank() }.map { LocalTime.parse(it.trim()) }
+    val weekStartDay: DayOfWeek get() = SettingSpecs.weekday(raw("week_start_day"))
+    /** null = off */
+    fun timeOrOff(key: String): LocalTime? = raw(key).takeIf { it != "off" }?.let(LocalTime::parse)
+    val weekMeetingsTime: LocalTime? get() = timeOrOff("week_meetings_time")
+    val meetingsEveTime: LocalTime? get() = timeOrOff("meetings_eve_time")
+    fun bool(key: String): Boolean = raw(key) == "true"
+    fun double(key: String): Double = raw(key).toDouble()
+    val nagIntervalMin: Int get() = int("nag_interval_min")
+    val maxNags: Int get() = int("max_nags")
 
     companion object {
         val DEFAULTS = AppSettings(emptyMap())

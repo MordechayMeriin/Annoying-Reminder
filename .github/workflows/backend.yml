@@ -1,0 +1,93 @@
+# The backend: run its tests, and (on main) deploy it to AWS Lambda. Setup (once): backend/scripts/aws_lambda_setup.py,
+# then the repository variables it prints (AWS_DEPLOY_ROLE_ARN, AWS_REGION). GitHub signs in to AWS with OIDC:
+# no AWS keys are stored here, and the role may only update the one function's code.
+name: Backend
+
+on:
+  push:
+    branches: [main]
+    paths: ["backend/**", ".github/workflows/backend.yml"]
+  pull_request:
+    paths: ["backend/**", ".github/workflows/backend.yml"]
+  workflow_dispatch:
+
+concurrency:
+  group: backend-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: backend
+
+env:
+  FUNCTION: prominder-api
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt -r lambda/requirements.txt pytest "moto[dynamodb]"
+      - run: python -m pytest -q
+
+  deploy:
+    name: Deploy to AWS Lambda
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write # OIDC: GitHub proves to AWS that this is this repository's main branch
+    env:
+      HAS_ROLE: ${{ vars.AWS_DEPLOY_ROLE_ARN != '' }}
+    steps:
+      - name: Not set up yet
+        if: env.HAS_ROLE != 'true'
+        run: echo "::notice::AWS_DEPLOY_ROLE_ARN isn't set, so nothing was deployed. See docs/android-phase-c.md."
+
+      - uses: actions/checkout@v4
+        if: env.HAS_ROLE == 'true'
+      - uses: actions/setup-python@v5
+        if: env.HAS_ROLE == 'true'
+        with:
+          python-version: "3.12"
+      - uses: aws-actions/configure-aws-credentials@v4
+        if: env.HAS_ROLE == 'true'
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Package (dependencies built for Lambda's Linux and Python 3.12)
+        if: env.HAS_ROLE == 'true'
+        run: |
+          pip install --quiet --target build --platform manylinux2014_x86_64 --implementation cp \
+            --python-version 3.12 --only-binary=:all: -r lambda/requirements.txt
+          cp -r app build/
+          find build -name "__pycache__" -prune -exec rm -rf {} +
+          (cd build && zip -qr ../lambda.zip .)
+          ls -lh lambda.zip
+
+      - name: Deploy
+        if: env.HAS_ROLE == 'true'
+        run: |
+          aws lambda update-function-code --function-name "$FUNCTION" --zip-file fileb://lambda.zip --query LastModified
+          aws lambda wait function-updated-v2 --function-name "$FUNCTION"
+
+      - name: Check it answers
+        if: env.HAS_ROLE == 'true'
+        run: |
+          url=$(aws lambda get-function-url-config --function-name "$FUNCTION" --query FunctionUrl --output text)
+          for i in 1 2 3 4 5; do
+            if curl -fsS "${url%/}/health"; then echo; echo "Live at ${url%/}"; exit 0; fi
+            sleep 5
+          done
+          echo "::error::${url%/}/health didn't answer"; exit 1

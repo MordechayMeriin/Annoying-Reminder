@@ -124,6 +124,8 @@ dependencies {
     implementation(libs.room.ktx)
     ksp(libs.room.compiler)
     implementation(libs.work.runtime)
+    // Shabbat and holiday times (candle lighting, nightfall): the KosherJava Zmanim library.
+    implementation(libs.zmanim)
     debugImplementation(libs.compose.ui.tooling)
     debugImplementation(libs.compose.ui.test.manifest)
 

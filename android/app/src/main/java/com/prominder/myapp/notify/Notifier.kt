@@ -14,8 +14,10 @@ import com.prominder.myapp.R
 import com.prominder.myapp.alarm.AlarmActivity
 import com.prominder.myapp.alarm.AlarmReceiver
 import com.prominder.myapp.diag.Diag
+import com.prominder.myapp.logic.Logic
+import com.prominder.myapp.remind.Notice
 
-/** Shows notifications. Phase A: the test ones; the real check-ins come in Phase C. */
+/** Shows notifications: the check-ins and daily messages the tick decides on, and Phase A's tests. */
 object Notifier {
     private const val ID_TEST_NORMAL = 1
     private const val ID_TEST_URGENT = 2
@@ -87,6 +89,70 @@ object Notifier {
     }
 
     fun cancelAlarm(context: Context) = NotificationManagerCompat.from(context).cancel(ID_ALARM)
+
+    fun cancel(context: Context, id: Int) = NotificationManagerCompat.from(context).cancel(id)
+
+    /** Message notifications get ids from here up (the message id), so each message is its own notification. */
+    private const val ID_MESSAGES = 1000
+
+    /**
+     * A message from the tick, as loud as it decided: the normal or urgent channel, or (alarm) the alarm channel
+     * with the full-screen alarm, ringing until you answer it or [Notice.alarmSeconds] pass. A check-in about one
+     * task gets ✓ Done and Later, which work without opening the app (and count as you answering).
+     */
+    fun showNotice(context: Context, notice: Notice): Boolean {
+        val alarm = notice.level == Logic.ALARM
+        val id = if (alarm) ID_ALARM else ID_MESSAGES + (notice.messageId % 1_000_000).toInt()
+        val channel = when (notice.level) {
+            Logic.ALARM -> Channels.ALARM
+            Logic.URGENT -> Channels.URGENT
+            else -> Channels.NORMAL
+        }
+        val b = NotificationCompat.Builder(context, channel)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle(notice.title)
+            .setContentText(notice.text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(notice.text))
+            .setPriority(if (notice.level >= Logic.URGENT) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_DEFAULT)
+            .setCategory(if (notice.level >= Logic.URGENT) NotificationCompat.CATEGORY_REMINDER else NotificationCompat.CATEGORY_MESSAGE)
+            .setContentIntent(openApp(context))
+            .setAutoCancel(true)
+        notice.taskId?.let { taskId ->
+            b.addAction(0, Logic.chipLabel("done", notice.lang), taskAction(context, AlarmReceiver.ACTION_DONE, taskId, id))
+            b.addAction(0, Logic.chipLabel("later", notice.lang), taskAction(context, AlarmReceiver.ACTION_LATER, taskId, id))
+        }
+        if (alarm) {
+            val fullScreen = PendingIntent.getActivity(
+                context, id,
+                AlarmActivity.intent(context, notice.title, notice.text, System.currentTimeMillis(), 0),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            b.setPriority(NotificationCompat.PRIORITY_MAX)
+                .setCategory(NotificationCompat.CATEGORY_ALARM)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                .setFullScreenIntent(fullScreen, true)
+                .setOngoing(true)
+                .setTimeoutAfter(notice.alarmSeconds * 1000)
+            if (notice.taskId == null) {
+                b.addAction(0, "Dismiss", PendingIntent.getBroadcast(context, 1,
+                    Intent(context, AlarmReceiver::class.java).setAction(AlarmReceiver.ACTION_DISMISS),
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
+            }
+        }
+        val n = b.build()
+        if (alarm) n.flags = n.flags or Notification.FLAG_INSISTENT
+        val shown = post(context, id, n)
+        if (!shown) Diag.log("notify", "Couldn't show message #${notice.messageId}: notifications are off")
+        return shown
+    }
+
+    private fun taskAction(context: Context, action: String, taskId: Long, notificationId: Int): PendingIntent =
+        PendingIntent.getBroadcast(
+            context, notificationId * 4 + if (action == AlarmReceiver.ACTION_DONE) 1 else 2,
+            Intent(context, AlarmReceiver::class.java).setAction(action)
+                .putExtra(AlarmReceiver.EXTRA_TASK_ID, taskId).putExtra(AlarmReceiver.EXTRA_NOTIFICATION_ID, notificationId),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
 
     private fun post(context: Context, id: Int, n: Notification): Boolean = try {
         NotificationManagerCompat.from(context).notify(id, n)

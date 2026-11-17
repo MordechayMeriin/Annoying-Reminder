@@ -171,7 +171,7 @@ class ScreenshotTest {
         SettingsScreen(
             com.prominder.myapp.data.SettingSpecs.ALL.map {
                 SettingItem(it.key, it.label, it.help, it.group, it.kind, s.raw(it.key), it.key !in s.overrides,
-                    com.prominder.myapp.data.SettingSpecs.canonical(it, it.default))
+                    com.prominder.myapp.data.SettingSpecs.canonical(it, it.default), it.options)
             },
             listOf(1L to "Shorter messages"), { _, _ -> null }, {}, {},
         )
@@ -197,6 +197,26 @@ class ScreenshotTest {
             ),
             onShare = {}, onClear = {}, onBack = {}, onSyncNow = {},
             tests = PhoneTests(pendingAlarm = "Test alarm set for 15:04:00", lastAlarmResult = "Set for 2026-11-13 14:00:00, rang on time"),
+        )
+    }
+
+    @Test
+    fun diagnosticsTicks() = shot("6b_diagnostics_ticks") {
+        DiagnosticsScreen(
+            facts = listOf(
+                "Last backup" to "2026-11-17 09:02:11", "Waiting for backup" to "0 changes",
+                "Next reminder check" to "2026-11-17 13:00:00", "Last tick" to "2026-11-17 10:20:00",
+            ),
+            logLines = listOf(
+                "2026-11-17 07:30:00 [tick] Tick: alarm (on time)",
+                "2026-11-17 07:30:00 [tick]   Sent Morning plan (message #412)",
+                "2026-11-17 10:00:01 [tick] Tick: alarm (1 s late)",
+                "2026-11-17 10:00:01 [tick]   Sent message #413 (nudge, normal) about #57 \"Send the invoice\"",
+                "2026-11-17 10:20:00 [tick] Tick: alarm (on time)",
+                "2026-11-17 10:20:00 [tick]   Held #61 \"Call the bank\" until Tue 10:20: min gap, 0 of 20 min",
+                "2026-11-17 10:21:40 [notify] ✓ Done from the notification: Send the invoice",
+            ),
+            onShare = {}, onClear = {}, onBack = {}, onSyncNow = {}, onTickNow = {},
         )
     }
 

@@ -247,7 +247,7 @@ fun SettingsRoute(store: Store, onBack: () -> Unit) {
     val prefs by remember { store.dao.watchPreferences() }.collectAsState(emptyList())
     val items = SettingSpecs.ALL.map { spec ->
         val default = SettingSpecs.canonical(spec, spec.default)
-        SettingItem(spec.key, spec.label, spec.help, spec.group, spec.kind, settings.raw(spec.key), spec.key !in settings.overrides, default)
+        SettingItem(spec.key, spec.label, spec.help, spec.group, spec.kind, settings.raw(spec.key), spec.key !in settings.overrides, default, spec.options)
     }
     SettingsScreen(
         items = items,
