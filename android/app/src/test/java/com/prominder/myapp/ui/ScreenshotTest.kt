@@ -88,6 +88,28 @@ class ScreenshotTest {
         HomeScreen(HomeState(setupDone = 4, setupTotal = 4, notice = "Later: next check-in Today 12:00"), {}, {}, {}, {}, {}, {}, {}, {}, {})
     }
 
+    /** A phone set to Hebrew: the layout stays left-to-right, Hebrew messages still read right-to-left. */
+    @Test
+    @Config(qualifiers = "+iw")
+    fun handover_on_a_hebrew_phone() = shot("8c_handover_hebrew_phone") {
+        HandoverScreen(HandoverState(alreadyHandedOver = false, message = "The server is starting up or unavailable. It'll try again."), {}, {})
+    }
+
+    @Test
+    @Config(qualifiers = "+iw")
+    fun home_on_a_hebrew_phone() = shot("4c_home_hebrew_phone") {
+        HomeScreen(
+            HomeState(
+                focus = listOf(FocusItem(1, "לשלם חשבון חשמל", "Today 15:00", done = false)),
+                messages = listOf(
+                    ChatItem(1, "user", "chat", "תזכיר לי לשלם את החשבון מחר בבוקר.", "07:41", day = "Today"),
+                    ChatItem(2, "assistant", "chat", "Done. I'll remind you tomorrow at 08:00.", "07:41"),
+                ),
+            ),
+            {}, {}, {}, {}, {}, {}, {}, {}, {},
+        )
+    }
+
     @Test
     fun handover() = shot("8_handover") {
         HandoverScreen(HandoverState(alreadyHandedOver = false), {}, {})

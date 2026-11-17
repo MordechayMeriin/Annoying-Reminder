@@ -83,6 +83,21 @@ def test_restore_hands_the_phone_everything(client):
     assert out["status"]["lastRestoreAt"] and out["status"]["handedOverAt"] is None
 
 
+def test_restore_needs_no_scan_permission(client, monkeypatch):
+    """The backend's AWS user may Query but not Scan (scripts/aws_setup.py's policy): a Scan failed on the real phone."""
+    _some_data()
+    real = db.client()
+
+    class NoScan:
+        def __getattr__(self, name):
+            if name == "scan":
+                raise AssertionError("restore must not Scan: the backend's AWS user isn't allowed to")
+            return getattr(real, name)
+    monkeypatch.setattr(db, "client", lambda: NoScan())
+    out = ok(client.post("/sync/restore", json={"handover": True}))
+    assert len(out["tables"]["tasks"]) == 3 and len(out["tables"]["events"]) == 1
+
+
 def test_what_comes_back_restores_byte_for_byte(client):
     _some_data()
     first = ok(client.post("/sync/restore", json={}))
