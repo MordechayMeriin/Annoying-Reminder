@@ -9,10 +9,14 @@ import com.prominder.myapp.data.AppDatabase
 import com.prominder.myapp.data.Store
 import com.prominder.myapp.diag.Diag
 import com.prominder.myapp.notify.Channels
+import com.prominder.myapp.remind.Reminders
 import com.prominder.myapp.sync.SyncApi
 import com.prominder.myapp.sync.SyncEngine
 import com.prominder.myapp.sync.SyncScheduler
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import okhttp3.OkHttpClient
 
 /** Runs first, whenever Android starts the app: for the screen, an alarm, or after a restart. */
@@ -20,9 +24,17 @@ class ReminderApp : Application() {
     lateinit var auth: AuthRepository
         private set
 
-    /** Your data: the phone's database, and every change to it (each one schedules the backup). */
+    /** Background work that outlives a screen: ticks, notification buttons. */
+    val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    /** Your data: the phone's database, and every change to it (each one schedules the backup and re-plans the next tick). */
     val db: AppDatabase by lazy { AppDatabase.open(this) }
-    val store: Store by lazy { Store(db, onChange = { SyncScheduler.soon(this) }) }
+    val store: Store by lazy {
+        Store(db, onChange = {
+            SyncScheduler.soon(this)
+            Reminders.replan(this)
+        })
+    }
     /** The backup on the backend: restore (the handover) and upload. */
     val sync: SyncEngine by lazy { SyncEngine(db, SyncApi(BuildConfig.API_URL, http) { auth.token() }, "${Build.MANUFACTURER} ${Build.MODEL}") }
 
@@ -39,6 +51,8 @@ class ReminderApp : Application() {
         // Seeing this often without a reason (no restart, no update) means Android keeps closing the app.
         Diag.log("app", "App started (${BuildConfig.VERSION_NAME})")
         SyncScheduler.daily(this)
+        Reminders.startSafetyNet(this)
+        Reminders.replan(this)
     }
 
     /** A crash is written to the Diagnostics log first, then Android handles it as usual. */

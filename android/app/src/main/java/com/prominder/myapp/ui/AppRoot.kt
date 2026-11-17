@@ -26,6 +26,7 @@ import com.prominder.myapp.data.Store
 import com.prominder.myapp.data.Times
 import com.prominder.myapp.sync.SyncException
 import com.prominder.myapp.alarm.TestAlarm
+import com.prominder.myapp.remind.Reminders
 import com.prominder.myapp.auth.AuthException
 import com.prominder.myapp.auth.AuthRepository
 import com.prominder.myapp.auth.GoogleSignIn
@@ -116,6 +117,7 @@ private fun HandoverRoute(app: ReminderApp, onDone: () -> Unit, onLogout: () -> 
                 try {
                     val r = app.sync.restore(handover = true)
                     Diag.log("sync", "Handover done: ${r.tasks} tasks, ${r.messages} messages on the phone")
+                    Reminders.tickSoon(app, "your data arrived")
                     onDone()
                 } catch (e: SyncException) {
                     state = state.copy(busy = false, message = e.message)
@@ -225,6 +227,7 @@ private fun MainRoutes(app: ReminderApp, auth: AuthRepository, session: Session)
                         }
                     }
                 },
+                onTickNow = { Reminders.tickSoon(app, "Check now (Diagnostics)") },
                 tests = PhoneTests(
                     pendingAlarm = pending?.let {
                         "Test alarm set for ${Diag.log.format(it.at).substringAfter(' ')}" + if (it.exact) "" else " (inexact)"
@@ -252,6 +255,8 @@ private suspend fun syncFacts(app: ReminderApp): List<Pair<String, String>> {
         "Restored" to at(dao.meta(Store.META_RESTORED_AT)),
         "Last backup" to at(dao.meta(Store.META_LAST_UPLOAD_AT)),
         "Waiting for backup" to "${app.sync.pending()} changes",
+        "Next reminder check" to (Reminders.next(app)?.let { Diag.log.format(it.at) + if (it.exact) "" else " (inexact)" } ?: "not set"),
+        "Last tick" to (Reminders.lastTick(app)?.let { Diag.log.format(it) } ?: "never"),
     ) + listOfNotNull(dao.meta(Store.META_LAST_SYNC_ERROR)?.takeIf { it.isNotBlank() }?.let { "Last backup error" to it })
 }
 

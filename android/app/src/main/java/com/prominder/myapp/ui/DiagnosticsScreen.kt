@@ -40,7 +40,8 @@ data class PhoneTests(
 )
 
 /**
- * What the app knows about itself: version, phone, permissions, the backup, the last test alarm, and its log.
+ * What the app knows about itself: version, phone, permissions, the backup, the reminders (next check, last tick),
+ * the last test alarm, and its log. Every tick writes why it sent or held back each message ([tick] lines).
  * Share sends all of it as text (paste it into the chat with Claude when something's off).
  */
 @Composable
@@ -51,6 +52,8 @@ fun DiagnosticsScreen(
     onClear: () -> Unit,
     onBack: () -> Unit,
     onSyncNow: (() -> Unit)? = null,
+    /** Run a tick now (its result goes into the log below, tagged [tick]). */
+    onTickNow: (() -> Unit)? = null,
     tests: PhoneTests? = null,
 ) {
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp), contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 8.dp)) {
@@ -72,6 +75,10 @@ fun DiagnosticsScreen(
             onSyncNow?.let {
                 Spacer(Modifier.height(8.dp))
                 OutlinedButton(onClick = it, modifier = Modifier.fillMaxWidth()) { Text("Back up now") }
+            }
+            onTickNow?.let {
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(onClick = it, modifier = Modifier.fillMaxWidth()) { Text("Check reminders now") }
             }
             tests?.let { PhoneTestsCard(it) }
             SectionTitle("Log, newest first")

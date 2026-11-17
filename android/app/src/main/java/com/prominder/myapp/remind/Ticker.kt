@@ -42,6 +42,8 @@ data class Notice(
     val alarmSeconds: Long = 0,
     /** A check-in about exactly one task: ✓ Done and Later on the notification. */
     val taskId: Long? = null,
+    /** The buttons' language (en | he), as the chips'. */
+    val lang: String = "en",
 )
 
 /** What one tick did: the notifications to show, the log lines, and when the next one should run. */
@@ -176,7 +178,7 @@ class Ticker(private val store: Store) {
             val lastReply = lastUserReplyAt()
             val (level, alarmS) = if (avoided) NORMAL to 0L else messageLevel(group, lastReply)
             notices += Notice(msg.id, Templates.pushTitle(group), text, level, alarmS,
-                if (Templates.hasTaskButtons(group)) group[0].id else null)
+                if (Templates.hasTaskButtons(group)) group[0].id else null, lang)
             log("Sent message #${msg.id} ($kind, ${LEVELS[level]}) about " + group.joinToString { "#${it.id} \"${it.title}\"" } +
                 if (avoided) " (avoided: the reason message)" else "")
             for (t in group) afterContact(t, alarmed = level == ALARM, lastReply = lastReply, avoided = avoided)
