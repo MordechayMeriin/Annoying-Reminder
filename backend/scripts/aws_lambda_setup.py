@@ -155,21 +155,28 @@ def schedule(events, lam, function_arn: str) -> None:
 def github_deploy_role(iam, account: str, repo: str, function_arn: str) -> str:
     provider_arn = f"arn:aws:iam::{account}:oidc-provider/{GITHUB_OIDC}"
     try:
-        iam.get_open_id_connect_provider(OpenIDConnectProviderArn=provider_arn)
+        existing = iam.get_open_id_connect_provider(OpenIDConnectProviderArn=provider_arn)
         print("GitHub's OIDC provider exists.")
+        # One made earlier (by hand, or for another project) may not accept AWS as the audience: add it.
+        if "sts.amazonaws.com" not in existing.get("ClientIDList", []):
+            iam.add_client_id_to_open_id_connect_provider(OpenIDConnectProviderArn=provider_arn, ClientID="sts.amazonaws.com")
+            print("Added sts.amazonaws.com to its audiences (it was missing).")
     except iam.exceptions.NoSuchEntityException:
         iam.create_open_id_connect_provider(Url=f"https://{GITHUB_OIDC}", ClientIDList=["sts.amazonaws.com"],
                                             ThumbprintList=["6938fd4d98bab03faadb97b34396831e3780aea1"])
         print("Added GitHub's OIDC provider.")
     trust = {"Version": "2012-10-17", "Statement": [{
         "Effect": "Allow", "Principal": {"Federated": provider_arn}, "Action": "sts:AssumeRoleWithWebIdentity",
-        "Condition": {"StringEquals": {f"{GITHUB_OIDC}:aud": "sts.amazonaws.com",
-                                       f"{GITHUB_OIDC}:sub": f"repo:{repo}:ref:refs/heads/main"}},
+        # Only this repository's main branch. GitHub writes the repository as it's spelled on GitHub, and IAM
+        # compares case-sensitively, so both spellings are listed.
+        "Condition": {"StringEquals": {f"{GITHUB_OIDC}:aud": "sts.amazonaws.com"},
+                      "StringLike": {f"{GITHUB_OIDC}:sub": sorted({f"repo:{repo}:ref:refs/heads/main",
+                                                                    f"repo:{repo.lower()}:ref:refs/heads/main"})}},
     }]}
     try:
         arn = iam.get_role(RoleName=DEPLOY_ROLE)["Role"]["Arn"]
         iam.update_assume_role_policy(RoleName=DEPLOY_ROLE, PolicyDocument=json.dumps(trust))
-        print(f"Role {DEPLOY_ROLE} exists.")
+        print(f"Role {DEPLOY_ROLE} exists: who may use it was updated.")
     except iam.exceptions.NoSuchEntityException:
         arn = iam.create_role(RoleName=DEPLOY_ROLE, AssumeRolePolicyDocument=json.dumps(trust),
                               Description=f"GitHub Actions ({repo}, main) deploys ProMinder's Lambda code")["Role"]["Arn"]

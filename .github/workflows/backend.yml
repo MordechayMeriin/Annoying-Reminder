@@ -61,11 +61,41 @@ jobs:
         if: env.HAS_ROLE == 'true'
         with:
           python-version: "3.12"
+      - name: Check the variables
+        if: env.HAS_ROLE == 'true'
+        env:
+          ROLE: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          REGION: ${{ vars.AWS_REGION }}
+        run: |
+          echo "AWS_DEPLOY_ROLE_ARN = '$ROLE'"
+          echo "AWS_REGION          = '$REGION'"
+          [[ "$ROLE" =~ ^arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_-]+$ ]] || {
+            echo "::error::AWS_DEPLOY_ROLE_ARN should be only the role's address, like arn:aws:iam::123456789012:role/prominder-github-deploy (no spaces, no name in front)"; exit 1; }
+          [[ "$REGION" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]$ ]] || {
+            echo "::error::AWS_REGION should be a region code, like us-west-2"; exit 1; }
+
       - uses: aws-actions/configure-aws-credentials@v4
         if: env.HAS_ROLE == 'true'
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
+
+      # When AWS refuses, show what GitHub told it (who is asking, for which branch), so the role's rule can be
+      # compared with it. These are the token's claims only, never the token.
+      - name: What GitHub sent AWS
+        if: failure() && env.HAS_ROLE == 'true'
+        run: |
+          python3 - <<'EOF'
+          import base64, json, os, urllib.request
+          req = urllib.request.Request(os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] + "&audience=sts.amazonaws.com",
+                                       headers={"Authorization": "bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]})
+          token = json.load(urllib.request.urlopen(req))["value"]
+          payload = token.split(".")[1]
+          claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+          for key in ("sub", "aud", "repository", "ref", "event_name"):
+              print(f"{key}: {claims.get(key)}")
+          print("The role prominder-github-deploy must allow exactly this 'sub' (IAM → Roles → it → Trust relationships).")
+          EOF
 
       - name: Package (dependencies built for Lambda's Linux and Python 3.12)
         if: env.HAS_ROLE == 'true'
