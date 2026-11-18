@@ -28,6 +28,7 @@ import json
 import os
 import sys
 import time
+import urllib.request
 import zipfile
 from pathlib import Path
 
@@ -152,6 +153,27 @@ def schedule(events, lam, function_arn: str) -> None:
     print(f"The alive check runs daily ({SCHEDULE}, UTC).")
 
 
+def github_subjects(repo: str) -> list[str]:
+    """
+    Who GitHub says is asking ("sub"), as the role allows it: this repository's main branch. GitHub now writes the
+    owner's and the repository's permanent ids into it (repo:Owner@123/Name@456:ref:refs/heads/main), which also
+    keeps out a repository of the same name made later. The ids come from GitHub's public API; if it can't be
+    reached, any id is accepted for this owner and name. The older form without ids is kept, in both spellings
+    (IAM compares case-sensitively).
+    """
+    owner, name = repo.split("/", 1)
+    subjects = {f"repo:{repo}:ref:refs/heads/main", f"repo:{repo.lower()}:ref:refs/heads/main"}
+    try:
+        with urllib.request.urlopen(f"https://api.github.com/repos/{repo}", timeout=10) as r:
+            info = json.load(r)
+        subjects.add(f"repo:{info['owner']['login']}@{info['owner']['id']}/{info['name']}@{info['id']}:ref:refs/heads/main")
+        print(f"GitHub ids: {info['owner']['login']} = {info['owner']['id']}, {info['name']} = {info['id']}.")
+    except Exception as e:   # no internet, rate limit: accept any id for this owner and name
+        print(f"Couldn't ask GitHub for the ids ({type(e).__name__}); allowing any id for {repo}.")
+        subjects.add(f"repo:{owner}@*/{name}@*:ref:refs/heads/main")
+    return sorted(subjects)
+
+
 def github_deploy_role(iam, account: str, repo: str, function_arn: str) -> str:
     provider_arn = f"arn:aws:iam::{account}:oidc-provider/{GITHUB_OIDC}"
     try:
@@ -167,11 +189,9 @@ def github_deploy_role(iam, account: str, repo: str, function_arn: str) -> str:
         print("Added GitHub's OIDC provider.")
     trust = {"Version": "2012-10-17", "Statement": [{
         "Effect": "Allow", "Principal": {"Federated": provider_arn}, "Action": "sts:AssumeRoleWithWebIdentity",
-        # Only this repository's main branch. GitHub writes the repository as it's spelled on GitHub, and IAM
-        # compares case-sensitively, so both spellings are listed.
+        # Only this repository's main branch (github_subjects).
         "Condition": {"StringEquals": {f"{GITHUB_OIDC}:aud": "sts.amazonaws.com"},
-                      "StringLike": {f"{GITHUB_OIDC}:sub": sorted({f"repo:{repo}:ref:refs/heads/main",
-                                                                    f"repo:{repo.lower()}:ref:refs/heads/main"})}},
+                      "StringLike": {f"{GITHUB_OIDC}:sub": github_subjects(repo)}},
     }]}
     try:
         arn = iam.get_role(RoleName=DEPLOY_ROLE)["Role"]["Arn"]
