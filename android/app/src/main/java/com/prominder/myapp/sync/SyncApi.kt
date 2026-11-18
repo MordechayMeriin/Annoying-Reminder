@@ -80,6 +80,9 @@ open class SyncApi(
 
     open suspend fun upload(body: UploadBody): UploadResult = call("POST", "/sync/upload", JSON.encodeToString(body))
 
+    /** The backend's prompt files (Phase D): newer than the app's own when a prompt changed after the release. */
+    open suspend fun prompts(): com.prominder.myapp.llm.PromptSet = call("GET", "/prompts", null)
+
     @Serializable
     private data class Restore(val handover: Boolean, val device: String)
 

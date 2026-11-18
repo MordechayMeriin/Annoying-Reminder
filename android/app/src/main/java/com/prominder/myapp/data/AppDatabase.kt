@@ -84,6 +84,9 @@ interface AppDao {
     @Query("SELECT COUNT(*) FROM tasks")
     suspend fun taskCount(): Int
 
+    @Query("SELECT * FROM tasks WHERE status = 'done' AND completed_at >= :since ORDER BY completed_at")
+    suspend fun doneSince(since: String): List<TaskRow>
+
     @Upsert
     suspend fun upsertTasks(rows: List<TaskRow>)
 
@@ -112,6 +115,26 @@ interface AppDao {
 
     @Query("SELECT COALESCE(MAX(id), 0) FROM messages")
     suspend fun maxMessageId(): Long
+
+    @Query("SELECT * FROM messages WHERE id = :id")
+    suspend fun message(id: Long): MessageRow?
+
+    @Query("SELECT * FROM messages WHERE id = :id")
+    fun watchMessage(id: Long): Flow<MessageRow?>
+
+    /**
+     * The latest messages linked to a task (thread.for_tasks), newest first. The ids are stored as JSON text
+     * ("[12,5]"), so the match is on ",5," inside ",12,5,".
+     */
+    @Query(
+        "SELECT * FROM messages WHERE (',' || replace(replace(replace(task_ids, '[', ''), ']', ''), ' ', '') || ',')" +
+            " LIKE '%,' || :taskId || ',%' ORDER BY id DESC LIMIT :limit",
+    )
+    suspend fun messagesForTask(taskId: Long, limit: Int): List<MessageRow>
+
+    /** The latest messages, newest first. */
+    @Query("SELECT * FROM messages ORDER BY id DESC LIMIT :limit")
+    suspend fun latestMessages(limit: Int): List<MessageRow>
 
     @Query("SELECT COUNT(*) FROM messages")
     suspend fun messageCount(): Int
@@ -145,6 +168,15 @@ interface AppDao {
 
     @Query("SELECT * FROM sessions WHERE started_at >= :since ORDER BY id DESC")
     suspend fun sessionsSince(since: String): List<SessionRow>
+
+    @Query("SELECT * FROM sessions WHERE task_id = :taskId")
+    suspend fun sessionsOf(taskId: Long): List<SessionRow>
+
+    @Query("SELECT * FROM preferences ORDER BY id")
+    suspend fun preferences(): List<PreferenceRow>
+
+    @Query("SELECT COALESCE(MAX(id), 0) FROM preferences")
+    suspend fun maxPreferenceId(): Long
 
     @Query("SELECT * FROM preferences ORDER BY id")
     fun watchPreferences(): Flow<List<PreferenceRow>>

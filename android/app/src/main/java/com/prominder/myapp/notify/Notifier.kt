@@ -8,6 +8,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.app.RemoteInput
 import androidx.core.content.ContextCompat
 import com.prominder.myapp.MainActivity
 import com.prominder.myapp.R
@@ -121,6 +122,8 @@ object Notifier {
             b.addAction(0, Logic.chipLabel("done", notice.lang), taskAction(context, AlarmReceiver.ACTION_DONE, taskId, id))
             b.addAction(0, Logic.chipLabel("later", notice.lang), taskAction(context, AlarmReceiver.ACTION_LATER, taskId, id))
         }
+        // Reply from the notification: the text goes to the assistant as a chat message (Phase D).
+        if (!alarm) b.addAction(replyAction(context, id, notice.lang))
         if (alarm) {
             val fullScreen = PendingIntent.getActivity(
                 context, id,
@@ -144,6 +147,51 @@ object Notifier {
         val shown = post(context, id, n)
         if (!shown) Diag.log("notify", "Couldn't show message #${notice.messageId}: notifications are off")
         return shown
+    }
+
+    /** The assistant's answer to a reply typed into a notification (when the app isn't open). */
+    fun showReply(context: Context, text: String, messageId: Long, lang: String) {
+        val id = ID_MESSAGES + (messageId % 1_000_000).toInt()
+        val n = NotificationCompat.Builder(context, Channels.NORMAL)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle("💬 ProMinder")
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .setContentIntent(openApp(context))
+            .setAutoCancel(true)
+            .addAction(replyAction(context, id, lang))
+            .build()
+        post(context, id, n)
+    }
+
+    /** After a reply: the notification shows what you wrote, without its buttons, until the answer comes. */
+    fun showSent(context: Context, notificationId: Int, text: String) {
+        val n = NotificationCompat.Builder(context, Channels.NORMAL)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle("💬 ProMinder")
+            .setContentText("Sent: $text")
+            .setRemoteInputHistory(arrayOf<CharSequence>(text))
+            .setContentIntent(openApp(context))
+            .setOnlyAlertOnce(true)
+            .setSilent(true)
+            .setTimeoutAfter(2 * 60 * 1000L)
+            .setAutoCancel(true)
+            .build()
+        post(context, notificationId, n)
+    }
+
+    private fun replyAction(context: Context, notificationId: Int, lang: String): NotificationCompat.Action {
+        val label = if (lang == "he") "לענות" else "Reply"
+        val input = RemoteInput.Builder(AlarmReceiver.EXTRA_REPLY).setLabel(label).build()
+        // Mutable: Android writes the typed text into this intent.
+        val intent = PendingIntent.getBroadcast(
+            context, notificationId * 4 + 3,
+            Intent(context, AlarmReceiver::class.java).setAction(AlarmReceiver.ACTION_REPLY).putExtra(AlarmReceiver.EXTRA_NOTIFICATION_ID, notificationId),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
+        )
+        return NotificationCompat.Action.Builder(0, label, intent).addRemoteInput(input).setAllowGeneratedReplies(false)
+            .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_REPLY).build()
     }
 
     private fun taskAction(context: Context, action: String, taskId: Long, notificationId: Int): PendingIntent =

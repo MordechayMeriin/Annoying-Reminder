@@ -146,6 +146,17 @@ private fun MainRoutes(app: ReminderApp, auth: AuthRepository, session: Session)
     var testNotice by remember { mutableStateOf<String?>(null) }
     // The log changes whenever something happens (an alarm rings, a backup runs): reload then.
     val logVersion by Diag.log.version.collectAsStateWithLifecycle()
+    // The "New task" shortcut (long-press on the app icon): the chat, ready to type or dictate.
+    val focusInput by app.newTask.collectAsStateWithLifecycle()
+    // Shared from another app: the assistant saves the to-do in it. Nothing to type.
+    val shared by app.shared.collectAsStateWithLifecycle()
+    LaunchedEffect(shared) {
+        val text = shared ?: return@LaunchedEffect
+        app.shared.value = null
+        stack = listOf(Route.Home.key)
+        app.scope.launch { app.chat.sendAndWait("Shared with the app:\n" + text.take(1900)) }
+    }
+    LaunchedEffect(focusInput) { if (focusInput > 0) stack = listOf(Route.Home.key) }
 
     LaunchedEffect(Unit) {
         // Right after the first login, the checklist opens by itself, once.
@@ -176,6 +187,8 @@ private fun MainRoutes(app: ReminderApp, auth: AuthRepository, session: Session)
     when (route) {
         Route.Home -> HomeRoute(
             store = app.store,
+            chat = app.chat,
+            focusInput = focusInput,
             setupDone = Checklist.doneCount(items),
             setupTotal = items.size,
             notice = notice,

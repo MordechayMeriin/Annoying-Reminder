@@ -7,6 +7,11 @@ import com.prominder.myapp.data.Store
 import com.prominder.myapp.data.TaskLists
 import com.prominder.myapp.data.TaskRow
 import com.prominder.myapp.data.Times
+import com.prominder.myapp.llm.CheckinText
+import com.prominder.myapp.llm.Coach
+import com.prominder.myapp.llm.Llm
+import com.prominder.myapp.llm.Prompts
+import com.prominder.myapp.llm.TickReads
 import com.prominder.myapp.logic.Logic
 import com.prominder.myapp.logic.Logic.ALARM
 import com.prominder.myapp.logic.Logic.ContactState
@@ -60,12 +65,17 @@ data class TickReport(val notices: List<Notice>, val lines: List<String>, val ne
  *    lapse, the week's and tomorrow's meetings. Nothing on Shabbat and holidays.
  * 3. Focus sessions: one nobody answered is recorded as paused (the end check-in itself comes with Phase E).
  *
- * The words are the server's templates (Templates); the LLM comes back in Phase D. Everything happens in one
- * transaction, so a tick is all or nothing, and the returned [TickReport.lines] explain every message and every
- * postponement for the Diagnostics log.
+ * The words come from the coach (llm/Coach.kt, Phase D): the LLM when it answers, the server's templates (Templates)
+ * when it doesn't or when [llm] is null. A tick runs in three steps so a slow model never holds the database:
+ *  1. plan (one transaction): what goes now, postponements, parks, skipped jobs;
+ *  2. write (no transaction): the coach writes each message, within [LLM_BUDGET_MS] in all;
+ *  3. deliver (one transaction): the messages, the notifications, the next check-in times, the daily jobs claimed.
+ * Nothing that goes out is marked as sent before step 3, so if the app is stopped half-way the next tick sends it.
+ * The returned [TickReport.lines] explain every message and every postponement for the Diagnostics log.
  */
-class Ticker(private val store: Store) {
+class Ticker(private val store: Store, llm: Llm? = null, prompts: Prompts? = null) {
     private val dao = store.dao
+    private val coach = Coach(store, llm, prompts)
 
     suspend fun tick(): TickReport = tick(dailyJobs = true)
 
@@ -73,17 +83,31 @@ class Ticker(private val store: Store) {
     internal suspend fun tickTasksOnly(): TickReport = tick(dailyJobs = false)
 
     private suspend fun tick(dailyJobs: Boolean): TickReport = LOCK.withLock {
-        store.write {
-            val run = Run(store.settings(), store.now())
-            run.go(dailyJobs)
-            TickReport(run.notices, run.lines, nextWake(run.s, store.now()))
-        }
+        val run = Run(store.settings(), store.now())
+        val pending = store.write { run.plan(dailyJobs) }
+        val budgetEnd = System.nanoTime() + LLM_BUDGET_MS * 1_000_000
+        val written = pending.map { run.compose(it, budgetEnd) }
+        store.write { written.forEach { run.deliver(it) } }
+        TickReport(run.notices, run.lines, nextWake(run.s, store.now()))
+    }
+
+    /** Something to send, decided in step 1. */
+    private sealed interface Pending {
+        data class Checkin(val group: List<TaskRow>, val state: ContactState, val avoided: Boolean) : Pending
+        /** mode: daily | reentry | digest | none (only the week's meetings, merged into a morning that has nothing else) */
+        data class Job(val job: String, val key: String, val mode: String, val sunday: Boolean = false, val merged: Boolean = false) : Pending
+    }
+
+    /** …and written in step 2. */
+    private sealed interface Written {
+        data class Checkin(val p: Pending.Checkin, val text: CheckinText) : Written
+        data class Job(val p: Pending.Job, val daily: Daily?) : Written
     }
 
     /** When the next tick should run, without running one (after every change). */
     suspend fun nextWake(): Instant = nextWake(store.settings(), store.now())
 
-    private inner class Run(val s: AppSettings, val now: Instant) {
+    private inner class Run(val s: AppSettings, val now: Instant) : TickReads {
         val zone = s.zone
         val local: ZonedDateTime = now.atZone(zone)
         val notices = mutableListOf<Notice>()
@@ -95,16 +119,40 @@ class Ticker(private val store: Store) {
             lines += line
         }
 
-        suspend fun go(dailyJobs: Boolean) {
+        /** Step 1, in a transaction: what goes now, and every postponement. */
+        suspend fun plan(dailyJobs: Boolean): List<Pending> {
             closeFinishedMeetings()
             closeSilentSessions()
-            contactTasks()
-            if (dailyJobs) for (job in dueDailyJobs()) runDailyJob(job)
+            val out = mutableListOf<Pending>()
+            contactTasks()?.let { out += it }
+            if (dailyJobs) for ((job, key) in dueDailyJobs()) planDailyJob(job, key)?.let { out += it }
+            return out
+        }
+
+        /** Step 2, outside the transaction: the words. */
+        suspend fun compose(p: Pending, budgetEnd: Long): Written {
+            val ms = minOf(MESSAGE_TIMEOUT_MS, (budgetEnd - System.nanoTime()) / 1_000_000)
+            return when (p) {
+                is Pending.Checkin -> Written.Checkin(p, coach.checkin(p.group, p.state.sentTodayByTask, p.avoided, now, this, ms))
+                is Pending.Job -> Written.Job(p, when (p.mode) {
+                    "daily" -> coach.daily(p.job, p.sunday, now, this, ms)
+                    "reentry" -> coach.reentry(now, this, ms)
+                    else -> null
+                })
+            }
+        }
+
+        /** Step 3, in a transaction: send. */
+        suspend fun deliver(w: Written) {
+            when (w) {
+                is Written.Checkin -> send(w.p, w.text)
+                is Written.Job -> deliverJob(w.p, w.daily)
+            }
         }
 
         // ------------------------------------------------------------ 1. task check-ins
 
-        suspend fun contactTasks() {
+        suspend fun contactTasks(): Pending.Checkin? {
             val lapsed = isLapsed()
             val today = Logic.focusDay(local, s.dayResetTime)
             val due = dao.openTasks()
@@ -115,7 +163,7 @@ class Ticker(private val store: Store) {
                 due.remove(fence)
                 log("Skipped hard stop #${fence.id} \"${fence.title}\": its time passed while nothing could be sent")
             }
-            if (due.isEmpty()) return
+            if (due.isEmpty()) return null
             val state = contactState().copy(focusHoldUntil = Logic.focusHoldUntil(dao.latestSession()))
             val sendable = mutableListOf<TaskRow>()
             for (t in due) {
@@ -130,9 +178,9 @@ class Ticker(private val store: Store) {
             }
             val plan = Logic.planContacts(sendable, state, local, g)
             val (ids, avoided) = withoutAvoided(plan.send)
-            if (ids.isEmpty()) return
+            if (ids.isEmpty()) return null
             val byId = plan.send.associateBy { it.id }
-            send(ids.map { byId.getValue(it) }, state, avoided)
+            return Pending.Checkin(ids.map { byId.getValue(it) }, state, avoided)
         }
 
         /** Avoided tasks get no ordinary check-ins: the others, or ONE avoided task's reason message. */
@@ -157,31 +205,19 @@ class Ticker(private val store: Store) {
             return if (normal.isNotEmpty()) normal to false else asks.take(1) to asks.isNotEmpty()
         }
 
-        suspend fun send(group: List<TaskRow>, state: ContactState, avoided: Boolean) {
-            val meetings = group.filter { it.kind == "meeting" && it.due != null }
-            val fences = group.filter { it.kind == "fence" }
-            val others = group.filter { it !in meetings && it !in fences }
-            val firstTask = group.firstOrNull { it.kind == "task" }
-            val lang = Logic.chipLang(lastUserText(), firstTask?.title)
-            val body = if (avoided && firstTask != null) Logic.text("avoid_ask", lang, "title" to firstTask.title)
-            else others.joinToString("\n") { Templates.templateLine(it, now, zone) }
-            val head = (meetings.map { Templates.meetingLine(it, now, zone) } + fences.map { Templates.fenceLine(it, zone, lang) }).joinToString("\n")
-            val text = Logic.clip(listOf(head, body.trim()).filter { it.isNotEmpty() }.joinToString("\n"), Templates.MAX_TEXT)
-            val today = Logic.focusDay(local, s.dayResetTime)
-            val chips = firstTask?.let {
-                val stage = Logic.taskStage(it, eventCounts(it, 7), today)
-                Logic.chipsJson(Logic.chipsFor(if (avoided) "avoided" else "checkin", stage), lang, it.id)
-            }.orEmpty()
-            val kind = Templates.messageKind(group)
-            val msg = store.addMessage("assistant", text, kind, group.map { it.id }, Templates.encodeChips(chips))
-
+        /** One combined message (written in step 2), its notification, and the tasks' next check-in times. */
+        suspend fun send(p: Pending.Checkin, w: CheckinText) {
+            // Read again: a task you finished while the message was being written isn't contacted about.
+            val group = p.group.mapNotNull { dao.task(it.id) }.filter { it.status == OPEN }
+            if (group.isEmpty()) return log("Check-in dropped: its tasks were closed while it was being written")
+            val msg = store.addMessage("assistant", w.text, w.kind, group.map { it.id }, Templates.encodeChips(w.chips), w.model)
             val lastReply = lastUserReplyAt()
-            val (level, alarmS) = if (avoided) NORMAL to 0L else messageLevel(group, lastReply)
-            notices += Notice(msg.id, Templates.pushTitle(group), text, level, alarmS,
-                if (Templates.hasTaskButtons(group)) group[0].id else null, lang)
-            log("Sent message #${msg.id} ($kind, ${LEVELS[level]}) about " + group.joinToString { "#${it.id} \"${it.title}\"" } +
-                if (avoided) " (avoided: the reason message)" else "")
-            for (t in group) afterContact(t, alarmed = level == ALARM, lastReply = lastReply, avoided = avoided)
+            val (level, alarmS) = if (p.avoided) NORMAL to 0L else messageLevel(group, lastReply)
+            notices += Notice(msg.id, Templates.pushTitle(group), w.text, level, alarmS,
+                if (Templates.hasTaskButtons(group)) group[0].id else null, w.lang)
+            log("Sent message #${msg.id} (${w.kind}, ${LEVELS[level]}) about " + group.joinToString { "#${it.id} \"${it.title}\"" } +
+                (if (p.avoided) " (avoided: the reason message)" else "") + (w.model?.let { ", written by $it" } ?: ""))
+            for (t in group) afterContact(t, alarmed = level == ALARM, lastReply = lastReply, avoided = p.avoided, followup = w.followups[t.id])
         }
 
         /** (level, alarm seconds) for one message: as loud as its most pressing task. */
@@ -201,7 +237,7 @@ class Ticker(private val store: Store) {
             return if (lastReply != null && lastReply > notified) 0 else t.nagCount
         }
 
-        suspend fun afterContact(task: TaskRow, alarmed: Boolean, lastReply: Instant?, avoided: Boolean) {
+        suspend fun afterContact(task: TaskRow, alarmed: Boolean, lastReply: Instant?, avoided: Boolean, followup: Instant? = null) {
             val t = dao.task(task.id) ?: return
             if (t.kind == "fence") {
                 fenceFired(t)
@@ -223,7 +259,8 @@ class Ticker(private val store: Store) {
             } else {
                 // Tasks that may escalate follow up within the day; every other task gets one check-in a day.
                 val esc = Logic.escalates(t, now)
-                Logic.nextReminderAfterNag(now, nagCount, if (esc) t.priority else 1, if (esc) s.nagIntervalMin else 24 * 60, s.maxNags)
+                followup // the coach chose a time (already clamped by code)
+                    ?: Logic.nextReminderAfterNag(now, nagCount, if (esc) t.priority else 1, if (esc) s.nagIntervalMin else 24 * 60, s.maxNags)
             }
             store.putTask(t.copy(nagCount = nagCount, lastNotifiedAt = Times.format(now), remindAt = nextAt?.let(Times::format),
                 remindRequested = t.kind == "meeting", escalated = t.escalated || alarmed))
@@ -231,44 +268,72 @@ class Ticker(private val store: Store) {
 
         // ------------------------------------------------------------ 2. daily jobs
 
-        /** Which daily jobs run now (claimed, so each runs once a day). Nothing on Shabbat / holidays. */
-        suspend fun dueDailyJobs(): List<String> {
+        /**
+         * Which daily jobs are due now and not yet run today: (job, its claim key). Nothing on Shabbat / holidays. A job
+         * is claimed (so it runs once a day) when its message goes out, or when it's skipped.
+         */
+        suspend fun dueDailyJobs(): List<Pair<String, String>> {
             if (RestCalendar.restUntil(now, rest) != null) return emptyList()
-            val today = local.toLocalDate()
-            val jobs = mutableListOf<String>()
-            if (Logic.jobIsDue(local, s.morningTime) && claim("morning", today.toString())) jobs += "morning"
+            val jobs = mutableListOf<Pair<String, String>>()
+            fun due(job: String, key: String) { jobs += job to key }
+            if (Logic.jobIsDue(local, s.morningTime) && unclaimed("morning")) due("morning", "morning")
             for (t in s.checkinTimes) {
-                if (Logic.jobIsDue(local, t, 1.0) && claim("checkin@${t.format(HM)}", today.toString())) jobs += "checkin"
+                val key = "checkin@${t.format(HM)}"
+                if (Logic.jobIsDue(local, t, 1.0) && unclaimed(key)) due("checkin", key)
             }
-            if (Logic.jobIsDue(local, s.eveningTime, 2.0) && claim("evening", today.toString())) jobs += "evening"
+            if (Logic.jobIsDue(local, s.eveningTime, 2.0) && unclaimed("evening")) due("evening", "evening")
             val week = s.weekMeetingsTime
             if (week != null && local.dayOfWeek == s.weekStartDay && !Logic.weekMeetingsMerged(s.morningTime, week) &&
-                Logic.jobIsDue(local, week) && claim("week_meetings", today.toString())) jobs += "week_meetings"
+                Logic.jobIsDue(local, week) && unclaimed("week_meetings")) due("week_meetings", "week_meetings")
             val eve = s.meetingsEveTime
-            if (eve != null && Logic.jobIsDue(local, eve, 2.0) && claim("meetings_eve", today.toString())) jobs += "meetings_eve"
+            if (eve != null && Logic.jobIsDue(local, eve, 2.0) && unclaimed("meetings_eve")) due("meetings_eve", "meetings_eve")
             return jobs
         }
 
-        suspend fun claim(job: String, date: String): Boolean {
-            val key = "job.$job"
-            if (dao.meta(key) == date) return false
-            dao.setMeta(com.prominder.myapp.data.MetaRow(key, date))
+        suspend fun unclaimed(key: String): Boolean = dao.meta("job.$key") != local.toLocalDate().toString()
+
+        /** Marks a job as run today. False if it already was. */
+        suspend fun claim(key: String): Boolean {
+            if (!unclaimed(key)) return false
+            dao.setMeta(com.prominder.myapp.data.MetaRow("job.$key", local.toLocalDate().toString()))
             return true
         }
 
-        suspend fun runDailyJob(job: String) {
-            if (job == "week_meetings" || job == "meetings_eve") return meetingDigest(job)
+        /** Step 1 for a daily job: skipped now (claimed, logged), or what to write. */
+        suspend fun planDailyJob(job: String, key: String): Pending.Job? {
+            if (job == "week_meetings" || job == "meetings_eve") return Pending.Job(job, key, "digest")
             val first = job == "morning" && local.dayOfWeek == s.weekStartDay
             val merged = first && Logic.weekMeetingsMerged(s.morningTime, s.weekMeetingsTime)
             val away = isLapsed()
-            if (job == "checkin" && activeRecently()) return log("Mid-day check-in skipped: you were active in the last hour")
-            if (away && job != "morning") return log("${JOB_NAMES[job]} skipped: away for 48 hours")
-            var daily: Daily? = when {
-                away && reentryDue() -> reentry()
-                away -> null.also { log("Morning plan skipped: away, and the re-entry message was already sent") }
-                else -> composeDaily(job, first)
+            if (job == "checkin" && activeRecently()) {
+                claim(key)
+                log("Mid-day check-in skipped: you were active in the last hour")
+                return null
             }
-            if (merged) {
+            if (away && job != "morning") {
+                claim(key)
+                log("${JOB_NAMES[job]} skipped: away for 48 hours")
+                return null
+            }
+            val mode = when {
+                away && reentryDue() -> "reentry"
+                away -> "none".also { log("Morning plan skipped: away, and the re-entry message was already sent") }
+                else -> "daily"
+            }
+            if (mode == "none" && !merged) {
+                claim(key)
+                return null
+            }
+            return Pending.Job(job, key, mode, first, merged)
+        }
+
+        /** Step 3 for a daily job: claimed, then its message (if any) goes out. */
+        suspend fun deliverJob(p: Pending.Job, written: Daily?) {
+            if (!claim(p.key)) return
+            if (p.mode == "digest") return meetingDigest(p.job)
+            if (p.job == "checkin" && p.mode == "daily" && written == null) return log("Mid-day check-in skipped: nothing open")
+            var daily = written
+            if (p.merged) {
                 val digest = digestFor("week_meetings")
                 if (digest != null) {
                     daily = daily?.copy(text = daily.text + "\n\n" + digest.first)
@@ -276,67 +341,12 @@ class Ticker(private val store: Store) {
                 }
             }
             daily ?: return
-            val kind = daily.kind ?: job
-            val msg = store.addMessage("assistant", daily.text, kind, daily.taskIds, Templates.encodeChips(daily.chips))
+            daily.setFocus?.let { store.setFocusIn(it, Logic.focusDay(local, s.dayResetTime)) }
+            for (id in daily.staleIds) dao.task(id)?.let { store.putTask(it.copy(staleOfferedAt = Times.format(now))) }
+            val kind = daily.kind ?: p.job
+            val msg = store.addMessage("assistant", daily.text, kind, daily.taskIds, Templates.encodeChips(daily.chips), daily.model)
             notices += Notice(msg.id, Templates.JOB_TITLES.getValue(kind), daily.text, NORMAL)
-            log("Sent ${JOB_NAMES[kind] ?: kind} (message #${msg.id})")
-        }
-
-        suspend fun composeDaily(job: String, sunday: Boolean): Daily? {
-            val today = Logic.focusDay(local, s.dayResetTime)
-            val open = dao.openTasks()
-            val endOfDay = local.toLocalDate().plusDays(1).atStartOfDay(zone).toInstant()
-            val todayList = TaskLists.today(open, endOfDay)
-            val lang = Logic.chipLang(lastUserText(), (todayList.ifEmpty { open }).take(5).joinToString(" ") { it.title })
-            when (job) {
-                "morning" -> {
-                    val suggested = Logic.pickFocus(open, local)
-                    val focus = if (suggested.isNotEmpty()) store.setFocusIn(suggested, today) else emptyList()
-                    val ids = focus.map { it.id }
-                    val meetings = Logic.meetingOccurrences(meetingsBetween(now, endOfDay), now, endOfDay, zone)
-                    var text = Templates.morningTemplate(focus, meetings, zone)
-                    var chips = if (ids.isNotEmpty()) Logic.chipsJson(Logic.chipsFor("morning", null), lang, ids[0]) else emptyList()
-                    if (sunday) {
-                        val wins = doneSince(now.minus(Duration.ofDays(Logic.WEEK_WINS_DAYS))).size
-                        val stale = staleTasks().filter { it.id !in ids }
-                        val extra = mutableListOf<String>()
-                        if (wins > 0) extra += Logic.text(if (wins == 1) "wins_week_1" else "wins_week", lang, "n" to wins)
-                        if (stale.isNotEmpty()) extra += Logic.text("stale", lang, "titles" to stale.joinToString(" · ") { it.title })
-                        if (extra.isNotEmpty()) text += "\n\n" + extra.joinToString("\n")
-                        if (stale.isNotEmpty()) {
-                            chips = chips + Logic.chipsJson(Logic.chipsFor("sunday", null), lang, null, stale.map { it.id })
-                            stale.forEach { store.putTask(it.copy(staleOfferedAt = Times.format(now))) }
-                        }
-                    }
-                    return Daily(text, chips, ids)
-                }
-                else -> {
-                    val (focus, focusDone) = focusToday(today)
-                    val firstOpen = focus.firstOrNull { it.id !in focusDone && it.status == OPEN }
-                    if (job == "checkin" && todayList.isEmpty() && firstOpen == null) return null.also { log("Mid-day check-in skipped: nothing open") }
-                    val chips = Logic.chipsJson(Logic.chipsFor(Templates.JOB_CHIPS.getValue(job), null), lang, firstOpen?.id)
-                    if (job == "checkin" && firstOpen != null) {
-                        val step = firstOpen.nextAction?.takeIf { it.isNotEmpty() } ?: firstOpen.title
-                        return Daily("Next from Today's 3: ▶ $step (${firstOpen.title})", chips)
-                    }
-                    if (job == "evening") {
-                        val start = Logic.dayStart(local, s.dayResetTime).toInstant()
-                        val sessions = dao.sessionsSince(Times.format(start))
-                        val text = Templates.eveningTemplate(doneSince(start).size, sessions.size to sessions.sumOf { Logic.actualMinutes(it, now) }, todayList.size)
-                        return Daily(text, chips)
-                    }
-                    if (todayList.isEmpty()) return Daily("Nothing open for today.", chips)
-                    return Daily("${todayList.size} open item(s) for today. Open the app to see them.", chips)
-                }
-            }
-        }
-
-        suspend fun reentry(): Daily {
-            val open = dao.openTasks().filter { it.kind == "task" && it.parentId == null }.let(TaskLists::all)
-            val lang = Logic.chipLang(lastUserText(), open.take(5).joinToString(" ") { it.title })
-            val overdue = open.any { t -> t.due?.let { it < now } == true }
-            val chips = Logic.chipsJson(Logic.chipsFor("reentry", null), lang, null).filter { overdue || it.id != "move_overdue" }
-            return Daily(Logic.text("reentry", lang), chips, kind = "reentry")
+            log("Sent ${JOB_NAMES[kind] ?: kind} (message #${msg.id})" + (daily.model?.let { ", written by $it" } ?: ""))
         }
 
         suspend fun meetingDigest(job: String) {
@@ -390,10 +400,10 @@ class Ticker(private val store: Store) {
 
         suspend fun lastUserReplyAt(): Instant? = Times.parseOrNull(dao.latestOfKindsBy(ACTIVITY_KINDS, "user")?.createdAt)
 
-        suspend fun lastUserText(): String? = dao.latestOfKindsBy(listOf("chat"), "user")?.content
+        override suspend fun lastUserText(): String? = dao.latestOfKindsBy(listOf("chat"), "user")?.content
 
         /** Events per kind in the last [days], counted from the task's last fresh start. */
-        suspend fun eventCounts(t: TaskRow, days: Long): Map<String, Int> {
+        override suspend fun eventCounts(t: TaskRow, days: Long): Map<String, Int> {
             val cutoff = now.minus(Duration.ofDays(days))
             val reset = t.avoidReset
             val start = if (reset != null && reset > cutoff) reset else cutoff
@@ -401,19 +411,19 @@ class Ticker(private val store: Store) {
             return dao.eventsSince(t.id, startText).filter { it.createdAt > startText }.groupingBy { it.kind }.eachCount()
         }
 
-        suspend fun meetingsBetween(start: Instant, end: Instant): List<TaskRow> =
+        override suspend fun meetingsBetween(start: Instant, end: Instant): List<TaskRow> =
             dao.openTasks().filter { t ->
                 val due = t.due
                 t.kind == "meeting" && due != null && due < end && (due >= start || t.recurrence != null)
             }.sortedWith(compareBy({ it.dueAt }, { it.id }))
 
         /** tasks.done_since: what was finished since [start] (steps and recurring tasks count), oldest first. */
-        suspend fun doneSince(start: Instant): List<Long> {
+        override suspend fun doneSince(start: Instant): List<Long> {
             val ids = dao.eventsOfKindSince("done", Times.format(start)).map { it.taskId }.distinct()
             return dao.tasks(ids).filter { it.status != "cancelled" }.map { it.id }
         }
 
-        suspend fun focusToday(today: java.time.LocalDate): Pair<List<TaskRow>, Set<Long>> {
+        override suspend fun focusToday(today: java.time.LocalDate): Pair<List<TaskRow>, Set<Long>> {
             val rows = TaskLists.focus(dao.tasks(store.focusIds(today)), today.toString())
             val since = Times.format(today.atStartOfDay(zone).toInstant())
             val doneEvents = rows.flatMap { t -> dao.eventsSince(t.id, since).filter { it.kind == "done" } }
@@ -421,7 +431,7 @@ class Ticker(private val store: Store) {
         }
 
         /** Sunday cleanup candidates: open 21+ days, nothing moving, not offered in 4 weeks (tasks.stale_tasks). */
-        suspend fun staleTasks(): List<TaskRow> {
+        override suspend fun staleTasks(): List<TaskRow> {
             val old = now.minus(Duration.ofDays(Logic.STALE_DAYS))
             val cooldown = now.minus(Duration.ofDays(Logic.STALE_COOLDOWN_DAYS))
             val candidates = dao.openTasks().filter { t ->
@@ -513,16 +523,29 @@ class Ticker(private val store: Store) {
 
     private val com.prominder.myapp.data.SessionRow.endSent: Instant? get() = Times.parseOrNull(endSentAt)
 
+    /** A daily message as the coach wrote it. */
     data class Daily(
         val text: String,
         val chips: List<Logic.ChipJson> = emptyList(),
         val taskIds: List<Long> = emptyList(),
         val kind: String? = null,
+        /** The LLM that wrote it; null for a template. */
+        val model: String? = null,
+        /** The morning plan: Today's 3 to save when it goes out (null: the LLM already saved its pick). */
+        val setFocus: List<Long>? = null,
+        /** The Sunday cleanup: the tasks offered (not offered again for 4 weeks). */
+        val staleIds: List<Long> = emptyList(),
     )
 
     companion object {
         /** One tick at a time (the alarm and the safety-net job can fire together). */
         private val LOCK = Mutex()
+
+        /** All the LLM writing in one tick (an alarm's receiver can't run for long); after that, templates. */
+        const val LLM_BUDGET_MS = 30_000L
+
+        /** One message (the server's LLM_TIMEOUT_S). */
+        const val MESSAGE_TIMEOUT_MS = 25_000L
 
         /** The alarm sleeps at most this long; the 15-minute safety net runs anyway. */
         val MAX_SLEEP: Duration = Duration.ofHours(6)

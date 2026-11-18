@@ -10,7 +10,6 @@ import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
-import kotlinx.serialization.json.JsonPrimitive
 
 /**
  * The words of the proactive messages when no LLM writes them, ported from backend/app/coach.py's templates
@@ -134,14 +133,6 @@ object Templates {
     }
 
     /** Chips as the server stored them: Python's json.dumps(…, ensure_ascii=False). */
-    fun encodeChips(chips: List<Logic.ChipJson>): String = chips.joinToString(", ", "[", "]") { c ->
-        val fields = mutableListOf("\"id\": ${str(c.id)}", "\"label\": ${str(c.label)}")
-        c.action?.let { fields += "\"action\": ${str(it)}" }
-        c.minutes?.let { fields += "\"minutes\": $it" }
-        c.taskId?.let { fields += "\"task_id\": $it" }
-        c.taskIds?.let { ids -> fields += "\"task_ids\": " + ids.joinToString(", ", "[", "]") }
-        fields.joinToString(", ", "{", "}")
-    }
+    fun encodeChips(chips: List<Logic.ChipJson>): String = com.prominder.myapp.data.Chips.encode(chips)
 
-    private fun str(s: String) = JsonPrimitive(s).toString()
 }

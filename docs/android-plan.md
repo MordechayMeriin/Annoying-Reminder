@@ -306,6 +306,9 @@ KosherJava gives the Hebrew calendar.*
 *Done when:* a week of real reminders arrives when it should, and the tick log explains every skip.
 
 ### Phase D: chat and the coach
+*Built: see [android-phase-d.md](android-phase-d.md). ▶ Start buttons stay hidden until focus sessions come in Phase E;
+What now? (pure code) works from its chips already.*
+
 - `/llm` in the Lambda: the key, model fallback, daily cap, rate limit, timeouts.
 - Port the agent loop (`agent.py`, `llm_loop.py`), the 12 tools (`tools.py`, now writing to Room), the
   context builder and prompt rendering. The prompt files ship with the app; a copy downloaded at sync can

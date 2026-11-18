@@ -24,9 +24,12 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -34,19 +37,47 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import com.prominder.myapp.logic.Logic.ChipJson
 import com.prominder.myapp.ui.theme.Palette
 
 data class FocusItem(val id: Long, val title: String, val meta: String, val done: Boolean)
 
-/** A chat line; [day] is set on the first message of each day (the separator above it). */
-data class ChatItem(val id: Long, val role: String, val kind: String, val content: String, val time: String, val day: String? = null)
+/**
+ * A chat line; [day] is set on the first message of each day (the separator above it). [chips]: its reply buttons
+ * (shown under the latest message only); [model]: the LLM that wrote it, shown when ⚙ Show which AI model replied is on.
+ */
+data class ChatItem(
+    val id: Long, val role: String, val kind: String, val content: String, val time: String, val day: String? = null,
+    val chips: List<ChipJson> = emptyList(), val model: String? = null,
+)
+
+/** The turn in progress, for the chat (from llm/Chat.kt's ChatTurn). */
+data class ChatUi(
+    val sending: String? = null,
+    val sentId: Long? = null,
+    val steps: List<String> = emptyList(),
+    val typing: Boolean = false,
+    val error: String? = null,
+    val canRetry: Boolean = false,
+)
 
 data class HomeState(
     val focus: List<FocusItem> = emptyList(),
@@ -56,11 +87,16 @@ data class HomeState(
     val setupTotal: Int = 0,
     /** A short answer to the last tap ("Later: next check-in Wed 14:00"). */
     val notice: String? = null,
+    val chat: ChatUi = ChatUi(),
+    /** The text in the message field. */
+    val draft: String = "",
+    /** Dictation is possible on this phone (the 🎤 button). */
+    val canDictate: Boolean = false,
 )
 
 /**
- * The main screen, like the web app's: Today's 3 on top, the chat below. Until the assistant moves to the phone
- * (Phase D) the chat is the history, read-only; tasks are added and changed by hand.
+ * The main screen, like the web app's: Today's 3 on top, the chat with the assistant below (Phase D). The reply
+ * buttons sit under the latest message; while the assistant works, its steps and the typing dots show under the chat.
  */
 @Composable
 fun HomeScreen(
@@ -74,6 +110,13 @@ fun HomeScreen(
     onOpenChecklist: () -> Unit,
     onOpenDiagnostics: () -> Unit,
     onLogout: () -> Unit,
+    onDraft: (String) -> Unit = {},
+    onSend: () -> Unit = {},
+    onChip: (ChipJson) -> Unit = {},
+    onMic: () -> Unit = {},
+    onRetry: () -> Unit = {},
+    /** Changes each time the field should take the focus (the "New task" shortcut). */
+    focusInput: Int = 0,
 ) {
     Column(Modifier.fillMaxSize()) {
         var menu by remember { mutableStateOf(false) }
@@ -107,32 +150,113 @@ fun HomeScreen(
         }
 
         Box(Modifier.weight(1f).fillMaxWidth()) {
-            if (state.messages.isEmpty()) {
-                Muted("No messages yet.", Modifier.align(Alignment.Center))
+            val chat = state.chat
+            val last = state.messages.lastOrNull()
+            // The reply buttons: under the latest message while it's the assistant's and nothing is being sent.
+            val chipsFor = last?.takeIf { it.role == "assistant" && it.chips.isNotEmpty() && chat.sending == null }?.id
+            val modelFor = state.messages.lastOrNull { it.role == "assistant" }?.id
+            if (state.messages.isEmpty() && chat.sending == null) {
+                Muted("No messages yet. Write anything: a task, a question, how it's going.", Modifier.align(Alignment.Center).padding(24.dp))
             } else {
                 // Newest at the bottom, opening at the bottom.
                 LazyColumn(Modifier.fillMaxSize().padding(horizontal = 12.dp), reverseLayout = true) {
+                    item(key = "status") { ChatStatus(chat, chat.sending != null && chat.sentId == null, onRetry) }
                     items(state.messages.asReversed(), key = { it.id }) { m ->
                         Column {
                             m.day?.let {
                                 Text(it, color = Palette.Muted, fontSize = 12.sp, textAlign = TextAlign.Center,
                                     modifier = Modifier.fillMaxWidth().padding(top = 14.dp, bottom = 6.dp))
                             }
-                            ChatLine(m)
+                            ChatLine(m, delivery = if (m.id == chat.sentId) "✓ Sent" else null, model = m.model.takeIf { m.id == modelFor })
+                            if (m.id == chipsFor) ChipRow(m.chips, onChip)
                         }
                     }
                 }
             }
         }
 
-        Column(Modifier.fillMaxWidth().background(Palette.Card).padding(horizontal = 12.dp, vertical = 8.dp)) {
+        Column(Modifier.fillMaxWidth().background(Palette.Card).padding(horizontal = 8.dp, vertical = 6.dp)) {
             state.notice?.let {
-                Text(it, color = Palette.Accent, fontSize = 14.sp)
-                Spacer(Modifier.height(6.dp))
+                Text(it, color = Palette.Accent, fontSize = 14.sp, modifier = Modifier.padding(horizontal = 4.dp))
+                Spacer(Modifier.height(4.dp))
             }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Muted("Chat and reminders come back in the next updates.", Modifier.weight(1f))
-                Button(onClick = onNewTask) { Text("＋ New task") }
+            Composer(state, onDraft, onSend, onMic, onNewTask, focusInput)
+        }
+    }
+}
+
+/** The message field with ＋ (a task by hand), 🎤 (dictation) and Send. */
+@Composable
+private fun Composer(state: HomeState, onDraft: (String) -> Unit, onSend: () -> Unit, onMic: () -> Unit, onNewTask: () -> Unit, focusInput: Int) {
+    val focus = remember { FocusRequester() }
+    val keyboard = LocalSoftwareKeyboardController.current
+    LaunchedEffect(focusInput) {
+        if (focusInput > 0) {
+            runCatching { focus.requestFocus() }
+            keyboard?.show()
+        }
+    }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        TextButton(onClick = onNewTask, modifier = Modifier.size(44.dp)) { Text("＋", fontSize = 20.sp, color = Palette.Muted) }
+        OutlinedTextField(
+            value = state.draft,
+            onValueChange = onDraft,
+            modifier = Modifier.weight(1f).focusRequester(focus),
+            placeholder = { Text("Message", color = Palette.Muted) },
+            maxLines = 5,
+        )
+        if (state.canDictate) {
+            TextButton(onClick = onMic, modifier = Modifier.size(44.dp)) { Text("🎤", fontSize = 18.sp) }
+        }
+        val canSend = state.draft.isNotBlank() && state.chat.sending == null
+        Button(onClick = onSend, enabled = canSend, modifier = Modifier.padding(start = 4.dp)) { Text("Send") }
+    }
+}
+
+/** Under the chat: the message being sent, this turn's tool steps, the typing dots, or why there's no reply. */
+@Composable
+private fun ChatStatus(chat: ChatUi, showSending: Boolean, onRetry: () -> Unit) {
+    Column(Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
+        if (showSending && chat.sending != null) {
+            ChatLine(ChatItem(-1, "user", "chat", chat.sending, ""), delivery = "Sending…", model = null)
+        }
+        chat.steps.forEachIndexed { i, step ->
+            val running = i == chat.steps.lastIndex && !chat.typing
+            Text(step, color = if (running) Palette.Text else Palette.Muted, fontSize = 13.sp, modifier = Modifier.padding(vertical = 2.dp))
+        }
+        if (chat.typing) TypingDots()
+        chat.error?.let {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
+                Text(it, color = Palette.Danger, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                if (chat.canRetry) TextButton(onClick = onRetry) { Text("Try again") }
+            }
+        }
+    }
+}
+
+/** The assistant is writing: three dots that pulse in turn. */
+@Composable
+private fun TypingDots() {
+    val transition = rememberInfiniteTransition(label = "typing")
+    Row(Modifier.padding(vertical = 6.dp).clip(RoundedCornerShape(14.dp)).background(Palette.Card).padding(horizontal = 12.dp, vertical = 10.dp)) {
+        repeat(3) { i ->
+            val a by transition.animateFloat(0.25f, 1f, infiniteRepeatable(tween(500, delayMillis = i * 160), RepeatMode.Reverse), label = "dot$i")
+            Box(Modifier.padding(horizontal = 3.dp).size(7.dp).alpha(a).clip(CircleShape).background(Palette.Muted))
+        }
+    }
+}
+
+/** The reply buttons: an action (✓ Done, Later…) or a reply in your words (I'm stuck). The first action stands out. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ChipRow(chips: List<ChipJson>, onChip: (ChipJson) -> Unit) {
+    FlowRow(Modifier.fillMaxWidth().padding(top = 2.dp, bottom = 6.dp)) {
+        chips.forEachIndexed { i, c ->
+            val primary = i == 0 && c.action != null
+            if (primary) {
+                Button(onClick = { onChip(c) }, modifier = Modifier.padding(end = 6.dp, bottom = 4.dp)) { Text(c.label, fontSize = 14.sp) }
+            } else {
+                OutlinedButton(onClick = { onChip(c) }, modifier = Modifier.padding(end = 6.dp, bottom = 4.dp)) { Text(c.label, fontSize = 14.sp) }
             }
         }
     }
@@ -175,7 +299,7 @@ fun DoneCircle(done: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-private fun ChatLine(m: ChatItem) {
+private fun ChatLine(m: ChatItem, delivery: String? = null, model: String? = null) {
     if (m.kind == "event") {
         Text("${m.content}  ${m.time}", color = Palette.Muted, fontSize = 12.sp, textAlign = TextAlign.Center,
             modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp))
@@ -187,8 +311,10 @@ private fun ChatLine(m: ChatItem) {
             Modifier.widthIn(max = 320.dp).clip(RoundedCornerShape(14.dp)).background(if (mine) Palette.Card2 else Palette.Card)
                 .padding(horizontal = 12.dp, vertical = 8.dp),
         ) {
+            model?.let { Text(it.substringAfterLast('/'), color = Palette.Muted, fontSize = 11.sp) }
             Text(m.content, style = MaterialTheme.typography.bodyMedium)
-            Text(m.time, color = Palette.Muted, fontSize = 11.sp, modifier = Modifier.align(Alignment.End))
+            Text(listOfNotNull(m.time.ifEmpty { null }, delivery).joinToString(" · "), color = Palette.Muted, fontSize = 11.sp,
+                modifier = Modifier.align(Alignment.End))
         }
     }
 }
