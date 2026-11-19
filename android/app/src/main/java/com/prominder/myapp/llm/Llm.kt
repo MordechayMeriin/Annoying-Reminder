@@ -2,6 +2,7 @@ package com.prominder.myapp.llm
 
 import com.prominder.myapp.auth.BackendAuth
 import java.io.IOException
+import java.io.InterruptedIOException
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -65,10 +66,14 @@ class BackendLlm(
                 .header("Authorization", "Bearer $t")
                 .post(body.toRequestBody(JSON_TYPE))
                 .build()
-            // The server stops the model after timeoutS; a little more for the trip and a cold start.
-            val client = http.newBuilder().callTimeout((timeoutS + 20).toLong(), TimeUnit.SECONDS).build()
+            // The server stops the model after timeoutS; a little more for the trip and a cold start. The server sends
+            // nothing while the model thinks, so the read timeout must be as long as the whole call (not OkHttp's 10 s).
+            val limit = (timeoutS + 20).toLong()
+            val client = http.newBuilder().callTimeout(limit, TimeUnit.SECONDS).readTimeout(limit, TimeUnit.SECONDS).build()
             val (code, text) = try {
                 client.newCall(request).execute().use { it.code to it.body.string() }
+            } catch (e: InterruptedIOException) { // a timeout
+                throw LlmUnavailable("The assistant took too long to answer. Try again.", cause = e)
             } catch (e: IOException) {
                 throw LlmUnavailable(BackendAuth.networkError(e).message.orEmpty(), cause = e)
             }

@@ -67,9 +67,9 @@ class BackendAuth(
                     "The secure connection to the server was cut off. If a filter or VPN is on (NetFree, Rimon, etc.), " +
                         "it may be blocking this app: ask it to allow ProMinder."
                 e is UnknownHostException ->
-                    "Can't find the server. Check the internet connection, or whether a filter is blocking onrender.com."
+                    "Can't find the server. Check the internet connection, or whether a filter is blocking the app."
                 e is SocketTimeoutException || e.message.orEmpty().contains("timeout", ignoreCase = true) ->
-                    "The server didn't answer in time. It sleeps when nobody uses it and can take a minute to wake: try again."
+                    "The server didn't answer in time. Check the internet connection and try again."
                 else -> "Can't reach the server. Check the internet connection and try again."
             }
             val detail = listOfNotNull(e::class.java.simpleName, e.message).joinToString(": ")
@@ -90,7 +90,7 @@ class BackendAuth(
                 403, 429 -> AuthException(detail ?: "The server refused the sign-in.")
                 401 -> AuthException("Google's answer wasn't accepted. Try again.")
                 502, 503, 504 -> AuthException(
-                    detail ?: "The server is starting up or unavailable. Try again in a minute.",
+                    detail ?: "The server ran into a problem (HTTP $status). Try again in a minute.",
                     AuthException.Kind.Network,
                 )
                 else -> AuthException("The server refused the sign-in (HTTP $status).")

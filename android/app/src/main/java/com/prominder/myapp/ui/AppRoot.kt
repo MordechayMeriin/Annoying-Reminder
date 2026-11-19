@@ -67,7 +67,7 @@ private fun LoginRoute(auth: AuthRepository) {
                     // Null: you closed Google's sheet.
                     val idToken = GoogleSignIn.idToken(context, BuildConfig.GOOGLE_WEB_CLIENT_ID)
                     if (idToken != null) {
-                        state = state.copy(message = "Signing in… The server can take a minute to wake up.")
+                        state = state.copy(message = "Signing in…")
                         auth.signIn(idToken)
                     }
                 } catch (e: AuthException) {
@@ -112,7 +112,7 @@ private fun HandoverRoute(app: ReminderApp, onDone: () -> Unit, onLogout: () -> 
     HandoverScreen(
         state = state,
         onMove = {
-            state = state.copy(busy = true, message = "Downloading… The server can take a minute to wake up.")
+            state = state.copy(busy = true, message = "Downloading your data…")
             scope.launch {
                 try {
                     val r = app.sync.restore(handover = true)

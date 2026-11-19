@@ -70,8 +70,10 @@ class ReminderApp : Application() {
         Diag.init(this)
         logCrashes()
         Channels.ensure(this)
-        // Long enough for Render's free plan, which can take most of a minute to wake the server.
-        http = OkHttpClient.Builder().callTimeout(90, TimeUnit.SECONDS).build()
+        // A request may take up to 90 seconds in all (a restore of everything, a slow model call), and the server may
+        // be silent for most of that while it works: OkHttp's default 10-second read timeout would cut it off.
+        http = OkHttpClient.Builder().connectTimeout(15, TimeUnit.SECONDS).readTimeout(60, TimeUnit.SECONDS)
+            .callTimeout(90, TimeUnit.SECONDS).build()
         auth = AuthRepository(BackendAuth(BuildConfig.API_URL, http), PrefsSessionStore(this))
         // Seeing this often without a reason (no restart, no update) means Android keeps closing the app.
         Diag.log("app", "App started (${BuildConfig.VERSION_NAME})")

@@ -83,6 +83,22 @@ class BackendLlmTest {
         assertTrue(fails().message!!.isNotEmpty())
     }
 
+    /** A model call is silent for longer than OkHttp's 10-second read timeout: the call's own limit applies. */
+    @Test fun `a slow answer isn't cut off by the app's short read timeout`() = runTest {
+        val short = OkHttpClient.Builder().readTimeout(1, java.util.concurrent.TimeUnit.SECONDS).build()
+        val slow = BackendLlm(server.url("/").toString(), short) { "login" }
+        server.enqueue(MockResponse().setHeadersDelay(2, java.util.concurrent.TimeUnit.SECONDS)
+            .setBody("""{"message": {"role": "assistant", "content": "Thought about it."}, "model": "m"}"""))
+        assertEquals("Thought about it.", slow.complete(ask, emptyList(), 0.3, 5.0).content)
+    }
+
+    @Test fun `too slow even for the call's limit says the assistant took too long`() = runTest {
+        server.enqueue(MockResponse().setHeadersDelay(30, java.util.concurrent.TimeUnit.SECONDS).setBody("{}"))
+        val quick = BackendLlm(server.url("/").toString(), OkHttpClient()) { "login" }
+        val e = try { quick.complete(ask, emptyList(), 0.3, -19.0); null } catch (e: LlmUnavailable) { e }
+        assertEquals("The assistant took too long to answer. Try again.", e?.message)
+    }
+
     @Test fun `logged out never calls`() = runTest {
         token = null
         assertTrue(fails().message!!.contains("logged out"))
