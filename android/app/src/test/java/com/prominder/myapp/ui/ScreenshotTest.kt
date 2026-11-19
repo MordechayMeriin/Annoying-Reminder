@@ -137,7 +137,7 @@ class ScreenshotTest {
     @Test
     @Config(qualifiers = "+iw")
     fun handover_on_a_hebrew_phone() = shot("8c_handover_hebrew_phone") {
-        HandoverScreen(HandoverState(alreadyHandedOver = false, message = "The server is starting up or unavailable. It'll try again."), {}, {})
+        HandoverScreen(HandoverState(alreadyHandedOver = false, message = "The server ran into a problem (HTTP 503). Try again in a minute."), {}, {})
     }
 
     @Test

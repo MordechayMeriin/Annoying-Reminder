@@ -45,7 +45,7 @@ class BackendAuthTest {
     }
 
     @Test
-    fun `a sleeping server is a network problem, not a refusal`() = runTest {
+    fun `a failing server is a network problem, not a refusal`() = runTest {
         server.enqueue(MockResponse().setResponseCode(502).setBody("<html>Bad gateway</html>"))
         val e = expectError { auth.signIn("t") }
         assertEquals(AuthException.Kind.Network, e.kind)
@@ -80,7 +80,7 @@ class BackendAuthTest {
     @Test
     fun `other network errors get their own advice`() {
         assertTrue(BackendAuth.networkError(UnknownHostException("x")).message!!.contains("Can't find the server"))
-        assertTrue(BackendAuth.networkError(SocketTimeoutException("timeout")).message!!.contains("wake"))
+        assertTrue(BackendAuth.networkError(SocketTimeoutException("timeout")).message!!.contains("didn't answer in time"))
         assertTrue(BackendAuth.networkError(IOException("boom")).message!!.contains("Can't reach the server"))
     }
 

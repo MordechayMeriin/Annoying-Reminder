@@ -117,8 +117,8 @@ open class SyncApi(
             return when (code) {
                 401 -> SyncException("The server didn't accept the login. Log out and in again.", network = false)
                 422 -> SyncException("The server refused the data: ${detail ?: "HTTP 422"}", network = false)
-                // Render answers 502-504 while it wakes up; a 500 is a bug or a refusal on the server (see its log).
-                in 502..504 -> SyncException(detail ?: "The server is starting up. Try again in a minute. (HTTP $code)", network = true)
+                // 502-504: the function failed or ran out of time (see its log); worth trying again later.
+                in 502..504 -> SyncException(detail ?: "The server ran into a problem. Try again in a minute. (HTTP $code)", network = true)
                 in 500..599 -> SyncException(detail ?: "The server ran into an error (HTTP $code). Try again later; " +
                     "if it keeps happening, share Diagnostics.", network = true)
                 else -> SyncException(detail ?: "The server refused (HTTP $code).", network = code == 429 || code == 408)
