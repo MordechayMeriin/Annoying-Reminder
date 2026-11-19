@@ -93,6 +93,33 @@ android {
     }
 }
 
+// The assistant's prompts are the backend's Markdown files (backend/app/prompts/), shipped inside the app as
+// assets/prompts/ so it works without the server; a newer set downloaded at the daily backup takes precedence.
+abstract class CopyPrompts : DefaultTask() {
+    @get:InputDirectory
+    abstract val source: DirectoryProperty
+
+    @get:OutputDirectory
+    abstract val output: DirectoryProperty
+
+    @TaskAction
+    fun copy() {
+        val out = output.get().asFile
+        out.deleteRecursively()
+        val src = source.get().asFile
+        src.walkTopDown().filter { it.isFile && it.extension == "md" }.forEach { f ->
+            f.copyTo(File(out, "prompts/" + f.relativeTo(src).invariantSeparatorsPath), overwrite = true)
+        }
+    }
+}
+
+val copyPrompts = tasks.register<CopyPrompts>("copyPrompts") {
+    source.set(rootProject.layout.projectDirectory.dir("../backend/app/prompts"))
+}
+androidComponents {
+    onVariants { variant -> variant.sources.assets?.addGeneratedSourceDirectory(copyPrompts, CopyPrompts::output) }
+}
+
 // Room writes each database version's schema here, so a later version's migration can be checked against it.
 ksp {
     arg("room.schemaLocation", "$projectDir/schemas")

@@ -1,5 +1,11 @@
 package com.prominder.myapp.ui
 
+import android.app.Activity
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.speech.RecognizerIntent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -9,7 +15,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
 import com.prominder.myapp.data.AppSettings
+import com.prominder.myapp.data.Chips
 import com.prominder.myapp.data.DayMath
 import com.prominder.myapp.data.EventRow
 import com.prominder.myapp.data.MessageRow
@@ -21,8 +29,15 @@ import com.prominder.myapp.data.TaskForm
 import com.prominder.myapp.data.TaskLists
 import com.prominder.myapp.data.TaskRow
 import com.prominder.myapp.data.Times
+import com.prominder.myapp.data.drop
+import com.prominder.myapp.data.keep
+import com.prominder.myapp.data.moveOverdue
+import com.prominder.myapp.data.notNow
 import com.prominder.myapp.data.startOfDay
+import com.prominder.myapp.data.whatNow
 import com.prominder.myapp.diag.Diag
+import com.prominder.myapp.llm.Chat
+import com.prominder.myapp.logic.Logic
 import java.time.Instant
 import java.time.ZoneId
 import kotlinx.coroutines.launch
@@ -39,6 +54,7 @@ private fun settingsOf(store: Store): AppSettings =
 @Composable
 fun HomeRoute(
     store: Store,
+    chat: Chat,
     setupDone: Int,
     setupTotal: Int,
     notice: String?,
@@ -46,9 +62,19 @@ fun HomeRoute(
     go: (Route) -> Unit,
     onOpenChecklist: () -> Unit,
     onLogout: () -> Unit,
+    focusInput: Int = 0,
 ) {
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     val settings = settingsOf(store)
+    val turn by chat.turn.collectAsState()
+    var draft by rememberSaveable { mutableStateOf("") }
+    val canDictate = remember { dictationAvailable(context) }
+    // Dictation: Android's own speech recognizer (Hebrew included), its words added to the message field.
+    val dictate = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val words = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
+        if (result.resultCode == Activity.RESULT_OK && !words.isNullOrBlank()) draft = listOf(draft.trim(), words.trim()).filter { it.isNotEmpty() }.joinToString(" ")
+    }
     val zone = settings.zone
     val now = store.now()
     val day = store.focusDay(settings).toString()
@@ -64,11 +90,14 @@ fun HomeRoute(
     HomeScreen(
         state = HomeState(
             focus = focus.map { FocusItem(it.id, it.title, Format.taskMeta(it, zone, now), it.id in done) },
-            messages = chatItems(messages, zone, now),
+            messages = chatItems(messages, zone, now, showModel = settings.bool("show_model")),
             openCount = open.count { it.parentId == null },
             setupDone = setupDone,
             setupTotal = setupTotal,
             notice = notice,
+            chat = ChatUi(turn.sending, turn.sentId, turn.steps, turn.typing, turn.error, canRetry = turn.failedId != null),
+            draft = draft,
+            canDictate = canDictate,
         ),
         onOpenTasks = { go(Route.Tasks) },
         onOpenTask = { go(Route.Task(it)) },
@@ -79,6 +108,21 @@ fun HomeRoute(
         onOpenChecklist = onOpenChecklist,
         onOpenDiagnostics = { go(Route.Diagnostics) },
         onLogout = onLogout,
+        onDraft = { draft = it },
+        onSend = { if (chat.send(draft)) draft = "" },
+        onChip = { c -> scope.launch { onNotice(chipAction(store, chat, c, zone)) } },
+        onMic = {
+            val lang = Logic.chipLang(draft.ifBlank { null } ?: messages.lastOrNull { it.role == "user" && it.kind == "chat" }?.content)
+            try {
+                dictate.launch(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                    .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                    .putExtra(RecognizerIntent.EXTRA_LANGUAGE, if (lang == "he") "he-IL" else "en-US"))
+            } catch (e: ActivityNotFoundException) {
+                onNotice("Dictation isn't available on this phone.")
+            }
+        },
+        onRetry = { chat.retry() },
+        focusInput = focusInput,
     )
     if (picking) {
         val candidates = TaskLists.all(open.filter { it.kind == "task" }).map { it.id to it.title }
@@ -92,16 +136,36 @@ fun HomeRoute(
 }
 
 /** The chat, with a day separator on each day's first message. */
-internal fun chatItems(rows: List<MessageRow>, zone: ZoneId, now: Instant): List<ChatItem> {
+internal fun chatItems(rows: List<MessageRow>, zone: ZoneId, now: Instant, showModel: Boolean = false): List<ChatItem> {
     var lastDay: java.time.LocalDate? = null
     return rows.map { m ->
         val at = Times.parseOrNull(m.createdAt) ?: now
         val d = at.atZone(zone).toLocalDate()
         val sep = if (d != lastDay) Format.day(at, zone, now) else null
         lastDay = d
-        ChatItem(m.id, m.role, m.kind, m.content, Format.clock(at, zone), sep)
+        ChatItem(m.id, m.role, m.kind, m.content, Format.clock(at, zone), sep,
+            chips = Chips.decode(m.chips).filter { it.action !in SESSION_ACTIONS }, model = m.model.takeIf { showModel })
     }
 }
+
+/** ▶ Start, ▶ Another round and Stop run focus sessions, which come to the phone in Phase E: not shown until then. */
+private val SESSION_ACTIONS = setOf("start", "another", "stop")
+
+/** A reply button: an action on the phone's data (no LLM), or a reply in your words. Returns a short answer to show. */
+internal suspend fun chipAction(store: Store, chat: Chat, c: Logic.ChipJson, zone: ZoneId): String? = when (c.action) {
+    null -> if (chat.send(c.label)) null else "One message at a time: wait for the reply."
+    "done" -> c.taskId?.let { store.complete(it); "Done ✓" }
+    "later" -> c.taskId?.let { id -> store.later(id)?.let { "Later: next check-in ${Format.time(it, zone, store.now())}" } }
+    "not_now" -> c.taskId?.let { store.notNow(it); "Parked for a week" }
+    "move_overdue" -> store.moveOverdue().let { if (it.isEmpty()) "Nothing overdue" else "Moved to next week" }
+    "drop" -> store.drop(c.taskIds.orEmpty()).let { "Dropped" }
+    "keep" -> store.keep(c.taskIds.orEmpty()).let { "Kept" }
+    "what_now" -> store.whatNow(c.lowEnergy == true, c.exclude.orEmpty(), c.id).let { null }
+    else -> null
+}
+
+private fun dictationAvailable(context: android.content.Context): Boolean =
+    Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).resolveActivity(context.packageManager) != null
 
 @Composable
 fun TasksRoute(store: Store, go: (Route) -> Unit, onBack: () -> Unit) {

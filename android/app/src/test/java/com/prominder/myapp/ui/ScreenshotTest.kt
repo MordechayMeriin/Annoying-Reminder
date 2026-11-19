@@ -83,6 +83,51 @@ class ScreenshotTest {
         )
     }
 
+    /** Phase D: the assistant at work: your message sent, its steps, the typing dots, and a check-in's reply buttons. */
+    @Test
+    fun chat_working() = shot("4d_chat_working") {
+        val chips = com.prominder.myapp.logic.Logic.chipsJson(com.prominder.myapp.logic.Logic.chipsFor("checkin", "planned"), "en", 1)
+            .filter { it.action != "start" }
+        HomeScreen(
+            HomeState(
+                focus = listOf(FocusItem(1, "Write the quarterly report", "Today 15:00 · Important", done = false)),
+                messages = listOf(
+                    ChatItem(1, "assistant", "nudge", "Report time: open the doc and write the three headings? 15 minutes is enough.", "10:00",
+                        day = "Today", chips = chips, model = "google/gemini-2.5-flash"),
+                    ChatItem(2, "user", "chat", "after lunch. also dentist thursday at 10", "10:04"),
+                ),
+                chat = ChatUi(sentId = 2, sending = "after lunch. also dentist thursday at 10",
+                    steps = listOf("⏰ Scheduling a follow-up: Write the quarterly report", "📅 Saving a new meeting: Dentist"), typing = true),
+                draft = "",
+                canDictate = true,
+            ),
+            {}, {}, {}, {}, {}, {}, {}, {}, {},
+        )
+    }
+
+    /** The reply buttons under the latest message, and the model line (⚙ Show which AI model replied). */
+    @Test
+    fun chat_chips() = shot("4e_chat_chips") {
+        val chips = com.prominder.myapp.logic.Logic.chipsJson(com.prominder.myapp.logic.Logic.chipsFor("checkin", "planned"), "en", 1)
+            .filter { it.action != "start" }
+        HomeScreen(
+            HomeState(
+                messages = listOf(
+                    ChatItem(1, "user", "chat", "remind me to call the bank", "09:58", day = "Today"),
+                    ChatItem(2, "assistant", "chat", "Saved: Call the bank. First step: find the account number in the app.", "09:58",
+                        model = "google/gemini-2.5-flash"),
+                    ChatItem(3, "assistant", "nudge", "📅 Standup — 10:15 (in 15 min)\nAnything to prepare?", "10:00"),
+                    ChatItem(4, "assistant", "nudge", "Call the bank: open the app and find the account number?", "10:20", chips = chips,
+                        model = "google/gemini-2.5-flash"),
+                ),
+                chat = ChatUi(error = "The assistant is unavailable right now. Try again in a minute.", canRetry = true),
+                draft = "תזכיר לי מחר",
+                canDictate = true,
+            ),
+            {}, {}, {}, {}, {}, {}, {}, {}, {},
+        )
+    }
+
     @Test
     fun home_empty() = shot("4b_home_empty") {
         HomeScreen(HomeState(setupDone = 4, setupTotal = 4, notice = "Later: next check-in Today 12:00"), {}, {}, {}, {}, {}, {}, {}, {}, {})

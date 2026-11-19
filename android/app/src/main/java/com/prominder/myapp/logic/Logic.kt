@@ -387,6 +387,8 @@ object Logic {
     data class ChipJson(
         val id: String, val label: String, val action: String? = null, val minutes: Int? = null,
         val taskId: Long? = null, val taskIds: List<Long>? = null,
+        /** What now?'s Low energy / Something else: how to ask again. */
+        val lowEnergy: Boolean? = null, val exclude: List<Long>? = null,
     )
 
     /** Chips as stored: action chips bound to their task (left out without one); Drop them / Keep to [taskIds]. */

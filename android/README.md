@@ -16,8 +16,12 @@ screen restores the backup. Details: [docs/android-phase-b.md](../docs/android-p
 meetings, hard stops, the morning plan, mid-day check-ins, the evening review, the week's and tomorrow's meetings,
 quiet hours, Shabbat and holidays, normal / urgent / alarm), template wording, ✓ Done and Later on the
 notification, and a tick log in Diagnostics. The backend moves from Render to AWS Lambda, with a daily email if the
-phone goes silent. Details: [docs/android-phase-c.md](../docs/android-phase-c.md). The assistant comes back in
-Phase D.
+phone goes silent. Details: [docs/android-phase-c.md](../docs/android-phase-c.md).
+
+**Phase D (chat and the coach)** is in: the assistant runs on the phone. The chat is live again (reply buttons,
+*Sending… / ✓ Sent*, the typing dots and the assistant's steps, dictation, share-to-app, the *New task* shortcut on
+the app icon, Reply on a notification), and the check-ins and daily messages are written by the LLM, with the
+templates as the fallback. The OpenRouter key stays on the Lambda. Details: [docs/android-phase-d.md](../docs/android-phase-d.md).
 
 ## How it's built
 
@@ -204,6 +208,7 @@ in 1 min** with the phone locked, and restarting the phone while a 1-hour alarm 
 | Variable | `GOOGLE_WEB_CLIENT_ID` | Google sign-in (built into the app) |
 | Variable (optional) | `API_URL` | The backend: the Lambda function URL once it's set up ([docs/android-phase-c.md](../docs/android-phase-c.md)); default `https://annoying-reminder-api.onrender.com` |
 | Variable | `AWS_DEPLOY_ROLE_ARN`, `AWS_REGION` | Deploying the backend to Lambda (the Backend workflow) |
+| Lambda setting | `OPENROUTER_API_KEY`, `OPENROUTER_MODELS` | The assistant (Phase D). Set by `backend/scripts/aws_lambda_setup.py`, on the function itself, never in GitHub or the app |
 | Variable (optional) | `PLAY_RELEASE_STATUS` | `completed` (default) or `draft` |
 | Secret | `ANDROID_UPLOAD_KEYSTORE_BASE64`, `ANDROID_UPLOAD_KEYSTORE_PASSWORD`, `ANDROID_UPLOAD_KEY_ALIAS`, `ANDROID_UPLOAD_KEY_PASSWORD` | Signing the bundle |
 | Secret | `PLAY_SERVICE_ACCOUNT_JSON` | Uploading to Play |

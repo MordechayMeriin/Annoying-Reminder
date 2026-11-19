@@ -26,6 +26,7 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         if (!app.store.hasData() || app.auth.token() == null) return Result.success()
         return try {
             app.sync.upload()
+            refreshPrompts(app)
             Result.success()
         } catch (e: SyncException) {
             app.sync.recordError(e.message.orEmpty())
@@ -34,8 +35,25 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         }
     }
 
+    /** At most twice a day: the backend's prompt files, if they changed (a prompt edited without a new app). */
+    private suspend fun refreshPrompts(app: ReminderApp) {
+        val prefs = app.getSharedPreferences("prompts", Context.MODE_PRIVATE)
+        val now = System.currentTimeMillis()
+        if (now - prefs.getLong("checked_at", 0) < PROMPTS_EVERY_MS) return
+        try {
+            val set = app.syncApi.prompts()
+            prefs.edit().putLong("checked_at", now).apply()
+            if (set.version != app.promptFiles.version() && app.promptFiles.save(set)) {
+                Diag.log("llm", "Prompts updated from the server (${set.version})")
+            }
+        } catch (e: SyncException) {
+            Diag.log("llm", "Couldn't check for newer prompts: ${e.message?.lineSequence()?.first()}")
+        }
+    }
+
     companion object {
         private const val MAX_ATTEMPTS = 8
+        private const val PROMPTS_EVERY_MS = 12 * 3600 * 1000L
     }
 }
 

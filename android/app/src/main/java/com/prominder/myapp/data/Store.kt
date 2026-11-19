@@ -113,8 +113,9 @@ class Store(
     /**
      * ✓ Done (actions.apply "done" + tasks.complete). A recurring task rolls on to its next time instead of
      * closing; an open task's open steps are done with it. A hard stop can't be "done", only cancelled.
+     * [chatEvent]: write "[Marked done: …]" in the chat (a tap); the assistant's own tool call doesn't.
      */
-    suspend fun complete(id: Long): TaskRow? = write {
+    suspend fun complete(id: Long, chatEvent: Boolean = true): TaskRow? = write {
         val t = dao.task(id) ?: return@write null
         if (t.status != OPEN || t.kind == "fence") return@write t
         closeSessions(id, "done")
@@ -134,7 +135,7 @@ class Store(
             t.copy(status = DONE, completedAt = Times.format(now), remindAt = null, resumeNote = null)
         }
         putTask(new)
-        addChatEvent("[Marked done: ${t.title}" + if (recurring) " — next one scheduled]" else "]", listOf(id))
+        if (chatEvent) addChatEvent("[Marked done: ${t.title}" + if (recurring) " — next one scheduled]" else "]", listOf(id))
         new
     }
 
@@ -151,8 +152,8 @@ class Store(
         whenLocal.toInstant()
     }
 
-    /** Cancel the task (and its open steps). */
-    suspend fun cancel(id: Long): TaskRow? = write {
+    /** Cancel the task (and its open steps). [chatEvent]: as for [complete]. */
+    suspend fun cancel(id: Long, chatEvent: Boolean = true): TaskRow? = write {
         val t = dao.task(id) ?: return@write null
         if (t.status == CANCELLED) return@write t
         closeSessions(id, "stopped")
@@ -161,7 +162,7 @@ class Store(
         }
         val new = t.copy(status = CANCELLED, remindAt = null)
         putTask(new)
-        if (t.status == OPEN) addChatEvent("[Cancelled: ${t.title}]", listOf(id))
+        if (t.status == OPEN && chatEvent) addChatEvent("[Cancelled: ${t.title}]", listOf(id))
         new
     }
 
@@ -242,12 +243,25 @@ class Store(
         dao.upsertSessions(listOf(row.copy(seq = seq)))
     }
 
-    internal suspend fun addEvent(taskId: Long, kind: String, note: String? = null) {
+    internal suspend fun addEvent(taskId: Long, kind: String, note: String? = null, avoidReason: String? = null) {
         dirty = true
-        dao.upsertEvents(listOf(EventRow(taskId, kind, note?.take(500), null, nowText(), rid(), seq)))
+        dao.upsertEvents(listOf(EventRow(taskId, kind, note?.take(500)?.ifEmpty { null }, avoidReason, nowText(), rid(), seq)))
     }
 
-    /** thread.add: a message in the chat. Chips as JSON text (Chips.encode). */
+    internal suspend fun putPreference(row: PreferenceRow) {
+        dirty = true
+        dao.upsertPreferences(listOf(row.copy(seq = seq)))
+    }
+
+    internal suspend fun putMessage(row: MessageRow) {
+        dirty = true
+        dao.upsertMessages(listOf(row.copy(seq = seq)))
+    }
+
+    /** thread.add: a message in the chat. Chips as JSON text (Chips.encode). Public for the assistant (llm/). */
+    suspend fun addMessageNow(role: String, content: String, kind: String, taskIds: List<Long> = emptyList(),
+                              chips: String = "[]", model: String? = null): MessageRow = write { addMessage(role, content, kind, taskIds, chips, model) }
+
     internal suspend fun addMessage(role: String, content: String, kind: String, taskIds: List<Long> = emptyList(),
                                     chips: String = "[]", model: String? = null): MessageRow {
         dirty = true
@@ -296,7 +310,7 @@ class Store(
     }
 
     /** The next id: after both the backup's counter and the highest id here (as db.next_id did on the server). */
-    private suspend fun nextId(counter: String, maxId: Long): Long {
+    internal suspend fun nextId(counter: String, maxId: Long): Long {
         val id = maxOf(dao.meta(counter)?.toLongOrNull() ?: 0, maxId) + 1
         dao.setMeta(MetaRow(counter, id.toString()))
         return id

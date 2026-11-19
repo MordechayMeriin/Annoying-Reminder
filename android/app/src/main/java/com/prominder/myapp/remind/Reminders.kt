@@ -65,7 +65,8 @@ object Reminders {
      */
     suspend fun tick(context: Context, store: Store, reason: String, scheduledAt: Long? = null) {
         if (!store.hasData()) return
-        val report = Ticker(store).tick()
+        val app = context.applicationContext as? ReminderApp
+        val report = (if (app != null) Ticker(store, app.llm, app.promptFiles.prompts) else Ticker(store)).tick()
         report.notices.forEach { Notifier.showNotice(context, it) }
         val late = scheduledAt?.let { " (" + Timing.describeLateness(System.currentTimeMillis() - it) + ")" }.orEmpty()
         if (report.lines.isEmpty()) {

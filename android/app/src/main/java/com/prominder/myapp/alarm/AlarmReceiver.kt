@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import com.prominder.myapp.ReminderApp
 import com.prominder.myapp.diag.Diag
+import androidx.core.app.RemoteInput
 import com.prominder.myapp.notify.Notifier
 import com.prominder.myapp.remind.Reminders
 import kotlinx.coroutines.launch
@@ -31,6 +32,18 @@ class AlarmReceiver : BroadcastReceiver() {
                         val at = app.store.later(taskId)
                         Diag.log("notify", "Later from the notification: $title" + (at?.let { " (next check-in ${Diag.log.format(it.toEpochMilli())})" } ?: ""))
                     }
+                }
+            }
+            ACTION_REPLY -> {
+                val text = RemoteInput.getResultsFromIntent(intent)?.getCharSequence(EXTRA_REPLY)?.toString()?.trim().orEmpty()
+                val notificationId = intent.getIntExtra(EXTRA_NOTIFICATION_ID, 0)
+                if (text.isEmpty()) {
+                    Notifier.cancel(context, notificationId)
+                } else {
+                    // Android waits for the notification to change after a reply; the answer comes in a new one.
+                    Notifier.showSent(context, notificationId, text)
+                    ReplyWorker.enqueue(context, text)
+                    Diag.log("notify", "Reply from a notification sent to the assistant")
                 }
             }
             ACTION_TEST_ALARM -> {
@@ -74,6 +87,8 @@ class AlarmReceiver : BroadcastReceiver() {
         const val ACTION_TICK = "com.prominder.myapp.TICK"
         const val ACTION_DONE = "com.prominder.myapp.DONE"
         const val ACTION_LATER = "com.prominder.myapp.LATER"
+        const val ACTION_REPLY = "com.prominder.myapp.REPLY"
+        const val EXTRA_REPLY = "reply"
         const val EXTRA_TASK_ID = "task_id"
         const val EXTRA_NOTIFICATION_ID = "notification_id"
         const val ACTION_TEST_ALARM = "com.prominder.myapp.TEST_ALARM"

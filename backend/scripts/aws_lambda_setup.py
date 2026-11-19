@@ -7,13 +7,15 @@ table, the same as AWS_REGION on Render). It has Python, boto3 and your login:
 
     git clone https://github.com/MordechayMeriin/Annoying-Reminder.git && cd Annoying-Reminder/backend
     python3 scripts/aws_lambda_setup.py
-    # It asks for three values from Render → annoying-reminder-api → Environment:
-    # GOOGLE_CLIENT_ID, OWNER_GOOGLE_EMAIL and ACTION_SECRET (typed, not shown).
+    # It asks for the values from Render → annoying-reminder-api → Environment: GOOGLE_CLIENT_ID,
+    # OWNER_GOOGLE_EMAIL, ACTION_SECRET, and (Phase D, the assistant) OPENROUTER_API_KEY and OPENROUTER_MODELS.
+    # Secrets are typed, not shown. Run again, it only asks for what the function doesn't have yet.
 
 What it creates (all inside the always-free limits for one user):
   1. A role for the function "prominder-api": this table only, sending email from your address, its own logs.
   2. The function itself (Python 3.12), with a stand-in until GitHub Actions deploys the real code, and its
-     settings. ACTION_SECRET is Render's, so the phone stays logged in.
+     settings. ACTION_SECRET is Render's, so the phone stays logged in. The OpenRouter key lives here, never on
+     the phone (Phase D).
   3. Its HTTPS address (a "function URL"). The app checks every login itself, as on Render.
   4. The daily "is the phone still alive?" run (EventBridge, 06:00 UTC).
   5. GitHub's way in (OIDC): a role GitHub Actions can take, from this repository's main branch only, that
@@ -45,6 +47,7 @@ DEPLOY_ROLE = "prominder-github-deploy"
 RULE = "prominder-alive-check"
 SCHEDULE = "cron(0 6 * * ? *)"   # 06:00 UTC: 08:00 in Israel's winter, 09:00 in summer
 GITHUB_OIDC = "token.actions.githubusercontent.com"
+TIMEOUT_S = 60   # one model call takes up to LLM_TIMEOUT_S (25 s), plus a cold start
 
 # Until the first deploy: answers 503, so the app says "the server isn't ready" instead of something stranger.
 STAND_IN = (
@@ -59,11 +62,22 @@ def step(text: str) -> None:
     print(f"\n== {text}")
 
 
-def ask(name: str, given: str | None, secret: bool = False) -> str:
-    value = (given or os.environ.get(name, "")).strip()
+def ask(name: str, given: str | None, secret: bool = False, current: dict[str, str] | None = None) -> str:
+    """A value from the command line, the environment, the function's current settings, or typed in."""
+    value = (given or os.environ.get(name, "") or (current or {}).get(name, "")).strip()
+    if value == "unused-on-lambda":
+        value = ""
     while not value:
         value = (getpass.getpass if secret else input)(f"{name} (from Render → annoying-reminder-api → Environment): ").strip()
     return value
+
+
+def current_env(lam) -> dict[str, str]:
+    """The function's settings as they are (empty before it exists): a re-run asks only for what's missing."""
+    try:
+        return lam.get_function_configuration(FunctionName=FUNCTION).get("Environment", {}).get("Variables", {})
+    except lam.exceptions.ResourceNotFoundException:
+        return {}
 
 
 def lambda_role(iam, table_arn: str, email_arn: str) -> str:
@@ -96,7 +110,7 @@ def function(lam, role_arn: str, env: dict[str, str]) -> str:
         cfg = lam.get_function_configuration(FunctionName=FUNCTION)
         merged = {**cfg.get("Environment", {}).get("Variables", {}), **env}
         lam.update_function_configuration(FunctionName=FUNCTION, Role=role_arn, Environment={"Variables": merged},
-                                          Timeout=30, MemorySize=512)
+                                          Timeout=TIMEOUT_S, MemorySize=512)
         print(f"Function {FUNCTION} exists: settings updated.")
         return cfg["FunctionArn"]
     except lam.exceptions.ResourceNotFoundException:
@@ -109,8 +123,8 @@ def function(lam, role_arn: str, env: dict[str, str]) -> str:
         try:
             arn = lam.create_function(
                 FunctionName=FUNCTION, Runtime="python3.12", Role=role_arn, Handler="app.lambda_app.handler",
-                Code={"ZipFile": buf.getvalue()}, Timeout=30, MemorySize=512, Architectures=["x86_64"],
-                Environment={"Variables": env}, Description="ProMinder: Google sign-in, the phone's backup, the alive check",
+                Code={"ZipFile": buf.getvalue()}, Timeout=TIMEOUT_S, MemorySize=512, Architectures=["x86_64"],
+                Environment={"Variables": env}, Description="ProMinder: Google sign-in, the phone's backup, the assistant's model calls, the alive check",
             )["FunctionArn"]
             print(f"Created function {FUNCTION} (a stand-in until GitHub Actions deploys the code).")
             lam.get_waiter("function_active_v2").wait(FunctionName=FUNCTION)
@@ -221,16 +235,20 @@ def main() -> None:
     p.add_argument("--google-client-id")
     p.add_argument("--owner-email", help="OWNER_GOOGLE_EMAIL")
     p.add_argument("--alert-email", help="where the 'phone is silent' email goes (default: the owner's address)")
+    p.add_argument("--openrouter-models", help="OPENROUTER_MODELS: comma-separated, in fallback order")
     a = p.parse_args()
-
-    google_client_id = ask("GOOGLE_CLIENT_ID", a.google_client_id)
-    owner = ask("OWNER_GOOGLE_EMAIL", a.owner_email).lower()
-    action_secret = ask("ACTION_SECRET", None, secret=True)
-    alert = (a.alert_email or owner).lower()
 
     session = boto3.session.Session(region_name=a.region)
     account = session.client("sts").get_caller_identity()["Account"]
     iam, lam = session.client("iam"), session.client("lambda")
+    have = current_env(lam)
+
+    google_client_id = ask("GOOGLE_CLIENT_ID", a.google_client_id, current=have)
+    owner = ask("OWNER_GOOGLE_EMAIL", a.owner_email, current=have).lower()
+    action_secret = ask("ACTION_SECRET", None, secret=True, current=have)
+    openrouter_key = ask("OPENROUTER_API_KEY", None, secret=True, current=have)
+    openrouter_models = ask("OPENROUTER_MODELS", a.openrouter_models, current=have)
+    alert = (a.alert_email or have.get("ALERT_EMAIL") or owner).lower()
 
     step(f"The table ({a.region})")
     table_arn = session.client("dynamodb").describe_table(TableName=a.table)["Table"]["TableArn"]
@@ -246,7 +264,8 @@ def main() -> None:
 
     step("The function")
     env = {"DYNAMODB_TABLE": a.table, "GOOGLE_CLIENT_ID": google_client_id, "OWNER_GOOGLE_EMAIL": owner,
-           "ACTION_SECRET": action_secret, "ALERT_EMAIL": alert}
+           "ACTION_SECRET": action_secret, "ALERT_EMAIL": alert,
+           "OPENROUTER_API_KEY": openrouter_key, "OPENROUTER_MODELS": openrouter_models}
     function_arn = function(lam, role_arn, env)
 
     step("Its address")
