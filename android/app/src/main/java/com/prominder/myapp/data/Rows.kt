@@ -9,12 +9,12 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.Transient
 
 /*
- * The phone's tables. They mirror the server's items (backend/app/tasks.py, thread.py, sessions.py,
- * preferences.py, user_settings.py) field for field, with the same names, so a row travels to and from the
- * backup as it is (see sync/). Times are text in the stored format (Times.kt).
+ * The phone's tables. They match the backup's rows (backend/app/sync.py) field for field, with the same names, so a
+ * row travels to and from the backup as it is (see sync/). Times are text in the stored format (Times.kt).
  *
  * `seq` is the phone's own bookkeeping, never sent: the change number of the last local write (0 = as it
- * came from the backup). The upload sends rows whose seq is newer than the last upload.
+ * came from the backup). The upload sends rows whose seq is newer than the last upload (every table has an index on
+ * it, so finding them doesn't read the whole table).
  */
 
 const val OPEN = "open"
@@ -22,7 +22,7 @@ const val DONE = "done"
 const val CANCELLED = "cancelled"
 
 @Serializable
-@Entity(tableName = "tasks", indices = [Index("status"), Index("parent_id")])
+@Entity(tableName = "tasks", indices = [Index("status"), Index("parent_id"), Index("seq")])
 data class TaskRow(
     @PrimaryKey val id: Long,
     @SerialName("parent_id") @ColumnInfo(name = "parent_id") val parentId: Long? = null,
@@ -61,7 +61,7 @@ data class TaskRow(
 
 /** What happened to a task (postponed, done, …): its history, and what the coach's rules count. */
 @Serializable
-@Entity(tableName = "events", primaryKeys = ["task_id", "created_at", "rid"], indices = [Index("kind", "created_at")])
+@Entity(tableName = "events", primaryKeys = ["task_id", "created_at", "rid"], indices = [Index("kind", "created_at"), Index("seq")])
 data class EventRow(
     @SerialName("task_id") @ColumnInfo(name = "task_id") val taskId: Long,
     val kind: String,
@@ -75,7 +75,7 @@ data class EventRow(
 
 /** The chat. */
 @Serializable
-@Entity(tableName = "messages", indices = [Index("kind")])
+@Entity(tableName = "messages", indices = [Index("kind"), Index("created_at"), Index("seq")])
 data class MessageRow(
     @PrimaryKey val id: Long,
     /** user | assistant */
@@ -95,7 +95,7 @@ data class MessageRow(
 
 /** A focus session (▶ Start): the timer, its end check-in, "Where did you stop?" (data/Sessions.kt). */
 @Serializable
-@Entity(tableName = "sessions", indices = [Index("task_id")])
+@Entity(tableName = "sessions", indices = [Index("task_id"), Index("seq")])
 data class SessionRow(
     @PrimaryKey val id: Long,
     @SerialName("task_id") @ColumnInfo(name = "task_id") val taskId: Long,
@@ -110,7 +110,7 @@ data class SessionRow(
 
 /** Something you asked of the assistant in the chat ("shorter messages"). */
 @Serializable
-@Entity(tableName = "preferences")
+@Entity(tableName = "preferences", indices = [Index("seq")])
 data class PreferenceRow(
     @PrimaryKey val id: Long,
     val text: String,
@@ -120,7 +120,7 @@ data class PreferenceRow(
 
 /** A setting you changed (⚙). Settings at their default have no row. */
 @Serializable
-@Entity(tableName = "settings")
+@Entity(tableName = "settings", indices = [Index("seq")])
 data class SettingRow(
     @PrimaryKey val key: String,
     val value: String,
@@ -130,7 +130,7 @@ data class SettingRow(
 
 /** One day's Today's 3, in order. */
 @Serializable
-@Entity(tableName = "focus")
+@Entity(tableName = "focus", indices = [Index("seq")])
 data class FocusRow(
     @PrimaryKey val date: String,
     val ids: List<Long> = emptyList(),
@@ -138,12 +138,23 @@ data class FocusRow(
 )
 
 /** A deleted row, remembered until the next upload so the backup deletes it too. */
-@Entity(tableName = "tombstones", primaryKeys = ["table_name", "row_key"])
+@Entity(tableName = "tombstones", primaryKeys = ["table_name", "row_key"], indices = [Index("seq")])
 data class Tombstone(
     @ColumnInfo(name = "table_name") val table: String,
     /** The row's key as JSON: an id, a text key, or an event's [task_id, created_at, rid]. */
     @ColumnInfo(name = "row_key") val key: String,
     val seq: Long,
+)
+
+/**
+ * Which tasks a message is about, one row per pair: "the latest messages about task 5" is an index lookup instead of
+ * a text search through every message's task_ids. The phone's own index, kept with the message (Store.putMessage),
+ * never sent.
+ */
+@Entity(tableName = "message_tasks", primaryKeys = ["task_id", "message_id"], indices = [Index("message_id")])
+data class MessageTask(
+    @ColumnInfo(name = "task_id") val taskId: Long,
+    @ColumnInfo(name = "message_id") val messageId: Long,
 )
 
 /** The phone's own bookkeeping: change numbers, id counters, sync times. */

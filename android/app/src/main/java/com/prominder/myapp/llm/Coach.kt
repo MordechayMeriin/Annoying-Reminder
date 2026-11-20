@@ -22,6 +22,8 @@ import kotlinx.coroutines.withTimeout
 
 /** What the coach needs to read from the tick (Ticker.Run implements it inside its transaction or after it). */
 interface TickReads {
+    /** The open tasks, read once per step of the tick rather than by every message. */
+    suspend fun openTasks(): List<TaskRow>
     suspend fun lastUserText(): String?
     suspend fun eventCounts(t: TaskRow, days: Long): Map<String, Int>
     suspend fun meetingsBetween(start: Instant, end: Instant): List<TaskRow>
@@ -44,8 +46,8 @@ data class CheckinText(
 )
 
 /**
- * Writes the proactive messages, ported from backend/app/coach.py: task check-ins (grouped), the morning plan, mid-day
- * check-ins, the evening review and the re-entry message.
+ * Writes the proactive messages: task check-ins (grouped), the morning plan, mid-day check-ins, the evening review and
+ * the re-entry message.
  *
  * Code decides WHEN (the tick), WHICH playbook and WHICH reply buttons. The words come from the LLM when it's
  * available and from the fixed templates (Templates, Phase C) when it isn't, or when [llm] is null: a reminder is never
@@ -85,7 +87,7 @@ class Coach(private val store: Store, private val llm: Llm?, private val prompts
             val models = mutableListOf<String>()
             val ctx = ToolContext("coach", now)
             val written = attempt("Check-in", timeoutMs) {
-                val messages = checkinPrompt(group, sentToday, avoided, chips, stages, lang, local, today, s)
+                val messages = checkinPrompt(group, sentToday, avoided, chips, stages, lang, local, today, s, reads)
                 ToolLoop(llm!!, Tools(store)).run(messages, if (firstTask != null) ToolDefs.COACH_TOOLS else emptyList(), ctx, maxRounds = 3,
                     timeoutS = timeoutMs / 1000.0, models = models).text
             }
@@ -106,7 +108,7 @@ class Coach(private val store: Store, private val llm: Llm?, private val prompts
 
     private suspend fun checkinPrompt(
         group: List<TaskRow>, sentToday: Map<Long, Int>, avoided: Boolean, chips: List<Logic.ChipJson>, stages: Map<Long, String>,
-        lang: String, local: ZonedDateTime, today: LocalDate, s: AppSettings,
+        lang: String, local: ZonedDateTime, today: LocalDate, s: AppSettings, reads: TickReads,
     ): MutableList<kotlinx.serialization.json.JsonObject> {
         val now = local.toInstant()
         val zone = local.zone
@@ -125,7 +127,7 @@ class Coach(private val store: Store, private val llm: Llm?, private val prompts
         }
         val todayMsgs = LlmContext.since(dao, start, 8)
         val endOfDay = local.toLocalDate().plusDays(1).atStartOfDay(zone).toInstant()
-        val openToday = TaskLists.today(dao.openTasks(), endOfDay)
+        val openToday = TaskLists.today(reads.openTasks(), endOfDay)
         val user = listOf(
             "Due for a check-in now:\n" + blocks.joinToString("\n"),
             "Earlier messages about these tasks:\n" + LlmContext.linkedHistory(dao, ids, local),
@@ -148,7 +150,7 @@ class Coach(private val store: Store, private val llm: Llm?, private val prompts
         val zone = s.zone
         val local = now.atZone(zone)
         val today = Logic.focusDay(local, s.dayResetTime)
-        val open = dao.openTasks()
+        val open = reads.openTasks()
         val endOfDay = local.toLocalDate().plusDays(1).atStartOfDay(zone).toInstant()
         val todayList = TaskLists.today(open, endOfDay)
         val lang = Logic.chipLang(reads.lastUserText(), todayList.ifEmpty { open }.take(5).joinToString(" ") { it.title })
@@ -256,7 +258,7 @@ class Coach(private val store: Store, private val llm: Llm?, private val prompts
     suspend fun reentry(now: Instant, reads: TickReads, timeoutMs: Long): Ticker.Daily {
         val s = store.settings()
         val local = now.atZone(s.zone)
-        val open = TaskLists.all(dao.openTasks().filter { it.kind == "task" && it.parentId == null })
+        val open = TaskLists.all(reads.openTasks().filter { it.kind == "task" && it.parentId == null })
         val lang = Logic.chipLang(reads.lastUserText(), open.take(5).joinToString(" ") { it.title })
         val overdue = open.any { t -> Times.parseOrNull(t.dueAt)?.let { it < now } == true }
         val chips = Logic.chipsJson(Logic.chipsFor("reentry", null), lang, null).filter { overdue || it.id != "move_overdue" }

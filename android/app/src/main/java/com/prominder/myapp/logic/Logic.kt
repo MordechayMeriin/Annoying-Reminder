@@ -383,7 +383,8 @@ object Logic {
     fun chipsFor(kind: String, stage: String?): List<Chip> =
         if (stage == "done" || stage == "cancelled") emptyList() else CHIPS_BY_KIND[kind].orEmpty()
 
-    /** One chip as stored on a message. */
+    /** One chip as stored on a message. Never changed once made (so the chat's lists of them can skip redrawing). */
+    @androidx.compose.runtime.Immutable
     data class ChipJson(
         val id: String, val label: String, val action: String? = null, val minutes: Int? = null,
         val taskId: Long? = null, val taskIds: List<Long>? = null,

@@ -45,12 +45,14 @@ data class SyncStatus(
     val device: String? = null,
 )
 
+/** One page of a restore; [next] continues it (null: the last page, which also carries the [counters]). */
 @Serializable
 data class RestoreResult(
     val tables: Tables,
     val counters: Map<String, Long> = emptyMap(),
     val status: SyncStatus = SyncStatus(),
     val serverTime: String,
+    val next: String? = null,
 )
 
 @Serializable
@@ -75,8 +77,9 @@ open class SyncApi(
 ) {
     open suspend fun status(): SyncStatus = call("GET", "/sync/status", null)
 
-    open suspend fun restore(handover: Boolean, device: String): RestoreResult =
-        call("POST", "/sync/restore", JSON.encodeToString(Restore(handover, device)))
+    /** One page of everything (the first with [cursor] null, then each answer's `next`). */
+    open suspend fun restore(handover: Boolean, device: String, cursor: String? = null): RestoreResult =
+        call("POST", "/sync/restore", JSON.encodeToString(Restore(handover, device, cursor = cursor)))
 
     open suspend fun upload(body: UploadBody): UploadResult = call("POST", "/sync/upload", JSON.encodeToString(body))
 
@@ -84,7 +87,7 @@ open class SyncApi(
     open suspend fun prompts(): com.prominder.myapp.llm.PromptSet = call("GET", "/prompts", null)
 
     @Serializable
-    private data class Restore(val handover: Boolean, val device: String)
+    private data class Restore(val handover: Boolean, val device: String, val paged: Boolean = true, val cursor: String? = null)
 
     private suspend inline fun <reified T> call(method: String, path: String, body: String?): T = withContext(Dispatchers.IO) {
         val t = token() ?: throw SyncException("You're logged out. Log in again.", network = false)

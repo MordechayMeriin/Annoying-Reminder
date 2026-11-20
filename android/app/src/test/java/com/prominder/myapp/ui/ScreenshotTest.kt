@@ -122,7 +122,6 @@ class ScreenshotTest {
                 ),
                 chat = ChatUi(sentId = 2, sending = "after lunch. also dentist thursday at 10",
                     steps = listOf("⏰ Scheduling a follow-up: Write the quarterly report", "📅 Saving a new meeting: Dentist"), typing = true),
-                draft = "",
                 canDictate = true,
             ),
             {}, {}, {}, {}, {}, {}, {}, {}, {},
@@ -144,10 +143,10 @@ class ScreenshotTest {
                         model = "google/gemini-2.5-flash"),
                 ),
                 chat = ChatUi(error = "The assistant is unavailable right now. Try again in a minute.", canRetry = true),
-                draft = "תזכיר לי מחר",
                 canDictate = true,
             ),
             {}, {}, {}, {}, {}, {}, {}, {}, {},
+            draft = { "תזכיר לי מחר" },
         )
     }
 

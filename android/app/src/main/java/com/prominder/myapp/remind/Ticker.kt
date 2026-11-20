@@ -33,6 +33,9 @@ import java.time.Instant
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -67,8 +70,7 @@ data class Notice(
 data class TickReport(val notices: List<Notice>, val lines: List<String>, val nextWake: Instant)
 
 /**
- * The tick, ported from backend/app/scheduler.py: everything the server's /tick did every 5 minutes, now run by
- * the phone's alarm exactly when something is due (see Alarms), with the same rules:
+ * The tick, run by the phone's alarm exactly when something is due (see Reminders):
  *
  * 1. Due tasks → guardrails (Logic.planContacts) → postpone what may not be sent now → ONE combined message (as
  *    loud as its most pressing task) → next check-in times. Avoided tasks get one reason message instead;
@@ -79,10 +81,10 @@ data class TickReport(val notices: List<Notice>, val lines: List<String>, val ne
  *    ▶ Another round · Stop), within the guardrails that apply to it; one nobody answered 15 minutes after that is
  *    recorded as paused. While a session runs, other check-ins wait until it ends + 10 minutes (the focus hold).
  *
- * The words come from the coach (llm/Coach.kt, Phase D): the LLM when it answers, the server's templates (Templates)
- * when it doesn't or when [llm] is null. A tick runs in three steps so a slow model never holds the database:
+ * The words come from the coach (llm/Coach.kt, Phase D): the LLM when it answers, the templates (Templates) when it
+ * doesn't or when [llm] is null. A tick runs in three steps so a slow model never holds the database:
  *  1. plan (one transaction): what goes now, postponements, parks, skipped jobs;
- *  2. write (no transaction): the coach writes each message, within [LLM_BUDGET_MS] in all;
+ *  2. write (no transaction): the coach writes the messages, side by side, within [LLM_BUDGET_MS] in all;
  *  3. deliver (one transaction): the messages, the notifications, the next check-in times, the daily jobs claimed.
  * Nothing that goes out is marked as sent before step 3, so if the app is stopped half-way the next tick sends it.
  * The returned [TickReport.lines] explain every message and every postponement for the Diagnostics log.
@@ -100,7 +102,9 @@ class Ticker(private val store: Store, llm: Llm? = null, prompts: Prompts? = nul
         val run = Run(store.settings(), store.now())
         val pending = store.write { run.plan(dailyJobs) }
         val budgetEnd = System.nanoTime() + LLM_BUDGET_MS * 1_000_000
-        val written = pending.map { run.compose(it, budgetEnd) }
+        run.reloadOpenTasks()   // the plan closed meetings, postponed and parked tasks
+        // At the same time, so a morning plan and a check-in that fall together each get the whole budget.
+        val written = coroutineScope { pending.map { async { run.compose(it, budgetEnd) } }.awaitAll() }
         store.write { written.forEach { run.deliver(it) } }
         TickReport(run.notices, run.lines, nextWake(run.s, store.now()))
     }
@@ -131,6 +135,15 @@ class Ticker(private val store: Store, llm: Llm? = null, prompts: Prompts? = nul
 
         fun log(line: String) {
             lines += line
+        }
+
+        /** The open tasks as of the start of the current step (TickReads.openTasks). */
+        private var open: List<TaskRow>? = null
+
+        override suspend fun openTasks(): List<TaskRow> = open ?: dao.openTasks().also { open = it }
+
+        suspend fun reloadOpenTasks() {
+            open = dao.openTasks()
         }
 
         /** Step 1, in a transaction: what goes now, and every postponement. */
@@ -170,7 +183,7 @@ class Ticker(private val store: Store, llm: Llm? = null, prompts: Prompts? = nul
         suspend fun contactTasks(): Pending.Checkin? {
             val lapsed = isLapsed()
             val today = Logic.focusDay(local, s.dayResetTime)
-            val due = dao.openTasks()
+            val due = openTasks()
                 .filter { t -> t.remind?.let { it <= now } == true && Logic.mayCheckIn(t, now, today, lapsed) }
                 .sortedWith(compareBy({ it.remindAt }, { it.id })).take(20).toMutableList()
             for (fence in due.filter { it.kind == "fence" && Logic.fenceIsStale(it, now) }) {
@@ -221,10 +234,17 @@ class Ticker(private val store: Store, llm: Llm? = null, prompts: Prompts? = nul
         }
 
         /** One combined message (written in step 2), its notification, and the tasks' next check-in times. */
-        suspend fun send(p: Pending.Checkin, w: CheckinText) {
+        suspend fun send(p: Pending.Checkin, written: CheckinText) {
             // Read again: a task you finished while the message was being written isn't contacted about.
             val group = p.group.mapNotNull { dao.task(it.id) }.filter { it.status == OPEN }
             if (group.isEmpty()) return log("Check-in dropped: its tasks were closed while it was being written")
+            // Its text was written for all of them: rewritten from the templates for the ones still open (no model
+            // call here, inside the transaction), so it never mentions a task you just finished.
+            val w = if (group.size == p.group.size) written else {
+                log("Check-in rewritten: " + (p.group.map { it.id } - group.map { it.id }.toSet()).joinToString { "#$it" } +
+                    " closed while it was being written")
+                coach.checkin(group, p.state.sentTodayByTask, p.avoided, now, this, timeoutMs = 0)
+            }
             val msg = store.addMessage("assistant", w.text, w.kind, group.map { it.id }, Templates.encodeChips(w.chips), w.model)
             val lastReply = lastUserReplyAt()
             val (level, alarmS) = if (p.avoided) NORMAL to 0L else messageLevel(group, lastReply)
@@ -427,7 +447,7 @@ class Ticker(private val store: Store, llm: Llm? = null, prompts: Prompts? = nul
         }
 
         override suspend fun meetingsBetween(start: Instant, end: Instant): List<TaskRow> =
-            dao.openTasks().filter { t ->
+            openTasks().filter { t ->
                 val due = t.due
                 t.kind == "meeting" && due != null && due < end && (due >= start || t.recurrence != null)
             }.sortedWith(compareBy({ it.dueAt }, { it.id }))
@@ -449,7 +469,7 @@ class Ticker(private val store: Store, llm: Llm? = null, prompts: Prompts? = nul
         override suspend fun staleTasks(): List<TaskRow> {
             val old = now.minus(Duration.ofDays(Logic.STALE_DAYS))
             val cooldown = now.minus(Duration.ofDays(Logic.STALE_COOLDOWN_DAYS))
-            val candidates = dao.openTasks().filter { t ->
+            val candidates = openTasks().filter { t ->
                 t.kind == "task" && t.parentId == null && t.recurrence == null && (t.created ?: now) < old &&
                     (t.due?.let { it < now } ?: true) && (t.blocked?.let { it <= now } ?: true) &&
                     (t.parked?.let { it <= now } ?: true) && (t.staleOffered?.let { it < cooldown } ?: true)
@@ -489,14 +509,17 @@ class Ticker(private val store: Store, llm: Llm? = null, prompts: Prompts? = nul
             store.addEvent(t.id, "parked", "until ${until.atZone(zone).toLocalDate()}")
         }
 
-        /** Meetings that ended long ago don't need to stay open. */
+        /** Meetings that ended long ago don't need to stay open. The first read of the open tasks in a tick. */
         suspend fun closeFinishedMeetings() {
-            for (t in dao.openTasks()) {
+            val closed = mutableSetOf<Long>()
+            for (t in openTasks()) {
                 val due = t.due ?: continue
                 if (t.kind == "meeting" && t.recurrence == null && due < now.minus(Duration.ofHours(2))) {
                     store.putTask(t.copy(status = DONE, completedAt = Times.format(now), remindAt = null))
+                    closed += t.id
                 }
             }
+            open = open?.filter { it.id !in closed }
         }
 
         /** A session nobody answered is recorded as paused at its planned end (scheduler.plan_sessions). */

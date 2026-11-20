@@ -47,6 +47,20 @@ class DiagLogTest {
     }
 
     @Test
+    fun `logging never waits for the file`() {
+        val busy = java.util.concurrent.CountDownLatch(1)
+        val writer = java.util.concurrent.Executors.newSingleThreadExecutor()
+        writer.execute { busy.await() }   // the writer is stuck on something slow
+        val log = DiagLog(File(dir, "e.log"), writer = writer)
+        val started = System.nanoTime()
+        repeat(100) { log.log("t", "line $it") }
+        assertTrue("log() returned at once", System.nanoTime() - started < 1_000_000_000L)
+        busy.countDown()
+        assertEquals(100, log.lines().size)   // and every line is written, in order
+        assertTrue(log.lines().last().endsWith("line 99"))
+    }
+
+    @Test
     fun `missing file reads as empty`() {
         assertEquals(emptyList<String>(), DiagLog(File(dir, "nope/never.log")).lines())
     }

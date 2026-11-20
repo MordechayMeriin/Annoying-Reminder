@@ -50,17 +50,17 @@ object Reminders {
         app.scope.launch { runCatching { tick(app, app.store, reason) }.onFailure { Diag.log("tick", "Tick failed: $it") } }
     }
 
-    /** After a change: set the alarm for the next tick (a new reminder, a done task…). */
-    fun replan(context: Context) {
-        val app = app(context)
-        app.scope.launch {
-            runCatching {
-                if (app.store.hasData()) {
-                    setAlarm(app, Ticker(app.store).nextWake())
-                    SessionTimer.refresh(app, app.store)
-                }
-            }.onFailure { Diag.log("tick", "Couldn't plan the next tick: $it") }
-        }
+    /** After a change: set the alarm for the next tick (a new reminder, a done task…). Bursts become one plan (Replanner). */
+    fun replan(context: Context) = app(context).replanner.request()
+
+    /** What a re-plan does: the next tick's alarm, and the focus timer's notification. */
+    suspend fun plan(app: ReminderApp) {
+        runCatching {
+            if (app.store.hasData()) {
+                setAlarm(app, Ticker(app.store).nextWake())
+                SessionTimer.refresh(app, app.store)
+            }
+        }.onFailure { Diag.log("tick", "Couldn't plan the next tick: $it") }
     }
 
     /**

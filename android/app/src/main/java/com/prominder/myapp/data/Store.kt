@@ -7,6 +7,9 @@ import java.time.LocalDate
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import kotlin.coroutines.AbstractCoroutineContextElement
+import kotlin.coroutines.CoroutineContext
+import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.json.JsonPrimitive
@@ -24,11 +27,10 @@ data class TaskForm(
 )
 
 /**
- * Every change to your data goes through here. The rules are ported from backend/app/tasks.py and
- * actions.py (create, update, done, later, cancel, Today's 3), so the phone does what the server did.
+ * Every change to your data goes through here: create, edit, done, later, cancel, Today's 3, settings.
  *
- * Each change is one transaction that stamps the rows it writes with a new change number ([TaskRow.seq] etc.),
- * then calls [onChange] (which re-plans the next tick; the backup picks the change up by its seq).
+ * Each change is one transaction ([write]) that stamps the rows it writes with a new change number ([TaskRow.seq]
+ * etc.), then calls [onChange] (which re-plans the next tick; the backup picks the change up by its seq).
  */
 class Store(
     private val db: AppDatabase,
@@ -199,8 +201,11 @@ class Store(
                 dao.deleteSetting(key)
                 tombstone("settings", JsonPrimitive(key))
             } else {
-                dirty = true
-                dao.upsertSettings(listOf(SettingRow(key, value, nowText(), seq)))
+                // A row and a tombstone for the same key must never travel together: the backup would refuse both.
+                dao.deleteTombstone("settings", JsonPrimitive(key).toString())
+                val tx = tx()
+                tx.dirty = true
+                dao.upsertSettings(listOf(SettingRow(key, value, nowText(), tx.seq)))
             }
         }
     }
@@ -215,54 +220,66 @@ class Store(
     // ------------------------------------------------------------ the write machinery
 
     /**
-     * The change number every row written in the current transaction gets. Safe as a field: Room runs one
-     * write transaction at a time, so no other change can start while this one uses it.
+     * The change in progress: the change number its rows get, and what it did. It lives in the coroutine context of
+     * the transaction, not on the Store, so two changes can never mix their state, and a [write] inside a [write]
+     * simply joins the outer change.
      */
-    private var seq: Long = 0
+    private class Tx(val seq: Long) : AbstractCoroutineContextElement(Tx) {
+        /** It wrote a row (a change that wrote nothing gets no change number and doesn't re-plan or back up). */
+        var dirty = false
 
-    /** Whether the current transaction wrote a row (a tick that changed nothing doesn't schedule a backup). */
-    private var dirty = false
+        /** It saved a message of yours (typed, or a tap's chat event). */
+        var userActed = false
 
-    /** Whether the current transaction saved a message of yours (typed, or a tap's chat event). */
-    private var userActed = false
+        companion object Key : CoroutineContext.Key<Tx>
+    }
+
+    private suspend fun tx(): Tx = coroutineContext[Tx] ?: error("Store: a row was written outside write { }")
 
     /** One change: a transaction whose rows all get the same new change number. The tick (remind/) uses it too. */
     internal suspend fun <T> write(block: suspend () -> T): T {
-        val (result, flags) = db.withTransaction {
-            seq = (dao.meta(META_SEQ)?.toLongOrNull() ?: 0) + 1
-            dirty = false
-            userActed = false
-            dao.setMeta(MetaRow(META_SEQ, seq.toString()))
-            block() to (dirty to userActed)
+        if (coroutineContext[Tx] != null) return block()   // already inside a change: part of it
+        val (result, tx) = db.withTransaction {
+            val tx = Tx((dao.meta(META_SEQ)?.toLongOrNull() ?: 0) + 1)
+            val result = kotlinx.coroutines.withContext(tx) { block() }
+            // Only a change that wrote something uses up its number, so "nothing new since the last backup" stays true.
+            if (tx.dirty) dao.setMeta(MetaRow(META_SEQ, tx.seq.toString()))
+            result to tx
         }
-        if (flags.second) onUserActivity()
-        if (flags.first) onChange()
+        if (tx.userActed) onUserActivity()
+        if (tx.dirty) onChange()
         return result
     }
 
     internal suspend fun putTask(row: TaskRow) {
-        dirty = true
-        dao.upsertTasks(listOf(row.copy(seq = seq)))
+        val tx = tx()
+        tx.dirty = true
+        dao.upsertTasks(listOf(row.copy(seq = tx.seq)))
     }
 
     internal suspend fun putSession(row: SessionRow) {
-        dirty = true
-        dao.upsertSessions(listOf(row.copy(seq = seq)))
+        val tx = tx()
+        tx.dirty = true
+        dao.upsertSessions(listOf(row.copy(seq = tx.seq)))
     }
 
     internal suspend fun addEvent(taskId: Long, kind: String, note: String? = null, avoidReason: String? = null) {
-        dirty = true
-        dao.upsertEvents(listOf(EventRow(taskId, kind, note?.take(500)?.ifEmpty { null }, avoidReason, nowText(), rid(), seq)))
+        val tx = tx()
+        tx.dirty = true
+        dao.upsertEvents(listOf(EventRow(taskId, kind, note?.take(500)?.ifEmpty { null }, avoidReason, nowText(), rid(), tx.seq)))
     }
 
     internal suspend fun putPreference(row: PreferenceRow) {
-        dirty = true
-        dao.upsertPreferences(listOf(row.copy(seq = seq)))
+        val tx = tx()
+        tx.dirty = true
+        dao.upsertPreferences(listOf(row.copy(seq = tx.seq)))
     }
 
     internal suspend fun putMessage(row: MessageRow) {
-        dirty = true
-        dao.upsertMessages(listOf(row.copy(seq = seq)))
+        val tx = tx()
+        tx.dirty = true
+        dao.upsertMessages(listOf(row.copy(seq = tx.seq)))
+        dao.linkMessage(row)
     }
 
     /** thread.add: a message in the chat. Chips as JSON text (Chips.encode). Public for the assistant (llm/). */
@@ -271,12 +288,12 @@ class Store(
 
     internal suspend fun addMessage(role: String, content: String, kind: String, taskIds: List<Long> = emptyList(),
                                     chips: String = "[]", model: String? = null): MessageRow {
-        dirty = true
-        if (role == "user") userActed = true
+        val tx = tx()
+        if (role == "user") tx.userActed = true
         val ids = taskIds.distinct()
         val row = MessageRow(nextId(META_MESSAGE_COUNTER, dao.maxMessageId()), role, content, kind, ids.firstOrNull(), ids,
-            chips, model, nowText(), seq)
-        dao.upsertMessages(listOf(row))
+            chips, model, nowText())
+        putMessage(row)
         return row
     }
 
@@ -321,17 +338,19 @@ class Store(
             putTask(new)
             out += new
         }
-        dirty = true
-        dao.upsertFocus(listOf(FocusRow(date, out.map { it.id }, seq)))
+        val tx = tx()
+        tx.dirty = true
+        dao.upsertFocus(listOf(FocusRow(date, out.map { it.id }, tx.seq)))
         return out
     }
 
     private suspend fun tombstone(table: String, key: kotlinx.serialization.json.JsonElement) {
-        dirty = true
-        dao.insertTombstone(Tombstone(table, key.toString(), seq))
+        val tx = tx()
+        tx.dirty = true
+        dao.insertTombstone(Tombstone(table, key.toString(), tx.seq))
     }
 
-    /** The next id: after both the backup's counter and the highest id here (as db.next_id did on the server). */
+    /** The next id: after both the backup's counter and the highest id here, so a restored phone never reuses one. */
     internal suspend fun nextId(counter: String, maxId: Long): Long {
         val id = maxOf(dao.meta(counter)?.toLongOrNull() ?: 0, maxId) + 1
         dao.setMeta(MetaRow(counter, id.toString()))

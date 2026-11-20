@@ -18,7 +18,7 @@ import kotlinx.coroutines.launch
 class AlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         when (intent.action) {
-            ACTION_TICK -> background(context) { app ->
+            ACTION_TICK -> background(context, "tick", "Tick failed") { app ->
                 Reminders.tick(app, app.store, "alarm", intent.getLongExtra(EXTRA_SCHEDULED_AT, System.currentTimeMillis()))
             }
             ACTION_ALARM_RING -> AlarmRings.ringAgain(context)
@@ -29,7 +29,8 @@ class AlarmReceiver : BroadcastReceiver() {
                     AlarmRings.stop(context, (if (intent.action == ACTION_DONE) "✓ Done" else "Later") + " on the alarm's notification")
                 }
                 Notifier.cancel(context, notificationId)
-                background(context) { app ->
+                val button = if (intent.action == ACTION_DONE) "✓ Done" else "Later"
+                background(context, "notify", "$button from the notification failed") { app ->
                     val title = app.store.dao.task(taskId)?.title ?: "task #$taskId"
                     if (intent.action == ACTION_DONE) {
                         app.store.complete(taskId)
@@ -44,7 +45,7 @@ class AlarmReceiver : BroadcastReceiver() {
                 val sessionId = intent.getLongExtra(EXTRA_SESSION_ID, -1)
                 val outcome = intent.getStringExtra(EXTRA_OUTCOME) ?: "stopped"
                 Notifier.cancelSession(context)
-                background(context) { app ->
+                background(context, "notify", "The focus timer's ${if (outcome == "done") "✓ Done" else "Stop"} failed") { app ->
                     app.store.endSession(sessionId, outcome)
                     Diag.log("notify", "Focus session #$sessionId: ${if (outcome == "done") "✓ Done" else "Stop"} from the timer's notification")
                 }
@@ -85,8 +86,11 @@ class AlarmReceiver : BroadcastReceiver() {
         }
     }
 
-    /** Work that touches the database, with the receiver kept alive until it's done (goAsync). */
-    private fun background(context: Context, block: suspend (ReminderApp) -> Unit) {
+    /**
+     * Work that touches the database, with the receiver kept alive until it's done (goAsync). A failure is logged under
+     * [tag] as "[what]: …", so Diagnostics shows a failed button as a button, not as a failed tick.
+     */
+    private fun background(context: Context, tag: String, what: String, block: suspend (ReminderApp) -> Unit) {
         val app = context.applicationContext as ReminderApp
         // Null when called directly rather than by Android (a test): then there's nothing to keep alive.
         val pending: PendingResult? = goAsync()
@@ -94,7 +98,7 @@ class AlarmReceiver : BroadcastReceiver() {
             try {
                 block(app)
             } catch (e: Exception) {
-                Diag.log("tick", "Failed: ${e::class.java.simpleName}: ${e.message}")
+                Diag.log(tag, "$what: ${e::class.java.simpleName}: ${e.message}")
             } finally {
                 pending?.finish()
             }

@@ -29,6 +29,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -58,18 +59,25 @@ import androidx.compose.animation.core.tween
 import com.prominder.myapp.logic.Logic.ChipJson
 import com.prominder.myapp.ui.theme.Palette
 
+/*
+ * The screen's models are @Immutable: their lists are never changed after they're made, so Compose may compare them
+ * by value and skip redrawing what didn't change (plain List fields would otherwise make them "unstable").
+ */
+
 data class FocusItem(val id: Long, val title: String, val meta: String, val done: Boolean)
 
 /**
  * A chat line; [day] is set on the first message of each day (the separator above it). [chips]: its reply buttons
  * (shown under the latest message only); [model]: the LLM that wrote it, shown when ⚙ Show which AI model replied is on.
  */
+@Immutable
 data class ChatItem(
     val id: Long, val role: String, val kind: String, val content: String, val time: String, val day: String? = null,
     val chips: List<ChipJson> = emptyList(), val model: String? = null,
 )
 
 /** The turn in progress, for the chat (from llm/Chat.kt's ChatTurn). */
+@Immutable
 data class ChatUi(
     val sending: String? = null,
     val sentId: Long? = null,
@@ -79,6 +87,7 @@ data class ChatUi(
     val canRetry: Boolean = false,
 )
 
+@Immutable
 data class HomeState(
     val focus: List<FocusItem> = emptyList(),
     val messages: List<ChatItem> = emptyList(),
@@ -88,8 +97,6 @@ data class HomeState(
     /** A short answer to the last tap ("Later: next check-in Wed 14:00"). */
     val notice: String? = null,
     val chat: ChatUi = ChatUi(),
-    /** The text in the message field. */
-    val draft: String = "",
     /** Dictation is possible on this phone (the 🎤 button). */
     val canDictate: Boolean = false,
     /** A focus session runs (the bar above the chat), or null. */
@@ -120,6 +127,8 @@ fun HomeScreen(
     onOpenChecklist: () -> Unit,
     onOpenDiagnostics: () -> Unit,
     onLogout: () -> Unit,
+    /** The text in the message field, read by the field alone: typing doesn't redraw the rest of the screen. */
+    draft: () -> String = { "" },
     onDraft: (String) -> Unit = {},
     onSend: () -> Unit = {},
     onChip: (ChipJson) -> Unit = {},
@@ -202,14 +211,17 @@ fun HomeScreen(
                 Spacer(Modifier.height(4.dp))
             }
             state.breadcrumb?.let { Breadcrumb(it, state.breadcrumbDraft, state.canDictate, onBreadcrumbDraft, onBreadcrumb, onBreadcrumbMic) }
-            Composer(state, onDraft, onSend, onMic, onNewTask, focusInput)
+            Composer(state.canDictate, state.chat.sending == null, draft, onDraft, onSend, onMic, onNewTask, focusInput)
         }
     }
 }
 
 /** The message field with ＋ (a task by hand), 🎤 (dictation) and Send. */
 @Composable
-private fun Composer(state: HomeState, onDraft: (String) -> Unit, onSend: () -> Unit, onMic: () -> Unit, onNewTask: () -> Unit, focusInput: Int) {
+private fun Composer(
+    canDictate: Boolean, idle: Boolean, draft: () -> String, onDraft: (String) -> Unit, onSend: () -> Unit, onMic: () -> Unit,
+    onNewTask: () -> Unit, focusInput: Int,
+) {
     val focus = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
     LaunchedEffect(focusInput) {
@@ -220,17 +232,18 @@ private fun Composer(state: HomeState, onDraft: (String) -> Unit, onSend: () -> 
     }
     Row(verticalAlignment = Alignment.CenterVertically) {
         TextButton(onClick = onNewTask, modifier = Modifier.size(44.dp)) { Text("＋", fontSize = 20.sp, color = Palette.Muted) }
+        val text = draft()
         OutlinedTextField(
-            value = state.draft,
+            value = text,
             onValueChange = onDraft,
             modifier = Modifier.weight(1f).focusRequester(focus),
             placeholder = { Text("Message", color = Palette.Muted) },
             maxLines = 5,
         )
-        if (state.canDictate) {
+        if (canDictate) {
             TextButton(onClick = onMic, modifier = Modifier.size(44.dp)) { Text("🎤", fontSize = 18.sp) }
         }
-        val canSend = state.draft.isNotBlank() && state.chat.sending == null
+        val canSend = text.isNotBlank() && idle
         Button(onClick = onSend, enabled = canSend, modifier = Modifier.padding(start = 4.dp)) { Text("Send") }
     }
 }

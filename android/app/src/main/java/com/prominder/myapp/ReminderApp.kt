@@ -20,6 +20,7 @@ import com.prominder.myapp.llm.Llm
 import com.prominder.myapp.llm.PromptFiles
 import com.prominder.myapp.notify.Channels
 import com.prominder.myapp.remind.Reminders
+import com.prominder.myapp.remind.Replanner
 import com.prominder.myapp.sync.SyncApi
 import com.prominder.myapp.sync.SyncEngine
 import com.prominder.myapp.sync.SyncScheduler
@@ -43,11 +44,13 @@ class ReminderApp : Application() {
      * a day, and when you leave the app on Wi-Fi (SyncScheduler), not after every change.
      */
     val db: AppDatabase by lazy { AppDatabase.open(this) }
+    /** Re-plans the next tick after changes, once per burst (a chat turn's tool calls, a tick's writes). */
+    val replanner: Replanner by lazy { Replanner(scope) { Reminders.plan(this) } }
     val store: Store by lazy {
         Store(db, onChange = {
-            Reminders.replan(this)
+            replanner.request()
         }, onUserActivity = {
-            // As the server's cancel_alarms: writing in the chat or tapping anything means you've seen it.
+            // Writing in the chat or tapping anything means you've seen it.
             AlarmRings.stop(this, "you wrote or tapped something in the app")
         })
     }
@@ -79,8 +82,8 @@ class ReminderApp : Application() {
         Diag.init(this)
         logCrashes()
         Channels.ensure(this)
-        // A request may take up to 90 seconds in all (a restore of everything, a slow model call), and the server may
-        // be silent for most of that while it works: OkHttp's default 10-second read timeout would cut it off.
+        // A request may take up to 90 seconds in all (a slow model call, a throttled backup), and the server may be
+        // silent for most of that while it works: OkHttp's default 10-second read timeout would cut it off.
         http = OkHttpClient.Builder().connectTimeout(15, TimeUnit.SECONDS).readTimeout(60, TimeUnit.SECONDS)
             .callTimeout(90, TimeUnit.SECONDS).build()
         auth = AuthRepository(BackendAuth(BuildConfig.API_URL, http), PrefsSessionStore(this))
@@ -112,6 +115,7 @@ class ReminderApp : Application() {
             runCatching {
                 val where = e.stackTrace.take(4).joinToString(" < ") { "${it.className.substringAfterLast('.')}.${it.methodName}:${it.lineNumber}" }
                 Diag.log("crash", "${e::class.java.simpleName}: ${e.message} at $where")
+                Diag.log.flush()   // written before the app dies
             }
             previous?.uncaughtException(thread, e)
         }

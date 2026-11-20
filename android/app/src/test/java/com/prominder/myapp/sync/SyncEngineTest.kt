@@ -64,7 +64,7 @@ class SyncEngineTest {
         val req = server.takeRequest()
         assertEquals("/sync/restore", req.path)
         assertEquals("Bearer token", req.getHeader("Authorization"))
-        assertEquals("""{"handover":true,"device":"Galaxy S9"}""", req.body.readUtf8())
+        assertEquals("""{"handover":true,"device":"Galaxy S9","paged":true,"cursor":null}""", req.body.readUtf8())
 
         val task = dao.task(1)!!
         assertEquals("Write report", task.title)
@@ -186,12 +186,103 @@ class SyncEngineTest {
     }
 
     @Test
-    fun `large changes go in several requests`() {
-        val tasks = (1..4000L).map { com.prominder.myapp.data.TaskRow(it, title = "t$it", createdAt = "2026-11-17T10:00:00.000000Z") }
-        val events = (1..10L).map { com.prominder.myapp.data.EventRow(it, "done", createdAt = "2026-11-17T10:00:00.000000Z", rid = "r$it") }
-        val batches = SyncEngine.batches(Tables(tasks = tasks, events = events))
-        assertEquals(listOf(1500, 1500, 1010), batches.map { it.size })
-        assertNull(batches.firstOrNull { it.size > SyncEngine.BATCH })
-        assertEquals(OPEN, batches[0].tasks[0].status)
+    fun `a restore in several pages saves every page`() = runTest {
+        val whole = SyncApi.JSON.parseToJsonElement(sample).jsonObject
+        val tables = whole["tables"]!!.jsonObject
+        fun page(keep: Set<String>, next: String?, counters: Boolean): String {
+            val part = JsonObject(tables.mapValues { (name, rows) -> if (name in keep) rows else JsonArray(emptyList()) })
+            val body = whole.toMutableMap().apply {
+                put("tables", part)
+                put("next", kotlinx.serialization.json.JsonPrimitive(next))
+                if (!counters) put("counters", JsonObject(emptyMap()))
+            }
+            return JsonObject(body).toString()
+        }
+        server.enqueue(MockResponse().setBody(page(setOf("tasks", "events"), "c1", counters = false)))
+        server.enqueue(MockResponse().setBody(page(tables.keys - setOf("tasks", "events"), null, counters = true)))
+        val r = engine.restore(handover = true)
+        assertEquals(3, r.tasks)
+        assertEquals(2, r.messages)
+        server.takeRequest()
+        assertEquals("""{"handover":true,"device":"Galaxy S9","paged":true,"cursor":"c1"}""", server.takeRequest().body.readUtf8())
+        assertEquals("3", dao.meta(Store.META_TASK_COUNTER))
+        assertEquals(2, dao.messagesForTask(1, 10).size)   // the message ↔ task links come with the restore
+    }
+
+    @Test
+    fun `a failed second page leaves the phone empty`() = runTest {
+        server.enqueue(MockResponse().setBody(sample.replaceFirst("{", """{"next":"c1",""")))
+        server.enqueue(MockResponse().setResponseCode(503).setBody("""{"detail":"busy"}"""))
+        try {
+            engine.restore(handover = true)
+            fail("expected a SyncException")
+        } catch (e: SyncException) {
+            assertTrue(e.network)
+        }
+        assertFalse(store.hasData())
+    }
+
+    @Test
+    fun `a setting set, reset and set again goes as one row and no delete`() = runTest {
+        store.saveSetting("morning_time", "07:30")
+        store.saveSetting("morning_time", null)
+        store.saveSetting("morning_time", "07:45")
+        ok()
+        val summary = engine.upload()
+        assertEquals(1, summary.rows)
+        assertEquals(0, summary.deleted)
+        val body = uploaded()
+        assertEquals("07:45", body["tables"]!!.jsonObject["settings"]!!.jsonArray.single().jsonObject["value"]!!.jsonPrimitive.content)
+        assertEquals(JsonObject(emptyMap()), body["deletes"])
+    }
+
+    @Test
+    fun `a change that wrote nothing doesn't use up a change number`() = runTest {
+        store.create(TaskForm("A"))
+        val seq = dao.meta(Store.META_SEQ)
+        store.complete(999)                // no such task
+        store.deletePreference(999)        // no such preference
+        assertEquals(seq, dao.meta(Store.META_SEQ))
+        ok()
+        engine.upload()
+        server.takeRequest()
+        store.complete(999)
+        assertEquals(0, engine.upload().rows)   // nothing new: no request
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test
+    fun `a backup that fails part-way continues where it stopped`() = runTest {
+        repeat(250) { store.create(TaskForm("t$it")) }   // 250 changes: two requests
+        ok()
+        server.enqueue(MockResponse().setResponseCode(504).setBody("""{"detail":"timed out"}"""))
+        try {
+            engine.upload()
+            fail("expected a SyncException")
+        } catch (e: SyncException) {
+            assertTrue(e.network)
+        }
+        assertEquals(200, uploaded()["tables"]!!.jsonObject["tasks"]!!.jsonArray.size)
+        server.takeRequest()
+        assertEquals(50, engine.pending())   // the first request's 200 are kept as sent
+        ok()
+        engine.upload()
+        assertEquals(50, uploaded()["tables"]!!.jsonObject["tasks"]!!.jsonArray.size)
+        assertEquals(0, engine.pending())
+    }
+
+    @Test
+    fun `large changes go in several requests, cut between change numbers`() {
+        fun task(id: Long, seq: Long) = SyncEngine.Change.Row(seq, com.prominder.myapp.data.TaskRow(id, title = "t$id", createdAt = "2026-11-17T10:00:00.000000Z"))
+        // seq 1..300 with one row each, then seq 301 with 450 rows (one change larger than a request).
+        val changes = (1..300L).map { task(it, it) } + (301..750L).map { task(it, 301) } +
+            listOf(SyncEngine.Change.Delete(5, "settings", kotlinx.serialization.json.JsonPrimitive("morning_time")))
+        val batches = SyncEngine.batches(changes.shuffled(), after = 0, size = 200)
+        assertEquals(listOf(200, 101, 200, 200, 50), batches.map { it.size })
+        assertEquals(listOf(199L, 300L, 300L, 300L, 301L), batches.map { it.through })
+        assertEquals(1, batches[0].deletes["settings"]!!.size)
+        assertNull(batches.firstOrNull { it.size > 200 })
+        assertEquals(750, batches.sumOf { it.tables.tasks.size })
+        assertEquals(OPEN, batches[0].tables.tasks[0].status)
     }
 }
