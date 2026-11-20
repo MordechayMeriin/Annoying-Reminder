@@ -28,7 +28,7 @@ data class TaskForm(
  * actions.py (create, update, done, later, cancel, Today's 3), so the phone does what the server did.
  *
  * Each change is one transaction that stamps the rows it writes with a new change number ([TaskRow.seq] etc.),
- * then calls [onChange] (which schedules the backup upload).
+ * then calls [onChange] (which re-plans the next tick; the backup picks the change up by its seq).
  */
 class Store(
     private val db: AppDatabase,

@@ -2,8 +2,8 @@
 The success measures of the ADHD-assistant work, for a date range, from the stored data.
 Read-only: it only reads.
 
-    cd backend
-    export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_REGION=... DYNAMODB_TABLE=...   # as on Render
+    # In AWS CloudShell (your login, the table's region), from a clone of the repository:
+    cd backend && pip install -r requirements.txt
     python scripts/metrics.py                          # the last 28 days
     python scripts/metrics.py --from 2026-10-01 --to 2026-11-01
 
@@ -27,6 +27,7 @@ import statistics
 import sys
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -184,23 +185,19 @@ def compute(*, messages: list[dict[str, Any]], events: list[dict[str, Any]], tas
 # ---------------------------------------------------------------- database
 
 def load(start: date, end: date, tz: ZoneInfo) -> dict[str, Any]:
-    """Read-only: the messages, events, top-level tasks and sessions the measures need, from DynamoDB."""
-    from app import db, sessions, tasks, thread
+    """Read-only: the messages, events, top-level tasks and sessions the measures need, from the phone's backup."""
+    from app import sync
 
     t0 = datetime.combine(start, time(), tz)
     t1 = datetime.combine(end, time(), tz) + ACTION_WINDOW
     e0 = t0 - timedelta(days=7)
-    events = []
-    for kind in sorted(tasks.EVENT_KINDS):
-        events += [e for e in db.query_rows(tasks.EVENT, f"ev#{kind}", index="GSI1", sk_op="between",
-                                            sk=(db.ts(e0), db.ts(t1)))
-                   if e0 <= e["created_at"] < t1]
-    all_tasks = [t for status in tasks.STATUSES for t in db.query_rows(tasks.TASK, f"task#{status}", index="GSI1")]
+    stored = sync.export_all()["tables"]
+    rows = {name: [sync.ENTITIES[name].row(r) for r in stored[name]] for name in ("tasks", "events", "messages", "sessions")}
     return {
-        "messages": [m for m in thread.all_since(t0) if m["created_at"] < t1],
-        "events": sorted(events, key=lambda e: e["created_at"]),
-        "tasks": [t for t in all_tasks if t["parent_id"] is None],
-        "sessions": [x for x in reversed(sessions.since(t0)) if x["started_at"] < t1],
+        "messages": sorted((m for m in rows["messages"] if t0 <= m["created_at"] < t1), key=lambda m: m["id"]),
+        "events": sorted((e for e in rows["events"] if e0 <= e["created_at"] < t1), key=lambda e: e["created_at"]),
+        "tasks": [t for t in rows["tasks"] if t["parent_id"] is None],
+        "sessions": sorted((x for x in rows["sessions"] if t0 <= x["started_at"] < t1), key=lambda x: x["id"]),
     }
 
 
@@ -214,8 +211,8 @@ def main(argv: list[str] | None = None) -> None:
     tz = ZoneInfo(a.tz)
     end = a.end or datetime.now(tz).date()
     start = a.start or end - timedelta(days=28)
-    if not os.environ.get("AWS_ACCESS_KEY_ID"):
-        sys.exit("Set AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION and DYNAMODB_TABLE (the values on Render).")
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # the app package (sync.py)
+    os.environ.setdefault("ACTION_SECRET", "unused-here")           # the settings ask for it; nothing here signs
     data = load(start, end, tz)
     print("\n".join(compute(start=start, end=end, tz=tz, **data).lines()))
 

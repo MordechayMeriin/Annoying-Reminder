@@ -1,6 +1,6 @@
 # Privacy policy: ProMinder (Android)
 
-*Last updated: 13 November 2026*
+*Last updated: 20 November 2026*
 
 ProMinder (the Android app of Annoying Reminder) is a personal assistant app built and used by one person for their own account. There is
 no sign-up: only the owner's existing account can log in. This page says what the app does with data.
@@ -11,13 +11,16 @@ no sign-up: only the owner's existing account can log in. This page says what th
   app's private storage. Other apps can't read it.
 - **Backup:** a copy of your tasks, chat and settings is sent over HTTPS to the owner's own database on
   Amazon Web Services (DynamoDB), so a new or reset phone can restore them.
-- **Login:** your email address, used by Amazon Cognito (through Amazon SES) to send you a login code.
+- **Login:** you sign in with your Google account. The owner's server receives your Google account's email
+  address and ID from Google, only to check that it's the owner's account.
+- **Alerts:** if the phone stops backing up for two days, the owner's server emails the owner (through Amazon
+  SES) so they can check on it.
 
 ## What is sent to an AI model
 
 To write messages (check-ins, the morning plan, chat replies), the relevant text (your recent chat and the
-tasks it concerns) is sent over HTTPS through the owner's server to an AI model provider (via
-OpenRouter). The text is used to write the reply. Offline, the app writes a template message instead and
+tasks it concerns) is sent over HTTPS through the owner's server (an AWS Lambda function) to an AI model
+provider (via OpenRouter). The text is used to write the reply. Offline, the app writes a template message instead and
 sends nothing.
 
 ## What the app doesn't do

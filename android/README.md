@@ -28,6 +28,10 @@ with a silent countdown in the notification shade and an urgent check-in at its 
 "Where did you stop?" after a stopped or unanswered session; and the alarm rings full screen again every 2 minutes
 until you answer it. Details: [docs/android-phase-e.md](../docs/android-phase-e.md).
 
+**Phase F (clean up)** is in: the backup runs once a day, plus a cheap run on Wi-Fi when you leave the app with
+changes, instead of a few minutes after every change. The web app, Render, cron-job.org and Pushover are gone, and
+`backend/` holds only the Lambda's code. Details: [docs/android-phase-f.md](../docs/android-phase-f.md).
+
 ## How it's built
 
 You don't need Android Studio or anything on your laptop. GitHub Actions
@@ -112,16 +116,16 @@ step 5 is fine):
    **SHA-1** from the Play Console: ProMinder → Test and release → **App integrity** → App signing →
    *App signing key certificate* → SHA-1. (Google Play re-signs the app with that key, so that's the
    certificate your phone sees.) Create; there's nothing to copy.
-4. **Render → annoying-reminder-api → Environment**: `GOOGLE_CLIENT_ID` = the web client id,
-   `OWNER_GOOGLE_EMAIL` = your Gmail address. Save (Render redeploys).
+4. **The backend**: `GOOGLE_CLIENT_ID` = the web client id, `OWNER_GOOGLE_EMAIL` = your Gmail address.
+   `backend/scripts/aws_lambda_setup.py` asks for both and puts them on the Lambda function.
 5. **GitHub → the repo → Settings → Secrets and variables → Actions → Variables**: `GOOGLE_WEB_CLIENT_ID` =
    the same web client id. It's public by design (anyone could read it out of the app), so it's a variable,
    not a secret. Without it the app builds but its login screen says it has no login settings.
 6. Build a new version: Actions → **Android** → Run workflow on `main` with *upload* ticked.
 
 If signing in says "this build isn't registered in Google Cloud", the Android client's package name or SHA-1
-doesn't match (step 3). Optional: the variable `API_URL` points the app at another backend (default
-`https://annoying-reminder-api.onrender.com`).
+doesn't match (step 3). The variable `API_URL` is the backend's address (the Lambda's function URL, which the
+setup script prints); a release build refuses to start without it.
 
 ### 2. Google Play developer account
 
@@ -211,7 +215,7 @@ in 1 min** with the phone locked, and restarting the phone while a 1-hour alarm 
 | Kind | Name | Used for |
 |---|---|---|
 | Variable | `GOOGLE_WEB_CLIENT_ID` | Google sign-in (built into the app) |
-| Variable (optional) | `API_URL` | The backend: the Lambda function URL once it's set up ([docs/android-phase-c.md](../docs/android-phase-c.md)); default `https://annoying-reminder-api.onrender.com` |
+| Variable | `API_URL` | The backend: the Lambda's function URL (`backend/scripts/aws_lambda_setup.py` prints it). Required for a release |
 | Variable | `AWS_DEPLOY_ROLE_ARN`, `AWS_REGION` | Deploying the backend to Lambda (the Backend workflow) |
 | Lambda setting | `OPENROUTER_API_KEY`, `OPENROUTER_MODELS` | The assistant (Phase D). Set by `backend/scripts/aws_lambda_setup.py`, on the function itself, never in GitHub or the app |
 | Variable (optional) | `PLAY_RELEASE_STATUS` | `completed` (default) or `draft` |

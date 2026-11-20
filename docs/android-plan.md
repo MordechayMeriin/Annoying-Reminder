@@ -331,6 +331,9 @@ each alarm ring lasts up to a minute, repeating every 2 minutes as Pushover did.
 *Done when:* everything in the README works on the phone.
 
 ### Phase F: clean up
+*Built: see [android-phase-f.md](android-phase-f.md). `db/` (the old Supabase schema) went too, and the AWS setup is
+one script now.*
+
 1. Sync relaxes from "a few minutes after every change" to daily plus the cheap "when convenient" run.
 2. Delete the Render services and the cron-job.org job, and cancel Pushover.
 3. Remove `web/` and the parts of `backend/` the Lambda doesn't use. The Python code stays in the repo's

@@ -29,7 +29,7 @@ data class HandoverState(
 
 /**
  * The phone holds none of your data yet. The first time, this is the handover: the phone downloads everything and
- * from then on it's the only app (the web app and its reminders switch off). After a reinstall it restores the backup.
+ * from then on it owns the data. After a reinstall (or on a new phone) it restores the backup.
  */
 @Composable
 fun HandoverScreen(state: HandoverState, onMove: () -> Unit, onLogout: () -> Unit) {
@@ -45,13 +45,8 @@ fun HandoverScreen(state: HandoverState, onMove: () -> Unit, onLogout: () -> Uni
                     (state.lastBackup?.let { " (last backup: $it)" } ?: "") + ". This downloads the backup onto this phone.")
             } else {
                 Muted("Your tasks, Today's 3, the chat history and your settings are downloaded once. From then on this phone " +
-                    "keeps them, works without internet, and backs them up to the server a few minutes after every change.")
-                Spacer(Modifier.height(12.dp))
-                Text("What changes at that moment:", fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(4.dp))
-                Muted("• The web app switches off, so the two can't drift apart.")
-                Muted("• Reminders pause until the next update, and the assistant until the one after.")
-                Muted("• You add, change and finish tasks here by hand meanwhile.")
+                    "keeps them, works without internet, and backs them up to the server once a day (and when you leave " +
+                    "the app on Wi-Fi).")
             }
         }
         Spacer(Modifier.height(16.dp))

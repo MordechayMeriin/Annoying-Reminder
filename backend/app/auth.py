@@ -1,21 +1,15 @@
 """
 Only the owner gets in.
 
-Two ways to log in. Both end with a token the app sends as `Authorization: Bearer …`:
+Google sign-in: the app gets an ID token from Google (signed by Google, addressed to GOOGLE_CLIENT_ID)
+and trades it at POST /auth/google. We check Google's signature against Google's public keys, the
+audience, the issuer and the expiry, and that the account is OWNER_GOOGLE_EMAIL with a verified
+address. Then we hand out our own session token: a JWT signed with a key derived from ACTION_SECRET,
+valid for SESSION_DAYS, which the app sends as `Authorization: Bearer …` with every request. Changing
+ACTION_SECRET (or OWNER_GOOGLE_EMAIL) logs every device out.
 
-* Google sign-in (the Android app). The app gets an ID token from Google (signed by Google, addressed
-  to GOOGLE_CLIENT_ID) and trades it at POST /auth/google. We check Google's signature against
-  Google's public keys, the audience, the issuer and the expiry, and that the account is
-  OWNER_GOOGLE_EMAIL with a verified address. Then we hand out our own session token: a JWT signed
-  with a key derived from ACTION_SECRET, valid for SESSION_DAYS. Changing ACTION_SECRET (or
-  OWNER_GOOGLE_EMAIL) logs every device out.
-* Cognito (the web app's emailed code; optional, on when COGNITO_* and OWNER_USER_ID are set). The
-  token is a Cognito access token: we check its signature against the pool's public keys, that it was
-  issued by our pool for our app client, and that it hasn't expired. Then we require that the user id
-  (`sub`) equals OWNER_USER_ID.
-
-No call to Google or AWS per request: their public keys are fetched once and cached. A logged-out
-token stays valid until it expires, as with any signed token.
+No call to Google per request: its public keys are fetched once and cached. A logged-out token stays
+valid until it expires, as with any signed token.
 """
 
 import hashlib
@@ -80,12 +74,6 @@ class _KeySet:
         return self.keys.get(kid)
 
 
-def _issuer() -> str:
-    s = get_settings()
-    return f"https://cognito-idp.{s.aws_region}.amazonaws.com/{s.cognito_user_pool_id}"
-
-
-cognito_keys = _KeySet("Cognito", lambda: f"{_issuer()}/.well-known/jwks.json")
 google_keys = _KeySet("Google", lambda: GOOGLE_KEYS_URL)
 
 
@@ -133,7 +121,8 @@ async def verify_google(id_token: str) -> tuple[str, str]:
 
 
 def _session_key() -> bytes:
-    # Derived, so ACTION_SECRET can't be used to forge notification-button tokens from a session or back.
+    # Derived (the web app also signed its notification buttons with ACTION_SECRET): keep the derivation as it is,
+    # or the phone is logged out.
     return hmac.new(get_settings().action_secret.encode(), b"prominder session token v1", hashlib.sha256).digest()
 
 
@@ -154,61 +143,14 @@ def _session_claims(token: str) -> dict | None:
         return None
 
 
-# ---------------------------------------------------------------- Cognito
-
-def cognito_enabled() -> bool:
-    s = get_settings()
-    return bool(s.cognito_user_pool_id and s.cognito_client_id and s.owner_user_id)
-
-
-async def _cognito_user_id(token: str) -> str | None:
-    """The token's user id; None when the token is invalid. Raises 503 when the pool's keys can't be fetched."""
-    kid = _kid(token)
-    if kid is None:
-        return None
-    key = await cognito_keys.get(kid)
-    if key is None:
-        return None
-    try:
-        claims = jwt.decode(token, key=key.key, algorithms=["RS256"], issuer=_issuer(), leeway=_LEEWAY_S,
-                            options={"require": ["exp", "iss", "sub"], "verify_aud": False})
-    except jwt.PyJWTError:
-        return None
-    # An access token for our app client (not an id token, not another client's token).
-    if claims.get("token_use") != "access" or claims.get("client_id") != get_settings().cognito_client_id:
-        return None
-    return claims["sub"]
-
-
 # ---------------------------------------------------------------- the check on every request
 
 async def require_owner(authorization: str = Header(default="")) -> str:
     if not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Not logged in")
-    token = authorization[7:].strip()
-    try:
-        alg = jwt.get_unverified_header(token).get("alg")
-    except jwt.PyJWTError:
-        raise HTTPException(status_code=401, detail="Invalid session") from None
-
-    if alg == "HS256":   # our own session token (Google sign-in)
-        claims = _session_claims(token)
-        if claims is None or not google_enabled():
-            raise HTTPException(status_code=401, detail="Invalid session")
-        if not hmac.compare_digest(str(claims["email"]), get_settings().owner_google_email):
-            raise HTTPException(status_code=401, detail="Invalid session")   # the owner changed: log in again
-        return claims["sub"]
-
-    if not cognito_enabled():
+    claims = _session_claims(authorization[7:].strip())
+    if claims is None or not google_enabled():
         raise HTTPException(status_code=401, detail="Invalid session")
-    user_id = await _cognito_user_id(token)
-    if user_id is None:
-        raise HTTPException(status_code=401, detail="Invalid session")
-    if not hmac.compare_digest(user_id, get_settings().owner_user_id):
-        raise HTTPException(status_code=403, detail="Not allowed")
-    return user_id
-
-
-def require_cron(x_cron_secret: str = Header(default="")) -> None:
-    if not hmac.compare_digest(x_cron_secret, get_settings().cron_secret):
-        raise HTTPException(status_code=403, detail="Not allowed")
+    if not hmac.compare_digest(str(claims["email"]), get_settings().owner_google_email):
+        raise HTTPException(status_code=401, detail="Invalid session")   # the owner changed: log in again
+    return claims["sub"]

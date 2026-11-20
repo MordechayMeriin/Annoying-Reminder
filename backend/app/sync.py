@@ -1,38 +1,82 @@
 """
 The phone's backup (Android Phase B): the Android app keeps your data in its own database and is the only
 one that changes it. This module is the other end: it hands the phone everything once (restore, which is
-also the handover), and stores what the phone changed since (upload), in the same items the web app used.
+also the handover), and stores what the phone changed since (upload).
 
 Rows travel in the stored format (db.py): times as fixed-width UTC text (2026-11-16T08:30:00.000000Z),
 dates as YYYY-MM-DD, ids as numbers, a message's chips as JSON text. So a row restored and uploaded again
-comes back byte for byte, and the old server could still read the data in an emergency.
+comes back byte for byte.
 
-The handover: the first restore with handover=true marks the data as the phone's (`sync/status`). From then
-on the web app's endpoints answer 409 and /tick does nothing, so the old app can't remind you twice or
-write a second, drifting copy. To give the data back to the web app (only if the phone app has to be
-abandoned): delete the item pk=sync, sk=status in the DynamoDB console, and turn the cron job on again.
+The handover: the first restore with handover=true marks the data as the phone's (`sync/status`). The daily
+"is the phone still alive?" check (alive.py) starts counting from then.
 """
 
 import logging
-import threading
-import time
 from collections import defaultdict
 from typing import Any
 
 from . import db
-from .db import Entity, pad
-from .preferences import PREFERENCE
-from .sessions import SESSION
-from .tasks import EVENT, EVENT_KINDS, TASK
-from .thread import MESSAGE
+from .db import Entity, pad, ts
 
 log = logging.getLogger("sync")
+
+
+# ---------------------------------------------------------------- what the phone keeps, as stored items
+# The fields of each kind of row and its keys (see the layout in db.py). The phone's Room tables have the same
+# fields (android/app/src/main/java/com/prominder/myapp/data/Rows.kt); test_sync.py checks them against the
+# Android tests' sample.
+
+def _task_keys(t: dict[str, Any]) -> dict[str, str]:
+    done_at = t.get("completed_at") if t["status"] == "done" else None
+    return {"pk": "task", "sk": pad(t["id"]),
+            # Open tasks by id; done ones by when they were finished.
+            "g1pk": f"task#{t['status']}", "g1sk": ts(done_at) if done_at else pad(t["id"])}
+
+
+TASK = Entity(
+    {"id": "int", "parent_id": "int", "title": "str", "description": "str", "kind": "str", "priority": "int",
+     "status": "str", "due_at": "dt", "remind_at": "dt", "remind_requested": "bool", "recurrence": "str",
+     "nag_count": "int", "escalated": "bool", "blocked_reason": "str", "blocked_until": "dt",
+     "last_notified_at": "dt", "created_at": "dt", "completed_at": "dt", "next_action": "str",
+     "estimate_min": "int", "focus_date": "date", "focus_rank": "int", "resume_note": "str",
+     "parked_until": "dt", "stale_offered_at": "dt", "avoid_asked_at": "dt", "avoid_asks": "int",
+     "avoid_reset_at": "dt"},
+    _task_keys,
+    defaults={"kind": "task", "priority": 1, "status": "open", "remind_requested": False, "nag_count": 0,
+              "escalated": False, "avoid_asks": 0},
+)
+
+EVENT = Entity(
+    {"task_id": "int", "kind": "str", "note": "str", "avoid_reason": "str", "created_at": "dt", "rid": "str"},
+    lambda e: {"pk": f"ev#{e['task_id']}", "sk": f"{ts(e['created_at'])}#{e['rid']}",
+               "g1pk": f"ev#{e['kind']}", "g1sk": ts(e["created_at"])},
+)
+# Every kind of event: restore reads the events through the kind index, one kind at a time.
+EVENT_KINDS = {"postponed", "committed", "progress", "stuck", "blocked", "unblocked", "ignored", "done",
+               "description_changed", "session_started", "session_ended", "paused", "parked", "avoided"}
+
+MESSAGE = Entity(
+    {"id": "int", "role": "str", "content": "str", "kind": "str", "task_id": "int", "task_ids": "ints",
+     "chips": "str", "model": "str", "created_at": "dt"},
+    lambda m: {"pk": "msg", "sk": pad(m["id"]), "g1pk": f"msg#{m['kind']}", "g1sk": pad(m["id"])},
+    defaults={"kind": "chat", "task_ids": []},
+)
+
+SESSION = Entity(
+    {"id": "int", "task_id": "int", "started_at": "dt", "planned_min": "int", "ended_at": "dt", "outcome": "str",
+     "end_sent_at": "dt", "note_closed_at": "dt"},
+    # GSI1 lists only open sessions; GSI2 a task's sessions.
+    lambda x: {"pk": "sess", "sk": pad(x["id"]), "g2pk": f"sesstask#{x['task_id']}", "g2sk": pad(x["id"]),
+               **({"g1pk": "sess#open", "g1sk": pad(x["id"])} if x.get("ended_at") is None else {})},
+)
+
+PREFERENCE = Entity({"id": "int", "text": "str", "created_at": "dt"}, lambda p: {"pk": "pref", "sk": pad(p["id"])})
 
 # The tables the phone keeps, by their name on the wire.
 ENTITIES: dict[str, Entity] = {"tasks": TASK, "events": EVENT, "messages": MESSAGE, "sessions": SESSION,
                                "preferences": PREFERENCE}
 TABLES = (*ENTITIES, "settings", "focus")
-# Ids handed out by a counter (db.next_id), so the phone can continue after the highest one.
+# Ids handed out by a counter, so the phone can continue after the highest one.
 COUNTERS = {"tasks": "task", "messages": "message", "sessions": "session", "preferences": "preference"}
 MAX_ROWS = 2000        # per upload request; the phone sends larger changes in several requests
 
@@ -44,9 +88,6 @@ class SyncError(ValueError):
 # ---------------------------------------------------------------- status and the handover
 
 _STATUS_KEY = ("sync", "status")
-_STATUS_TTL_S = 30
-_handover_cache: tuple[float, bool] = (0.0, False)
-_cache_lock = threading.Lock()
 
 
 def status() -> dict[str, Any]:
@@ -56,25 +97,7 @@ def status() -> dict[str, Any]:
 
 
 def handed_over() -> bool:
-    """Whether the phone owns the data (cached for a few seconds: every web request asks)."""
-    global _handover_cache
-    checked_at, value = _handover_cache
-    if time.monotonic() - checked_at < _STATUS_TTL_S:
-        return value
-    try:
-        value = bool((db.get_raw(*_STATUS_KEY) or {}).get("handover_at"))
-    except Exception:
-        log.exception("Could not read the sync status; assuming the web app is still in use")
-        return False
-    with _cache_lock:
-        _handover_cache = (time.monotonic(), value)
-    return value
-
-
-def _forget_cache() -> None:
-    global _handover_cache
-    with _cache_lock:
-        _handover_cache = (0.0, False)
+    return bool((db.get_raw(*_STATUS_KEY) or {}).get("handover_at"))
 
 
 def _touch(**fields: str) -> None:
@@ -98,8 +121,8 @@ def _plain(entity: Entity, raw: dict[str, Any]) -> dict[str, Any]:
 
 def export_all() -> dict[str, Any]:
     """
-    Every row the phone keeps, and the id counters. Read with Query only (the backend's AWS user may not Scan,
-    see scripts/aws_setup.py): one partition per kind of item, and the events through their kind index.
+    Every row the phone keeps, and the id counters. Read with Query only (the function's role may not Scan, see
+    scripts/aws_lambda_setup.py): one partition per kind of item, and the events through their kind index.
     """
     tables: dict[str, list[dict[str, Any]]] = {name: [] for name in TABLES}
     for pk, table in (("task", "tasks"), ("msg", "messages"), ("sess", "sessions"), ("pref", "preferences")):
@@ -123,17 +146,11 @@ def restore(*, handover: bool, device: str) -> dict[str, Any]:
     data = export_all()
     now = db.ts(db.now_utc())
     fields = {"last_restore_at": now, "device": device}
-    if handover and not handed_over_now():
+    if handover and not handed_over():
         fields["handover_at"] = now
-        log.warning("Handover: the phone (%s) owns the data from now on; the web app is switched off", device)
+        log.warning("Handover: the phone (%s) owns the data from now on", device)
     _touch(**fields)
-    _forget_cache()
     return {**data, "status": status(), "serverTime": now}
-
-
-def handed_over_now() -> bool:
-    """Uncached (for the handover itself)."""
-    return bool((db.get_raw(*_STATUS_KEY) or {}).get("handover_at"))
 
 
 # ---------------------------------------------------------------- upload

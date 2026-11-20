@@ -14,10 +14,11 @@ import kotlinx.serialization.json.JsonElement
 
 /**
  * The phone's side of the backup. The phone's database is the live copy and the only one that changes;
- * the backup (the backend's DynamoDB table) gets every change a few minutes after it happens.
+ * the backup (the backend's DynamoDB table) gets the changes once a day, and when you leave the app on Wi-Fi
+ * (SyncScheduler), or right away with Diagnostics → Back up now.
  *
  * - [restore]: an empty phone downloads everything. With handover=true that's the handover: from then on the
- *   web app is switched off and the phone owns the data. A reinstall restores the same way.
+ *   phone owns the data. A reinstall restores the same way.
  * - [upload]: every row changed since the last upload (by change number), and the rows deleted since.
  *   Nothing changed for [HEARTBEAT] → an empty upload anyway, so the server knows the phone is alive (Phase C
  *   emails you if it goes quiet).

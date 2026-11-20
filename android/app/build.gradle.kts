@@ -38,9 +38,10 @@ android {
         versionName = setting("VERSION_NAME", "0.1.0-dev")
 
         // Public by design (anyone can read them out of the app). Secrets never go here.
-        // The backend the app logs in to (POST /auth/google).
-        buildConfigField("String", "API_URL", "\"${setting("API_URL", "https://annoying-reminder-api.onrender.com")}\"")
-        // Google sign-in: the OAuth client id of type "Web application" (the same as GOOGLE_CLIENT_ID on Render).
+        // The backend: the Lambda function URL (sign-in, the backup, the assistant's model calls). No default: the
+        // release build refuses to run without it (see below), so an app never points at a server that's gone.
+        buildConfigField("String", "API_URL", "\"${setting("API_URL").trimEnd('/')}\"")
+        // Google sign-in: the OAuth client id of type "Web application" (GOOGLE_CLIENT_ID on the Lambda).
         buildConfigField("String", "GOOGLE_WEB_CLIENT_ID", "\"${setting("GOOGLE_WEB_CLIENT_ID")}\"")
     }
 
@@ -88,6 +89,21 @@ android {
                 // Robolectric downloads Android's system jars from inside the test JVM. Pass on a trust store set for
                 // Gradle (e.g. systemProp.javax.net.ssl.trustStoreType=Windows-ROOT behind an HTTPS filter); CI sets none.
                 System.getProperty("javax.net.ssl.trustStoreType")?.let { test.systemProperty("javax.net.ssl.trustStoreType", it) }
+            }
+        }
+    }
+}
+
+// A release for Play must know its backend: the GitHub variable API_URL (the Lambda's function URL, printed by
+// backend/scripts/aws_lambda_setup.py). Render, the old backend, is deleted (Phase F), so its address is refused too.
+val releaseApiUrl = setting("API_URL")
+tasks.configureEach {
+    if (name == "bundleRelease" || name == "assembleRelease") {
+        doFirst {
+            val url = releaseApiUrl
+            check(url.startsWith("https://") && "onrender.com" !in url) {
+                "API_URL must be the Lambda's function URL (https://….lambda-url.<region>.on.aws), not '$url'. " +
+                    "Set it in GitHub → Settings → Secrets and variables → Actions → Variables."
             }
         }
     }
