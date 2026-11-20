@@ -172,6 +172,19 @@ interface AppDao {
     @Query("SELECT * FROM sessions WHERE task_id = :taskId")
     suspend fun sessionsOf(taskId: Long): List<SessionRow>
 
+    @Query("SELECT * FROM sessions WHERE id = :id")
+    suspend fun session(id: Long): SessionRow?
+
+    @Query("SELECT COALESCE(MAX(id), 0) FROM sessions")
+    suspend fun maxSessionId(): Long
+
+    /** The latest session, open or closed: the timer, the session bar and "Where did you stop?" watch it. */
+    @Query("SELECT * FROM sessions ORDER BY id DESC LIMIT 1")
+    fun watchLatestSession(): Flow<SessionRow?>
+
+    @Query("SELECT COUNT(*) FROM sessions WHERE started_at >= :since")
+    fun watchSessionCountSince(since: String): Flow<Int>
+
     @Query("SELECT * FROM preferences ORDER BY id")
     suspend fun preferences(): List<PreferenceRow>
 

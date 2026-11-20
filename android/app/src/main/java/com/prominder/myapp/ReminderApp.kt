@@ -6,6 +6,7 @@ import androidx.core.content.pm.ShortcutInfoCompat
 import androidx.core.content.pm.ShortcutManagerCompat
 import androidx.core.graphics.drawable.IconCompat
 import android.os.Build
+import com.prominder.myapp.alarm.AlarmRings
 import com.prominder.myapp.auth.AuthRepository
 import com.prominder.myapp.auth.BackendAuth
 import com.prominder.myapp.auth.PrefsSessionStore
@@ -43,6 +44,9 @@ class ReminderApp : Application() {
         Store(db, onChange = {
             SyncScheduler.soon(this)
             Reminders.replan(this)
+        }, onUserActivity = {
+            // As the server's cancel_alarms: writing in the chat or tapping anything means you've seen it.
+            AlarmRings.stop(this, "you wrote or tapped something in the app")
         })
     }
     /** The backup on the backend: restore (the handover) and upload. */
@@ -62,6 +66,9 @@ class ReminderApp : Application() {
 
     /** Counts the "New task" shortcut's taps: the chat's field takes the focus each time. */
     val newTask = MutableStateFlow(0)
+
+    /** Counts the requests to show the focus timer (▶ Start on a notification, a tap on the countdown). */
+    val openSession = MutableStateFlow(0)
 
     private lateinit var http: OkHttpClient
 

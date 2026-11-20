@@ -92,6 +92,16 @@ data class HomeState(
     val draft: String = "",
     /** Dictation is possible on this phone (the 🎤 button). */
     val canDictate: Boolean = false,
+    /** A focus session runs (the bar above the chat), or null. */
+    val session: SessionBarUi? = null,
+    /** "Where did you stop?" is offered, or null. */
+    val breadcrumb: BreadcrumbUi? = null,
+    /** The text in its field. */
+    val breadcrumbDraft: String = "",
+    /** Focus sessions started today (the wins: "⏱ 2"). */
+    val sessionsToday: Int = 0,
+    /** Screenshot tests: a fixed clock for the session bar (epoch ms); null = the real one. */
+    val fixedNow: Long? = null,
 )
 
 /**
@@ -117,6 +127,13 @@ fun HomeScreen(
     onRetry: () -> Unit = {},
     /** Changes each time the field should take the focus (the "New task" shortcut). */
     focusInput: Int = 0,
+    /** ▶ on a Today's 3 row: a focus session (25 min). */
+    onStart: (Long) -> Unit = {},
+    onOpenSession: () -> Unit = {},
+    onBreadcrumbDraft: (String) -> Unit = {},
+    /** Save (the text) or Skip (null). */
+    onBreadcrumb: (String?) -> Unit = {},
+    onBreadcrumbMic: () -> Unit = {},
 ) {
     Column(Modifier.fillMaxSize()) {
         var menu by remember { mutableStateOf(false) }
@@ -146,7 +163,11 @@ fun HomeScreen(
                 }
                 Spacer(Modifier.height(8.dp))
             }
-            FocusCard(state.focus, onOpenTask, onDone, onPickFocus)
+            state.session?.let { bar ->
+                SessionBar(bar, rememberTicker(state.fixedNow), onOpenSession)
+                Spacer(Modifier.height(8.dp))
+            }
+            FocusCard(state.focus, state.sessionsToday, onOpenTask, onDone, onPickFocus, onStart)
         }
 
         Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -180,6 +201,7 @@ fun HomeScreen(
                 Text(it, color = Palette.Accent, fontSize = 14.sp, modifier = Modifier.padding(horizontal = 4.dp))
                 Spacer(Modifier.height(4.dp))
             }
+            state.breadcrumb?.let { Breadcrumb(it, state.breadcrumbDraft, state.canDictate, onBreadcrumbDraft, onBreadcrumb, onBreadcrumbMic) }
             Composer(state, onDraft, onSend, onMic, onNewTask, focusInput)
         }
     }
@@ -262,12 +284,34 @@ private fun ChipRow(chips: List<ChipJson>, onChip: (ChipJson) -> Unit) {
     }
 }
 
+/**
+ * "Where did you stop on “Taxes”? (optional)": after you tap Stop, or don't answer a session's end. Save keeps the line
+ * for the next session and check-in; Skip (or doing nothing for a few hours) changes nothing.
+ */
 @Composable
-private fun FocusCard(items: List<FocusItem>, onOpen: (Long) -> Unit, onDone: (Long) -> Unit, onPick: () -> Unit) {
+private fun Breadcrumb(b: BreadcrumbUi, draft: String, canDictate: Boolean, onDraft: (String) -> Unit, onDone: (String?) -> Unit, onMic: () -> Unit) {
+    val he = b.lang == "he"
+    Column(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp)) {
+        Text(if (he) "איפה עצרת ב„${b.title}”? (לא חובה)" else "Where did you stop on “${b.title}”? (optional)", color = Palette.Muted, fontSize = 13.sp)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(value = draft, onValueChange = onDraft, modifier = Modifier.weight(1f), singleLine = true,
+                placeholder = { Text(if (he) "למשל: עמוד 3" else "e.g. page 3", color = Palette.Muted) })
+            if (canDictate) TextButton(onClick = onMic, modifier = Modifier.size(44.dp)) { Text("🎤", fontSize = 18.sp) }
+            TextButton(onClick = { onDone(draft.trim().ifEmpty { null }) }) { Text(if (he) "שמירה" else "Save") }
+            TextButton(onClick = { onDone(null) }) { Text(if (he) "דילוג" else "Skip", color = Palette.Muted) }
+        }
+    }
+}
+
+@Composable
+private fun FocusCard(items: List<FocusItem>, sessions: Int, onOpen: (Long) -> Unit, onDone: (Long) -> Unit, onPick: () -> Unit, onStart: (Long) -> Unit) {
     AppCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("TODAY'S 3", color = Palette.Muted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-            if (items.isNotEmpty()) Text("${items.count { it.done }}/${items.size} done", color = Palette.Muted, fontSize = 12.sp)
+            // The day's wins: no streaks, no zeros.
+            val wins = listOfNotNull(if (items.isNotEmpty()) "${items.count { it.done }}/${items.size} done" else null,
+                if (sessions > 0) "⏱ $sessions session${if (sessions == 1) "" else "s"}" else null)
+            if (wins.isNotEmpty()) Text(wins.joinToString(" · "), color = Palette.Muted, fontSize = 12.sp)
             TextButton(onClick = onPick) { Text(if (items.isEmpty()) "Pick" else "Change") }
         }
         if (items.isEmpty()) {
@@ -281,6 +325,9 @@ private fun FocusCard(items: List<FocusItem>, onOpen: (Long) -> Unit, onDone: (L
                         textDecoration = if (item.done) TextDecoration.LineThrough else null,
                         color = if (item.done) Palette.Muted else Palette.Text)
                     if (item.meta.isNotEmpty()) Text(item.meta, color = Palette.Muted, fontSize = 12.sp)
+                }
+                if (!item.done) {
+                    TextButton(onClick = { onStart(item.id) }, modifier = Modifier.size(44.dp)) { Text("▶", color = Palette.Accent, fontSize = 18.sp) }
                 }
             }
         }

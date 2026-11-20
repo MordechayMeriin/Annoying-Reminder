@@ -93,7 +93,7 @@ data class MessageRow(
     @Transient val seq: Long = 0,
 )
 
-/** A focus session (▶ Start). Phase E runs them on the phone; until then they're kept and backed up. */
+/** A focus session (▶ Start): the timer, its end check-in, "Where did you stop?" (data/Sessions.kt). */
 @Serializable
 @Entity(tableName = "sessions", indices = [Index("task_id")])
 data class SessionRow(

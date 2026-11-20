@@ -8,8 +8,8 @@ import android.media.RingtoneManager
 import com.prominder.myapp.R
 
 /**
- * The three notification channels: the same three levels as the web app (Pushover normal / urgent /
- * emergency). You control each one in system settings: sound, vibration, Do Not Disturb.
+ * The notification channels: the same three levels as the web app (Pushover normal / urgent / emergency),
+ * plus the focus timer's silent countdown. You control each one in system settings: sound, vibration, Do Not Disturb.
  *
  * A channel's sound and importance can't be changed by the app once it exists (only by you), so the
  * ids are permanent. A different default sound later means a new id ("urgent_v2").
@@ -19,7 +19,10 @@ object Channels {
     const val URGENT = "urgent"
     const val ALARM = "alarm"
 
-    val ALL = listOf(NORMAL, URGENT, ALARM)
+    /** The focus timer's countdown (Phase E): silent, it only shows the time left. */
+    const val SESSION = "session"
+
+    val ALL = listOf(NORMAL, URGENT, ALARM, SESSION)
 
     fun ensure(context: Context) {
         val nm = context.getSystemService(NotificationManager::class.java)
@@ -61,6 +64,14 @@ object Channels {
             setBypassDnd(true)
         }
 
-        nm.createNotificationChannels(listOf(normal, urgent, alarm))
+        val session = NotificationChannel(SESSION, context.getString(R.string.channel_session), NotificationManager.IMPORTANCE_LOW).apply {
+            description = context.getString(R.string.channel_session_desc)
+            setSound(null, null)
+            enableVibration(false)
+            setShowBadge(false)
+            lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+        }
+
+        nm.createNotificationChannels(listOf(normal, urgent, alarm, session))
     }
 }

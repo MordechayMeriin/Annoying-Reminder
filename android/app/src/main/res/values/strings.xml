@@ -6,5 +6,7 @@
     <string name="channel_urgent">Urgent</string>
     <string name="channel_urgent_desc">Meetings, hard stops and deadlines. A long sound; allow it through Do Not Disturb.</string>
     <string name="channel_alarm">Alarm</string>
-    <string name="channel_alarm_desc">The full-screen alarm that rings until you answer.</string>
+    <string name="channel_alarm_desc">The full-screen alarm that rings again every few minutes until you answer.</string>
+    <string name="channel_session">Focus timer</string>
+    <string name="channel_session_desc">The time left in a focus session. Silent; the session\'s end comes as an urgent message.</string>
 </resources>

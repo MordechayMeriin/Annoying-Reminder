@@ -7,12 +7,13 @@ import com.prominder.myapp.ReminderApp
 import com.prominder.myapp.diag.Diag
 import androidx.core.app.RemoteInput
 import com.prominder.myapp.notify.Notifier
+import com.prominder.myapp.data.endSession
 import com.prominder.myapp.remind.Reminders
 import kotlinx.coroutines.launch
 
 /**
- * Runs when an alarm goes off (even with the screen off and the app closed): the next tick, or the test alarm.
- * Also the notification buttons: Dismiss, ✓ Done and Later.
+ * Runs when an alarm goes off (even with the screen off and the app closed): the next tick, an alarm's next ring, or
+ * the test alarm. Also the notification buttons: Dismiss, ✓ Done, Later, and the focus timer's ✓ Done and Stop.
  */
 class AlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -20,9 +21,14 @@ class AlarmReceiver : BroadcastReceiver() {
             ACTION_TICK -> background(context) { app ->
                 Reminders.tick(app, app.store, "alarm", intent.getLongExtra(EXTRA_SCHEDULED_AT, System.currentTimeMillis()))
             }
+            ACTION_ALARM_RING -> AlarmRings.ringAgain(context)
             ACTION_DONE, ACTION_LATER -> {
                 val taskId = intent.getLongExtra(EXTRA_TASK_ID, -1)
-                Notifier.cancel(context, intent.getIntExtra(EXTRA_NOTIFICATION_ID, 0))
+                val notificationId = intent.getIntExtra(EXTRA_NOTIFICATION_ID, 0)
+                if (notificationId == Notifier.ID_ALARM) {
+                    AlarmRings.stop(context, (if (intent.action == ACTION_DONE) "✓ Done" else "Later") + " on the alarm's notification")
+                }
+                Notifier.cancel(context, notificationId)
                 background(context) { app ->
                     val title = app.store.dao.task(taskId)?.title ?: "task #$taskId"
                     if (intent.action == ACTION_DONE) {
@@ -32,6 +38,15 @@ class AlarmReceiver : BroadcastReceiver() {
                         val at = app.store.later(taskId)
                         Diag.log("notify", "Later from the notification: $title" + (at?.let { " (next check-in ${Diag.log.format(it.toEpochMilli())})" } ?: ""))
                     }
+                }
+            }
+            ACTION_SESSION_END -> {
+                val sessionId = intent.getLongExtra(EXTRA_SESSION_ID, -1)
+                val outcome = intent.getStringExtra(EXTRA_OUTCOME) ?: "stopped"
+                Notifier.cancelSession(context)
+                background(context) { app ->
+                    app.store.endSession(sessionId, outcome)
+                    Diag.log("notify", "Focus session #$sessionId: ${if (outcome == "done") "✓ Done" else "Stop"} from the timer's notification")
                 }
             }
             ACTION_REPLY -> {
@@ -57,12 +72,15 @@ class AlarmReceiver : BroadcastReceiver() {
                     title = "Test alarm",
                     text = "Rang ${Timing.describeLateness(late)}. Tap Dismiss to stop it.",
                     scheduledAt = scheduledAt,
-                    lateMs = late,
                 )
             }
             ACTION_DISMISS -> {
-                Notifier.cancelAlarm(context)
-                Diag.log("alarm", "Alarm dismissed from the notification")
+                if (AlarmRings.current(context) != null) {
+                    AlarmRings.stop(context, "dismissed on its notification")
+                } else {
+                    Notifier.cancelAlarm(context)
+                    Diag.log("alarm", "Alarm dismissed from the notification")
+                }
             }
         }
     }
@@ -88,6 +106,10 @@ class AlarmReceiver : BroadcastReceiver() {
         const val ACTION_DONE = "com.prominder.myapp.DONE"
         const val ACTION_LATER = "com.prominder.myapp.LATER"
         const val ACTION_REPLY = "com.prominder.myapp.REPLY"
+        const val ACTION_ALARM_RING = "com.prominder.myapp.ALARM_RING"
+        const val ACTION_SESSION_END = "com.prominder.myapp.SESSION_END"
+        const val EXTRA_SESSION_ID = "session_id"
+        const val EXTRA_OUTCOME = "outcome"
         const val EXTRA_REPLY = "reply"
         const val EXTRA_TASK_ID = "task_id"
         const val EXTRA_NOTIFICATION_ID = "notification_id"

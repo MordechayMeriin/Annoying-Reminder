@@ -23,6 +23,11 @@ phone goes silent. Details: [docs/android-phase-c.md](../docs/android-phase-c.md
 the app icon, Reply on a notification), and the check-ins and daily messages are written by the LLM, with the
 templates as the fallback. The OpenRouter key stays on the Lambda. Details: [docs/android-phase-d.md](../docs/android-phase-d.md).
 
+**Phase E (focus sessions and alarms)** is in: ▶ Start opens a timer (a ring, the next action, 5 / 15 / 25 / 45, +5),
+with a silent countdown in the notification shade and an urgent check-in at its end (✓ Done · ▶ Another round · Stop);
+"Where did you stop?" after a stopped or unanswered session; and the alarm rings full screen again every 2 minutes
+until you answer it. Details: [docs/android-phase-e.md](../docs/android-phase-e.md).
+
 ## How it's built
 
 You don't need Android Studio or anything on your laptop. GitHub Actions

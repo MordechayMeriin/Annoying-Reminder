@@ -67,6 +67,8 @@ fun TaskDetailScreen(
     onOpenStep: (Long) -> Unit,
     onDoneStep: (Long) -> Unit,
     onBack: () -> Unit,
+    /** ▶ Start: a 25-minute focus session on the next step. */
+    onStart: () -> Unit = {},
 ) {
     var confirmCancel by rememberSaveable { mutableStateOf(false) }
     val open = state.status == OPEN
@@ -88,6 +90,7 @@ fun TaskDetailScreen(
                     Button(onClick = onDone, colors = ButtonDefaults.buttonColors(containerColor = Palette.Ok)) { Text("✓ Done") }
                     OutlinedButton(onClick = onLater) { Text("⏰ Later") }
                 }
+                if (state.kind == "task") OutlinedButton(onClick = onStart) { Text("▶ Start") }
                 if (state.kind == "task") OutlinedButton(onClick = onToggleFocus) { Text(if (state.inFocus) "★ In Today's 3" else "☆ Today's 3") }
                 TextButton(onClick = { confirmCancel = true }) { Text("Cancel task", color = Palette.Muted) }
             }

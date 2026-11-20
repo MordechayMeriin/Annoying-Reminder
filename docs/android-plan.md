@@ -306,7 +306,7 @@ KosherJava gives the Hebrew calendar.*
 *Done when:* a week of real reminders arrives when it should, and the tick log explains every skip.
 
 ### Phase D: chat and the coach
-*Built: see [android-phase-d.md](android-phase-d.md). ▶ Start buttons stay hidden until focus sessions come in Phase E;
+*Built: see [android-phase-d.md](android-phase-d.md). ▶ Start buttons stayed hidden until focus sessions came in Phase E;
 What now? (pure code) works from its chips already.*
 
 - `/llm` in the Lambda: the key, model fallback, daily cap, rate limit, timeouts.
@@ -321,6 +321,9 @@ What now? (pure code) works from its chips already.*
 *Done when:* talking to the assistant on the phone feels like it did in the web app.
 
 ### Phase E: focus sessions and alarms
+*Built: see [android-phase-e.md](android-phase-e.md). The session's end comes on time (the phone wakes for it), and
+each alarm ring lasts up to a minute, repeating every 2 minutes as Pushover did.*
+
 - Focus sessions: the countdown notification, the full-screen ring, "where did you stop?".
 - The full-screen alarm and its repeat rules.
 - What now?, Low energy, Something else (pure code, already ported in Phase C).

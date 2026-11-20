@@ -23,6 +23,7 @@ class BootReceiver : BroadcastReceiver() {
         }
         Diag.log("system", reason.replaceFirstChar { it.uppercase() })
         TestAlarm.restore(context, reason)
+        AlarmRings.restore(context, reason)
         // The reminders: a tick now catches anything that came due meanwhile, and sets the next alarm.
         Reminders.tickSoon(context, reason)
     }

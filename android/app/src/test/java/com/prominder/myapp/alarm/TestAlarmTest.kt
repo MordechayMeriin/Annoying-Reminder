@@ -74,7 +74,7 @@ class TestAlarmTest {
     @Test
     fun `dismiss stops it`() {
         Channels.ensure(app)
-        Notifier.showAlarm(app, "Test alarm", "x", System.currentTimeMillis(), 0)
+        Notifier.showAlarm(app, "Test alarm", "x", System.currentTimeMillis())
         AlarmReceiver().onReceive(app, Intent(app, AlarmReceiver::class.java).setAction(AlarmReceiver.ACTION_DISMISS))
         assertNull(shadowOf(notifications).getNotification(Notifier.ID_ALARM))
     }
