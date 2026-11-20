@@ -12,6 +12,8 @@ import androidx.work.testing.WorkManagerTestInitHelper
 import androidx.test.core.app.ApplicationProvider
 import com.prominder.myapp.ReminderApp
 import com.prominder.myapp.alarm.AlarmReceiver
+import com.prominder.myapp.alarm.AlarmRings
+import com.prominder.myapp.data.startSession
 import com.prominder.myapp.data.MetaRow
 import com.prominder.myapp.data.Store
 import com.prominder.myapp.data.TaskRow
@@ -70,12 +72,16 @@ class RemindersTest {
      */
     private val DAILY_TITLES = com.prominder.myapp.remind.Templates.JOB_TITLES.values + com.prominder.myapp.remind.Templates.MEETING_JOB_TITLES.values
 
-    @Test fun `a due reminder is a notification with Done and Later, and the next tick is an exact alarm`() = runBlocking {
+    @Test fun `a due reminder is a notification with Start and Done, and the next tick is an exact alarm`() = runBlocking {
         val t = addDue("Call the plumber")
         Reminders.tick(app, store, "test")
         val n = posted().single { it.extras.getString(Notification.EXTRA_TITLE)!!.contains("Call the plumber") }
         assertEquals(Channels.URGENT, n.channelId) // a reminder you asked for
-        assertEquals(listOf("✓ Done", "Later", "Reply"), n.actions.map { it.title.toString() })
+        assertEquals(listOf("▶ Start 5 min", "✓ Done", "Reply"), n.actions.map { it.title.toString() })
+        // ▶ Start opens the app on the timer (an activity); ✓ Done works in the background.
+        assertTrue(shadowOf(n.actions[0].actionIntent).isActivityIntent)
+        assertEquals(com.prominder.myapp.MainActivity.ACTION_START_SESSION, shadowOf(n.actions[0].actionIntent).savedIntent.action)
+        assertTrue(shadowOf(n.actions[1].actionIntent).isBroadcastIntent)
         assertNotNull(n.actions[2].remoteInputs?.single()) // typed into the notification
         assertTrue(n.extras.getString(Notification.EXTRA_TITLE)!!.contains("Call the plumber"))
         val next = shadowOf(alarms).peekNextScheduledAlarm()
@@ -93,21 +99,93 @@ class RemindersTest {
         assertNull(Reminders.lastTick(app))
     }
 
-    @Test fun `an alarm-level message is full-screen and rings until answered, for its window only`() {
+    @Test fun `an alarm-level message is full-screen, rings for a minute and again every 2 minutes, for its window only`() {
+        val start = System.currentTimeMillis()
         Notifier.showNotice(app, Notice(5, "🚨 Taxes", "Taxes — overdue", Logic.ALARM, 1800, taskId = 9))
         val n = posted().single { it.channelId == Channels.ALARM }
-        assertEquals(Channels.ALARM, n.channelId)
         assertNotNull(n.fullScreenIntent)
         assertTrue(n.flags and Notification.FLAG_INSISTENT != 0)
-        assertEquals(1_800_000L, n.timeoutAfter)
-        assertEquals(listOf("✓ Done", "Later"), n.actions.map { it.title.toString() })
+        assertEquals(60_000L, n.timeoutAfter) // one ring
+        assertEquals(listOf("✓ Done", "Later", "Dismiss"), n.actions.map { it.title.toString() })
+        val ringing = AlarmRings.current(app)!!
+        assertEquals(9L, ringing.taskId)
+        assertTrue(ringing.until - start in 1_799_000L..1_801_000L)
+        val next = shadowOf(alarms).scheduledAlarms.single { shadowOf(it.operation).savedIntent.action == AlarmReceiver.ACTION_ALARM_RING }
+        assertTrue(next.triggerAtTime - start in 119_000L..121_000L)
+        assertNotNull(next.alarmClockInfo) // an alarm-clock alarm: Doze lets it through every time
+
+        // It rings again until its window is over, then stops by itself.
+        AlarmReceiver().onReceive(app, Intent(app, AlarmReceiver::class.java).setAction(AlarmReceiver.ACTION_ALARM_RING))
+        assertEquals(2, AlarmRings.current(app)!!.rings)
+        AlarmRings.ringAgain(app, now = ringing.until + 1)
+        assertNull(AlarmRings.current(app))
+        assertNull(shadowOf(notifications).getNotification(Notifier.ID_ALARM))
+    }
+
+    @Test fun `the last ring of an alarm is cut short at the end of its window`() {
+        val r = AlarmRings.Ringing(1, "t", "x", null, "en", 0, until = 150_000, everyMs = 120_000)
+        assertEquals(60_000L, r.ringMs(0))
+        assertEquals(120_000L, r.nextRingAt(0))
+        assertEquals(30_000L, r.ringMs(120_000))
+        assertNull(r.nextRingAt(120_000))
+        assertEquals(30_000L, AlarmRings.Ringing(1, "t", "x", null, "en", 0, until = 3_600_000, everyMs = 30_000).ringMs(0))
+    }
+
+    @Test fun `anything you write or tap stops a ringing alarm, Dismiss too`() = runBlocking {
+        Notifier.showNotice(app, Notice(5, "🚨 Taxes", "Taxes — overdue", Logic.ALARM, 1800))
+        assertNotNull(AlarmRings.current(app))
+        assertEquals(listOf("Dismiss"), posted().single { it.channelId == Channels.ALARM }.actions.map { it.title.toString() })
+        val t = addDue("Taxes")
+        app.store.complete(t.id) // the app's own store: a tap writes "[Marked done: …]" in the chat
+        assertNull(AlarmRings.current(app))
+        assertNull(shadowOf(notifications).getNotification(Notifier.ID_ALARM))
+        assertTrue(shadowOf(alarms).scheduledAlarms.none { shadowOf(it.operation).savedIntent.action == AlarmReceiver.ACTION_ALARM_RING })
+
+        Notifier.showNotice(app, Notice(6, "🚨 Taxes", "again", Logic.ALARM, 1800))
+        AlarmReceiver().onReceive(app, Intent(app, AlarmReceiver::class.java).setAction(AlarmReceiver.ACTION_DISMISS))
+        assertNull(AlarmRings.current(app))
+        // The tick's own writes don't count: only your messages and taps.
+        Notifier.showNotice(app, Notice(7, "🚨 Taxes", "again", Logic.ALARM, 1800))
+        app.store.addMessageNow("assistant", "A check-in", "nudge")
+        assertNotNull(AlarmRings.current(app))
+        AlarmRings.stop(app, "test")
+    }
+
+    @Test fun `a running focus session counts down in a silent notification with Done and Stop`() = runBlocking {
+        val t = addDue("Write the report")
+        val s = app.store.startSession(t.id, 25)!!
+        SessionTimer.refresh(app, app.store)
+        val n = shadowOf(notifications).getNotification(Notifier.ID_SESSION)!!
+        assertEquals(Channels.SESSION, n.channelId)
+        assertTrue(n.flags and Notification.FLAG_ONGOING_EVENT != 0)
+        assertEquals(Logic.sessionEndAt(s).toEpochMilli(), n.`when`)
+        assertTrue(n.extras.getBoolean(Notification.EXTRA_CHRONOMETER_COUNT_DOWN))
+        assertEquals(listOf("✓ Done", "Stop"), n.actions.map { it.title.toString() })
+        assertEquals("⏱ Write the report", n.extras.getString(Notification.EXTRA_TITLE))
+
+        // Stop on the countdown ends the session, and the countdown goes.
+        n.actions[1].actionIntent.send()
+        shadowOf(android.os.Looper.getMainLooper()).idle()
+        val deadline = System.currentTimeMillis() + 5_000
+        while (app.store.dao.session(s.id)!!.endedAt == null && System.currentTimeMillis() < deadline) Thread.sleep(20)
+        assertEquals("stopped", app.store.dao.session(s.id)!!.outcome)
+        assertNull(shadowOf(notifications).getNotification(Notifier.ID_SESSION))
+        SessionTimer.refresh(app, app.store)
+        assertNull(shadowOf(notifications).getNotification(Notifier.ID_SESSION))
+    }
+
+    @Test fun `a session's end has Done and Another round, Another round opens the timer`() {
+        Notifier.showNotice(app, Notice(8, "⏱ Taxes", "⏱ Time's up: Open the form.", Logic.URGENT, taskId = 4, actions = Notice.SESSION_END_ACTIONS))
+        val n = posted().single { it.extras.getString(Notification.EXTRA_TITLE) == "⏱ Taxes" }
+        assertEquals(listOf("✓ Done", "▶ Another round", "Reply"), n.actions.map { it.title.toString() })
+        assertEquals(com.prominder.myapp.MainActivity.ACTION_ANOTHER_ROUND, shadowOf(n.actions[1].actionIntent).savedIntent.action)
     }
 
     @Test fun `Hebrew buttons for a Hebrew check-in, only Reply for a group`() {
         Notifier.showNotice(app, Notice(6, "לשלם ארנונה", "x", Logic.NORMAL, taskId = 3, lang = "he"))
         Notifier.showNotice(app, Notice(7, "A (+1)", "y", Logic.NORMAL))
         val byTitle = posted().associateBy { it.extras.getString(Notification.EXTRA_TITLE) }
-        assertEquals(listOf("✓ בוצע", "אחר כך", "לענות"), byTitle.getValue("לשלם ארנונה").actions.map { it.title.toString() })
+        assertEquals(listOf("▶ להתחיל 5 דק׳", "✓ בוצע", "לענות"), byTitle.getValue("לשלם ארנונה").actions.map { it.title.toString() })
         assertEquals(listOf("Reply"), byTitle.getValue("A (+1)").actions.map { it.title.toString() })
         assertEquals(Channels.NORMAL, byTitle.getValue("A (+1)").channelId)
     }

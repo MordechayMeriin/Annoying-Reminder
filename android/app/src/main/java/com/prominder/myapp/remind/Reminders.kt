@@ -54,8 +54,12 @@ object Reminders {
     fun replan(context: Context) {
         val app = app(context)
         app.scope.launch {
-            runCatching { if (app.store.hasData()) setAlarm(app, Ticker(app.store).nextWake()) }
-                .onFailure { Diag.log("tick", "Couldn't plan the next tick: $it") }
+            runCatching {
+                if (app.store.hasData()) {
+                    setAlarm(app, Ticker(app.store).nextWake())
+                    SessionTimer.refresh(app, app.store)
+                }
+            }.onFailure { Diag.log("tick", "Couldn't plan the next tick: $it") }
         }
     }
 
@@ -77,6 +81,7 @@ object Reminders {
         }
         prefs(context).edit { putLong(KEY_LAST, System.currentTimeMillis()) }
         setAlarm(context, report.nextWake)
+        SessionTimer.refresh(context, store)
     }
 
     /** The exact alarm for the next tick (inexact, "within a few minutes", when Alarms & reminders is off). */

@@ -13,6 +13,8 @@ sealed class Route(val key: String) {
     data object Settings : Route("settings")
     data object Checklist : Route("checklist")
     data object Diagnostics : Route("diagnostics")
+    /** The focus timer. */
+    data object Session : Route("session")
 
     companion object {
         fun parse(key: String): Route {
@@ -25,6 +27,7 @@ sealed class Route(val key: String) {
                 "settings" -> Settings
                 "checklist" -> Checklist
                 "diagnostics" -> Diagnostics
+                "session" -> Session
                 else -> Home
             }
         }

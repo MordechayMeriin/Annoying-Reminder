@@ -34,6 +34,8 @@ class Store(
     private val db: AppDatabase,
     private val clock: () -> Instant = Instant::now,
     private val onChange: () -> Unit = {},
+    /** You typed in the chat or tapped something (a chat event): a repeating alarm stops, you've seen it. */
+    private val onUserActivity: () -> Unit = {},
 ) {
     val dao: AppDao = db.dao()
 
@@ -221,15 +223,20 @@ class Store(
     /** Whether the current transaction wrote a row (a tick that changed nothing doesn't schedule a backup). */
     private var dirty = false
 
+    /** Whether the current transaction saved a message of yours (typed, or a tap's chat event). */
+    private var userActed = false
+
     /** One change: a transaction whose rows all get the same new change number. The tick (remind/) uses it too. */
     internal suspend fun <T> write(block: suspend () -> T): T {
-        val (result, changed) = db.withTransaction {
+        val (result, flags) = db.withTransaction {
             seq = (dao.meta(META_SEQ)?.toLongOrNull() ?: 0) + 1
             dirty = false
+            userActed = false
             dao.setMeta(MetaRow(META_SEQ, seq.toString()))
-            block() to dirty
+            block() to (dirty to userActed)
         }
-        if (changed) onChange()
+        if (flags.second) onUserActivity()
+        if (flags.first) onChange()
         return result
     }
 
@@ -265,6 +272,7 @@ class Store(
     internal suspend fun addMessage(role: String, content: String, kind: String, taskIds: List<Long> = emptyList(),
                                     chips: String = "[]", model: String? = null): MessageRow {
         dirty = true
+        if (role == "user") userActed = true
         val ids = taskIds.distinct()
         val row = MessageRow(nextId(META_MESSAGE_COUNTER, dao.maxMessageId()), role, content, kind, ids.firstOrNull(), ids,
             chips, model, nowText(), seq)
@@ -281,8 +289,22 @@ class Store(
         if (!old.description.isNullOrEmpty() && old.description != newText) addEvent(old.id, "description_changed", old.description)
     }
 
+    /** actions.close_task_sessions: the task is done, cancelled or parked, so its open session ends with it. */
     internal suspend fun closeSessions(taskId: Long, outcome: String) {
-        dao.openSessions(taskId).forEach { putSession(it.copy(endedAt = nowText(), outcome = outcome)) }
+        dao.openSessions(taskId).forEach { closeSession(it, outcome) }
+    }
+
+    /**
+     * actions.close_session: records an outcome (done | another | stopped | paused) with a session_ended event (paused:
+     * a paused event), "stopped, 7 of 25 min". Null if it was already closed (a second tap).
+     */
+    internal suspend fun closeSession(s: SessionRow, outcome: String, endedAt: Instant = clock()): SessionRow? {
+        val cur = dao.session(s.id)?.takeIf { it.endedAt == null } ?: return null
+        val closed = cur.copy(endedAt = Times.format(endedAt), outcome = outcome)
+        putSession(closed)
+        addEvent(closed.taskId, if (outcome == "paused") "paused" else "session_ended",
+            "$outcome, ${com.prominder.myapp.logic.Logic.actualMinutes(closed, clock())} of ${closed.plannedMin} min")
+        return closed
     }
 
     internal suspend fun setFocusIn(ids: List<Long>, day: LocalDate): List<TaskRow> {

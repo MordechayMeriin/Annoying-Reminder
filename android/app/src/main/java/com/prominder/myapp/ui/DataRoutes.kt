@@ -7,6 +7,7 @@ import android.speech.RecognizerIntent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -33,6 +34,12 @@ import com.prominder.myapp.data.drop
 import com.prominder.myapp.data.keep
 import com.prominder.myapp.data.moveOverdue
 import com.prominder.myapp.data.notNow
+import com.prominder.myapp.data.SessionRow
+import com.prominder.myapp.data.endSession
+import com.prominder.myapp.data.saveBreadcrumb
+import com.prominder.myapp.data.setSessionLength
+import com.prominder.myapp.data.startSession
+import com.prominder.myapp.data.stopSession
 import com.prominder.myapp.data.startOfDay
 import com.prominder.myapp.data.whatNow
 import com.prominder.myapp.diag.Diag
@@ -40,6 +47,7 @@ import com.prominder.myapp.llm.Chat
 import com.prominder.myapp.logic.Logic
 import java.time.Instant
 import java.time.ZoneId
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 /*
@@ -69,11 +77,17 @@ fun HomeRoute(
     val settings = settingsOf(store)
     val turn by chat.turn.collectAsState()
     var draft by rememberSaveable { mutableStateOf("") }
+    var note by rememberSaveable { mutableStateOf("") }
+    var dictatingNote by rememberSaveable { mutableStateOf(false) }
     val canDictate = remember { dictationAvailable(context) }
-    // Dictation: Android's own speech recognizer (Hebrew included), its words added to the message field.
+    // Dictation: Android's own speech recognizer (Hebrew included), its words added to the message field (or to
+    // "Where did you stop?").
     val dictate = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val words = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
-        if (result.resultCode == Activity.RESULT_OK && !words.isNullOrBlank()) draft = listOf(draft.trim(), words.trim()).filter { it.isNotEmpty() }.joinToString(" ")
+        if (result.resultCode == Activity.RESULT_OK && !words.isNullOrBlank()) {
+            fun add(to: String) = listOf(to.trim(), words.trim()).filter { it.isNotEmpty() }.joinToString(" ")
+            if (dictatingNote) note = add(note) else draft = add(draft)
+        }
     }
     val zone = settings.zone
     val now = store.now()
@@ -83,7 +97,15 @@ fun HomeRoute(
     val todayStart = Times.format(now.atZone(zone).startOfDay())
     val doneEvents by remember(todayStart) { store.dao.watchDoneSince(todayStart) }.collectAsState(emptyList())
     val messages by remember { store.dao.watchLatestMessages(MESSAGES_SHOWN) }.collectAsState(emptyList())
+    val sessionsToday by remember(todayStart) { store.dao.watchSessionCountSince(todayStart) }.collectAsState(0)
+    val latest by remember { store.dao.watchLatestSession() }.collectAsState(null)
+    val sessionTask by remember(latest?.taskId) { store.dao.watchTask(latest?.taskId ?: -1) }.collectAsState(null)
     var picking by rememberSaveable { mutableStateOf(false) }
+    val lang = Logic.chipLang(messages.lastOrNull { it.role == "user" && it.kind == "chat" }?.content, sessionTask?.title)
+    val running = latest?.takeIf { it.endedAt == null }
+    // "Where did you stop?": after a stopped or unanswered session, for a few hours, unless answered (wants_breadcrumb).
+    val offer = latest?.takeIf { running == null && Logic.wantsBreadcrumb(it, now) }
+    fun openTimer() = go(Route.Session)
 
     val focus = TaskLists.focus(focusRows, day)
     val done = TaskLists.doneToday(focus, doneEvents)
@@ -98,6 +120,10 @@ fun HomeRoute(
             chat = ChatUi(turn.sending, turn.sentId, turn.steps, turn.typing, turn.error, canRetry = turn.failedId != null),
             draft = draft,
             canDictate = canDictate,
+            session = running?.let { SessionBarUi(sessionTask?.title.orEmpty(), Logic.sessionEndAt(it).toEpochMilli(), lang) },
+            breadcrumb = offer?.let { o -> sessionTask?.let { BreadcrumbUi(o.id, it.title, lang) } },
+            breadcrumbDraft = note,
+            sessionsToday = sessionsToday,
         ),
         onOpenTasks = { go(Route.Tasks) },
         onOpenTask = { go(Route.Task(it)) },
@@ -110,8 +136,9 @@ fun HomeRoute(
         onLogout = onLogout,
         onDraft = { draft = it },
         onSend = { if (chat.send(draft)) draft = "" },
-        onChip = { c -> scope.launch { onNotice(chipAction(store, chat, c, zone)) } },
+        onChip = { c -> scope.launch { onNotice(chipAction(store, chat, c, zone, onSession = ::openTimer)) } },
         onMic = {
+            dictatingNote = false
             val lang = Logic.chipLang(draft.ifBlank { null } ?: messages.lastOrNull { it.role == "user" && it.kind == "chat" }?.content)
             try {
                 dictate.launch(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
@@ -123,6 +150,31 @@ fun HomeRoute(
         },
         onRetry = { chat.retry() },
         focusInput = focusInput,
+        onStart = { id ->
+            scope.launch {
+                if (store.startSession(id, Logic.START_MIN_APP) != null) openTimer() else onNotice("That task isn't open any more.")
+            }
+        },
+        onOpenSession = ::openTimer,
+        onBreadcrumbDraft = { note = it },
+        onBreadcrumb = { text ->
+            val id = offer?.id
+            note = ""
+            if (id != null) scope.launch {
+                store.saveBreadcrumb(id, text)
+                if (text != null) onNotice(if (lang == "he") "נשמר לפעם הבאה" else "Saved for next time")
+            }
+        },
+        onBreadcrumbMic = {
+            dictatingNote = true
+            try {
+                dictate.launch(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                    .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                    .putExtra(RecognizerIntent.EXTRA_LANGUAGE, if (lang == "he") "he-IL" else "en-US"))
+            } catch (e: ActivityNotFoundException) {
+                onNotice("Dictation isn't available on this phone.")
+            }
+        },
     )
     if (picking) {
         val candidates = TaskLists.all(open.filter { it.kind == "task" }).map { it.id to it.title }
@@ -144,16 +196,21 @@ internal fun chatItems(rows: List<MessageRow>, zone: ZoneId, now: Instant, showM
         val sep = if (d != lastDay) Format.day(at, zone, now) else null
         lastDay = d
         ChatItem(m.id, m.role, m.kind, m.content, Format.clock(at, zone), sep,
-            chips = Chips.decode(m.chips).filter { it.action !in SESSION_ACTIONS }, model = m.model.takeIf { showModel })
+            chips = Chips.decode(m.chips), model = m.model.takeIf { showModel })
     }
 }
 
-/** ▶ Start, ▶ Another round and Stop run focus sessions, which come to the phone in Phase E: not shown until then. */
-private val SESSION_ACTIONS = setOf("start", "another", "stop")
-
-/** A reply button: an action on the phone's data (no LLM), or a reply in your words. Returns a short answer to show. */
-internal suspend fun chipAction(store: Store, chat: Chat, c: Logic.ChipJson, zone: ZoneId): String? = when (c.action) {
+/**
+ * A reply button: an action on the phone's data (no LLM), or a reply in your words. Returns a short answer to show.
+ * ▶ Start and ▶ Another round open the timer ([onSession]).
+ */
+internal suspend fun chipAction(store: Store, chat: Chat, c: Logic.ChipJson, zone: ZoneId, onSession: () -> Unit = {}): String? = when (c.action) {
     null -> if (chat.send(c.label)) null else "One message at a time: wait for the reply."
+    "start", "another" -> c.taskId?.let { id ->
+        val started = if (c.action == "another") store.startSession(id, another = true) else store.startSession(id, c.minutes)
+        if (started != null) null.also { onSession() } else "That task isn't open any more."
+    }
+    "stop" -> c.taskId?.let { store.stopSession(it); "Stopped" }
     "done" -> c.taskId?.let { store.complete(it); "Done ✓" }
     "later" -> c.taskId?.let { id -> store.later(id)?.let { "Later: next check-in ${Format.time(it, zone, store.now())}" } }
     "not_now" -> c.taskId?.let { store.notNow(it); "Parked for a week" }
@@ -162,6 +219,48 @@ internal suspend fun chipAction(store: Store, chat: Chat, c: Logic.ChipJson, zon
     "keep" -> store.keep(c.taskIds.orEmpty()).let { "Kept" }
     "what_now" -> store.whatNow(c.lowEnergy == true, c.exclude.orEmpty(), c.id).let { null }
     else -> null
+}
+
+/** The latest session, once loaded (the timer closes itself when there's no open one). */
+private data class Loaded(val session: SessionRow?)
+
+/**
+ * The focus timer, wired to the database. It shows the open session and closes by itself when the session ends
+ * (✓ Done, Stop, or from a notification). ▶ Another round keeps it open on the new round.
+ */
+@Composable
+fun SessionRoute(store: Store, onNotice: (String?) -> Unit, onBack: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    val loaded by remember { store.dao.watchLatestSession().map { Loaded(it) } }.collectAsState(null)
+    val latest = loaded?.session
+    val task by remember(latest?.taskId) { store.dao.watchTask(latest?.taskId ?: -1) }.collectAsState(null)
+    val lastChat by remember { store.dao.watchLatestMessages(20) }.collectAsState(emptyList())
+    var busy by remember { mutableStateOf(false) }
+    val open = latest?.takeIf { it.endedAt == null }
+    LaunchedEffect(loaded) { if (loaded != null && open == null) onBack() }
+    val s = open ?: run {
+        Muted("…")
+        return
+    }
+    val title = task?.title.orEmpty()
+    val lang = Logic.chipLang(lastChat.lastOrNull { it.role == "user" && it.kind == "chat" }?.content, title)
+    val now = rememberTicker()
+    fun act(block: suspend () -> Unit) {
+        if (busy) return
+        busy = true
+        scope.launch { try { block() } finally { busy = false } }
+    }
+    SessionScreen(
+        ui = SessionUi(title, task?.nextAction?.takeIf { it.isNotEmpty() } ?: title, task?.resumeNote, s.plannedMin,
+            Times.parse(s.startedAt).toEpochMilli(), Logic.sessionEndAt(s).toEpochMilli(), lang),
+        now = now,
+        busy = busy,
+        onDone = { act { store.endSession(s.id, "done"); onNotice(if (lang == "he") "בוצע ✓" else "Done ✓") } },
+        onStop = { act { store.endSession(s.id, "stopped") } },
+        onAnother = { act { store.endSession(s.id, "another") } },
+        onLength = { m -> act { if (store.setSessionLength(s.id, m) == null) onNotice("That session has already ended.") } },
+        onClose = onBack,
+    )
 }
 
 private fun dictationAvailable(context: android.content.Context): Boolean =
@@ -248,6 +347,11 @@ fun TaskDetailRoute(store: Store, id: Long, onNotice: (String?) -> Unit, go: (Ro
         onToggleFocus = {
             scope.launch {
                 if (!store.toggleFocus(id)) onNotice("Today's 3 is full. Take one out first.")
+            }
+        },
+        onStart = {
+            scope.launch {
+                if (store.startSession(id, Logic.START_MIN_APP) != null) go(Route.Session) else onNotice("That task isn't open any more.")
             }
         },
         onEdit = { go(Route.EditTask(id)) },

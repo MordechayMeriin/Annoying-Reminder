@@ -83,11 +83,35 @@ class ScreenshotTest {
         )
     }
 
+    /** Phase E: a session running with its timer closed (the bar), and "Where did you stop?" for an earlier one. */
+    @Test
+    fun home_session() = shot("4f_home_session") {
+        val start = 1_794_571_200_000
+        HomeScreen(
+            HomeState(
+                focus = listOf(
+                    FocusItem(1, "Write the quarterly report", "Today 15:00 · Important · ~25 min", done = false),
+                    FocusItem(2, "Call the plumber", "", done = true),
+                    FocusItem(3, "Book flights", "Tomorrow 09:00", done = false),
+                ),
+                messages = listOf(
+                    ChatItem(1, "user", "event", "[Stopped after 12 min: Book flights]", "09:40", day = "Today"),
+                    ChatItem(2, "user", "event", "[▶ 25 min: Open the doc and write three headings (Write the quarterly report)]", "10:00"),
+                ),
+                openCount = 12, setupDone = 4, setupTotal = 4,
+                session = SessionBarUi("Write the quarterly report", start + 25 * 60_000),
+                breadcrumb = BreadcrumbUi(7, "Book flights"),
+                sessionsToday = 2,
+                fixedNow = start + 7 * 60_000 + 30_000,
+            ),
+            {}, {}, {}, {}, {}, {}, {}, {}, {},
+        )
+    }
+
     /** Phase D: the assistant at work: your message sent, its steps, the typing dots, and a check-in's reply buttons. */
     @Test
     fun chat_working() = shot("4d_chat_working") {
         val chips = com.prominder.myapp.logic.Logic.chipsJson(com.prominder.myapp.logic.Logic.chipsFor("checkin", "planned"), "en", 1)
-            .filter { it.action != "start" }
         HomeScreen(
             HomeState(
                 focus = listOf(FocusItem(1, "Write the quarterly report", "Today 15:00 · Important", done = false)),
@@ -109,7 +133,6 @@ class ScreenshotTest {
     @Test
     fun chat_chips() = shot("4e_chat_chips") {
         val chips = com.prominder.myapp.logic.Logic.chipsJson(com.prominder.myapp.logic.Logic.chipsFor("checkin", "planned"), "en", 1)
-            .filter { it.action != "start" }
         HomeScreen(
             HomeState(
                 messages = listOf(
@@ -267,6 +290,36 @@ class ScreenshotTest {
 
     @Test
     fun alarm() = shot("7_alarm") {
-        AlarmScreen("Test alarm", "Rang on time. Tap Dismiss to stop it.", 1_794_571_200_000, ZoneId.of("Asia/Jerusalem"), {})
+        AlarmScreen(AlarmUi("Test alarm", "Rang on time. Tap Dismiss to stop it.", 1_794_571_200_000), ZoneId.of("Asia/Jerusalem"), onDismiss = {})
+    }
+
+    /** Phase E: a message's alarm, ringing for the third time: ✓ Done, ⏰ Later, Open, Dismiss. */
+    @Test
+    fun alarm_task() = shot("7b_alarm_task") {
+        AlarmScreen(
+            AlarmUi("🚨 Pay the electricity bill", "Pay the electricity bill — due today 18:00. Ignored twice: on it now?", 1_794_571_200_000,
+                doneLabel = "✓ Done", laterLabel = "Later", canOpen = true, rings = 3),
+            ZoneId.of("Asia/Jerusalem"), onDismiss = {},
+        )
+    }
+
+    /** Phase E: the focus timer, 18 minutes into 25, with where you stopped last time. */
+    @Test
+    fun session() = shot("12_session") {
+        val start = 1_794_571_200_000
+        SessionScreen(
+            SessionUi("Write the quarterly report", "Open the doc and write three headings", "the intro", 25, start, start + 25 * 60_000),
+            now = start + 18 * 60_000 + 25_000, onDone = {}, onStop = {}, onAnother = {}, onLength = {}, onClose = {},
+        )
+    }
+
+    /** Phase E: the time is up: the ring closes in green, ✓ Done · ▶ Another round · Stop. */
+    @Test
+    fun session_over() = shot("12b_session_over") {
+        val start = 1_794_571_200_000
+        SessionScreen(
+            SessionUi("Write the quarterly report", "Open the doc and write three headings", null, 25, start, start + 25 * 60_000),
+            now = start + 26 * 60_000, onDone = {}, onStop = {}, onAnother = {}, onLength = {}, onClose = {},
+        )
     }
 }

@@ -45,11 +45,23 @@ data class Notice(
     val level: Int,
     /** ALARM: how long it may ring (never into quiet hours or Shabbat). */
     val alarmSeconds: Long = 0,
-    /** A check-in about exactly one task: ✓ Done and Later on the notification. */
+    /** The task the buttons act on (a check-in about exactly one task, or a session's end). */
     val taskId: Long? = null,
     /** The buttons' language (en | he), as the chips'. */
     val lang: String = "en",
-)
+    /**
+     * The notification's buttons, as chip actions: a check-in gets start + done (▶ Start 5 min · ✓ Done), a session's
+     * end done + another (✓ Done · ▶ Another round). An alarm always gets ✓ Done and Later (its screen adds Open).
+     */
+    val actions: List<String> = if (taskId != null) CHECKIN_ACTIONS else emptyList(),
+    /** ALARM: it rings again this often until answered (⚙ Alarm repeats every). */
+    val alarmEveryMin: Int = 2,
+) {
+    companion object {
+        val CHECKIN_ACTIONS = listOf("start", "done")
+        val SESSION_END_ACTIONS = listOf("done", "another")
+    }
+}
 
 /** What one tick did: the notifications to show, the log lines, and when the next one should run. */
 data class TickReport(val notices: List<Notice>, val lines: List<String>, val nextWake: Instant)
@@ -63,7 +75,9 @@ data class TickReport(val notices: List<Notice>, val lines: List<String>, val ne
  *    stale fences are skipped; a lapse stops task check-ins.
  * 2. Daily jobs: morning plan (Today's 3 is picked by code), mid-day check-ins, evening review, re-entry after a
  *    lapse, the week's and tomorrow's meetings. Nothing on Shabbat and holidays.
- * 3. Focus sessions: one nobody answered is recorded as paused (the end check-in itself comes with Phase E).
+ * 3. Focus sessions (Phase E): a session whose time is up gets its end check-in (a template, urgent, with ✓ Done ·
+ *    ▶ Another round · Stop), within the guardrails that apply to it; one nobody answered 15 minutes after that is
+ *    recorded as paused. While a session runs, other check-ins wait until it ends + 10 minutes (the focus hold).
  *
  * The words come from the coach (llm/Coach.kt, Phase D): the LLM when it answers, the server's templates (Templates)
  * when it doesn't or when [llm] is null. A tick runs in three steps so a slow model never holds the database:
@@ -123,6 +137,7 @@ class Ticker(private val store: Store, llm: Llm? = null, prompts: Prompts? = nul
         suspend fun plan(dailyJobs: Boolean): List<Pending> {
             closeFinishedMeetings()
             closeSilentSessions()
+            sessionEnds()
             val out = mutableListOf<Pending>()
             contactTasks()?.let { out += it }
             if (dailyJobs) for ((job, key) in dueDailyJobs()) planDailyJob(job, key)?.let { out += it }
@@ -214,7 +229,7 @@ class Ticker(private val store: Store, llm: Llm? = null, prompts: Prompts? = nul
             val lastReply = lastUserReplyAt()
             val (level, alarmS) = if (p.avoided) NORMAL to 0L else messageLevel(group, lastReply)
             notices += Notice(msg.id, Templates.pushTitle(group), w.text, level, alarmS,
-                if (Templates.hasTaskButtons(group)) group[0].id else null, w.lang)
+                if (Templates.hasTaskButtons(group)) group[0].id else null, w.lang, alarmEveryMin = s.int("pushover_alarm_retry_min"))
             log("Sent message #${msg.id} (${w.kind}, ${LEVELS[level]}) about " + group.joinToString { "#${it.id} \"${it.title}\"" } +
                 (if (p.avoided) " (avoided: the reason message)" else "") + (w.model?.let { ", written by $it" } ?: ""))
             for (t in group) afterContact(t, alarmed = level == ALARM, lastReply = lastReply, avoided = p.avoided, followup = w.followups[t.id])
@@ -227,7 +242,7 @@ class Ticker(private val store: Store, llm: Llm? = null, prompts: Prompts? = nul
             if (level < ALARM) return level to 0L
             val period = rest?.let { RestCalendar.nextPeriod(now, it) }
             val window = Logic.alarmWindowS(local, s.quietStart, period?.start)
-            if (window < ALARM_RETRY_MIN * 60) return URGENT to 0L // quiet hours or Shabbat start too soon for an alarm
+            if (window < s.int("pushover_alarm_retry_min") * 60L) return URGENT to 0L // no time for even one repeat
             return ALARM to window
         }
 
@@ -488,10 +503,41 @@ class Ticker(private val store: Store, llm: Llm? = null, prompts: Prompts? = nul
         suspend fun closeSilentSessions() {
             for (sess in dao.allOpenSessions()) {
                 if (Logic.sessionSilent(sess, now)) {
-                    store.putSession(sess.copy(endedAt = Times.format(Logic.sessionEndAt(sess)), outcome = "paused"))
-                    store.addEvent(sess.taskId, "session_ended", "paused")
+                    store.closeSession(sess, "paused", Logic.sessionEndAt(sess))
                     log("Focus session #${sess.id} on task #${sess.taskId}: no answer, recorded as paused")
                 }
+            }
+        }
+
+        /**
+         * scheduler.plan_sessions + _send_session_end: a session whose time is up gets ONE check-in, a template (no
+         * LLM, so it's sent right here), urgent, with ✓ Done · ▶ Another round · Stop. Quiet hours, Shabbat and the
+         * daily cap still hold; the gap and the per-task cap don't (you asked for it). An end that can't be sent waits
+         * for the next tick, and after 15 minutes of silence the session is recorded as paused.
+         */
+        suspend fun sessionEnds() {
+            val due = dao.allOpenSessions().filter { Logic.sessionEndDue(it, now) }.sortedBy { it.id }
+            if (due.isEmpty()) return
+            for (sess in due) {
+                val task = dao.task(sess.taskId)
+                if (task == null || task.status != OPEN) {
+                    store.closeSession(sess, "stopped")
+                    log("Focus session #${sess.id}: its task is closed, session closed")
+                    continue
+                }
+                val asContact = TaskRow(task.id, title = task.title, kind = "session", remindRequested = true, createdAt = task.createdAt)
+                val holds = Logic.contactReasons(asContact, contactState(), local, g)
+                if (holds.isNotEmpty()) {
+                    log("Held the end of focus session #${sess.id} on #${task.id} \"${task.title}\": " + holds.joinToString("; ") { it.reason })
+                    continue
+                }
+                store.putSession(sess.copy(endSentAt = Times.format(now)))
+                val lang = Logic.chipLang(lastUserText(), task.title)
+                val text = Logic.sessionText("session_end", task, sess.plannedMin, lang)
+                val chips = Logic.chipsJson(Logic.chipsFor("session_end", null), lang, task.id)
+                val msg = store.addMessage("assistant", text, "session", listOf(task.id), Templates.encodeChips(chips))
+                notices += Notice(msg.id, "⏱ ${task.title}", text, URGENT, taskId = task.id, lang = lang, actions = Notice.SESSION_END_ACTIONS)
+                log("Sent the end of focus session #${sess.id} (${sess.plannedMin} min) on #${task.id} \"${task.title}\" (message #${msg.id}, urgent)")
             }
         }
 
@@ -549,9 +595,6 @@ class Ticker(private val store: Store, llm: Llm? = null, prompts: Prompts? = nul
 
         /** The alarm sleeps at most this long; the 15-minute safety net runs anyway. */
         val MAX_SLEEP: Duration = Duration.ofHours(6)
-
-        /** An alarm that couldn't ring even this long (quiet hours or Shabbat about to start) is urgent instead. */
-        const val ALARM_RETRY_MIN = 2
 
         /** thread.PROACTIVE_KINDS: messages the assistant sent on its own (they count toward the daily cap). */
         val PROACTIVE_KINDS = listOf("nudge", "reminder", "meeting", "morning", "checkin", "evening", "session", "reentry")

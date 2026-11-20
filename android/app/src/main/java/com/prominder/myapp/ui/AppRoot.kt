@@ -157,6 +157,9 @@ private fun MainRoutes(app: ReminderApp, auth: AuthRepository, session: Session)
         app.scope.launch { app.chat.sendAndWait("Shared with the app:\n" + text.take(1900)) }
     }
     LaunchedEffect(focusInput) { if (focusInput > 0) stack = listOf(Route.Home.key) }
+    // ▶ Start on a notification, or a tap on the countdown: the timer, over the chat.
+    val openSession by app.openSession.collectAsStateWithLifecycle()
+    LaunchedEffect(openSession) { if (openSession > 0) stack = listOf(Route.Home.key, Route.Session.key) }
 
     LaunchedEffect(Unit) {
         // Right after the first login, the checklist opens by itself, once.
@@ -204,6 +207,7 @@ private fun MainRoutes(app: ReminderApp, auth: AuthRepository, session: Session)
             onBack = ::back)
         is Route.EditTask -> TaskFormRoute(app.store, route.id, null, onSaved = { back() }, onBack = ::back)
         Route.Settings -> SettingsRoute(app.store, ::back)
+        Route.Session -> SessionRoute(app.store, onNotice = { notice = it }, onBack = ::back)
         Route.Checklist -> ChecklistScreen(
             items = items,
             onOpen = { id ->
