@@ -9,7 +9,7 @@ import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** Tool argument validation and text tool-call parsing, ported from backend/tests/test_tools.py. */
+/** Tool argument validation and text tool-call parsing. The cases come from test_tools.py (the Python server's tests, removed in b09e82e). */
 class ToolArgsTest {
     private val names = setOf("add_task", "schedule_followup", "log_interaction")
 

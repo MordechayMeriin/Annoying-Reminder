@@ -1,5 +1,6 @@
 package com.prominder.myapp.notify
 
+import com.prominder.myapp.data.ChipAction
 import android.Manifest
 import android.app.Notification
 import android.app.PendingIntent
@@ -16,7 +17,8 @@ import com.prominder.myapp.alarm.AlarmActivity
 import com.prominder.myapp.alarm.AlarmReceiver
 import com.prominder.myapp.alarm.AlarmRings
 import com.prominder.myapp.diag.Diag
-import com.prominder.myapp.logic.Logic
+import com.prominder.myapp.logic.ChipRules
+import com.prominder.myapp.logic.Loudness
 import com.prominder.myapp.remind.Notice
 import java.time.format.DateTimeFormatter
 
@@ -108,7 +110,7 @@ object Notifier {
      * opening the app. Either counts as you answering.
      */
     fun showNotice(context: Context, notice: Notice): Boolean {
-        if (notice.level == Logic.ALARM) {
+        if (notice.level == Loudness.ALARM) {
             if (!canNotify(context)) {
                 Diag.log("notify", "Couldn't show message #${notice.messageId}: notifications are off")
                 return false
@@ -117,7 +119,7 @@ object Notifier {
             return true
         }
         val id = ID_MESSAGES + (notice.messageId % 1_000_000).toInt()
-        val urgent = notice.level == Logic.URGENT
+        val urgent = notice.level == Loudness.URGENT
         val b = NotificationCompat.Builder(context, if (urgent) Channels.URGENT else Channels.NORMAL)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(notice.title)
@@ -193,8 +195,8 @@ object Notifier {
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setTimeoutAfter((info.endsAt - now).coerceAtLeast(1_000L))
             .setContentIntent(openSession(context))
-            .addAction(0, Logic.chipLabel("done", info.lang), sessionEnd(context, info.sessionId, "done"))
-            .addAction(0, Logic.chipLabel("stop", info.lang), sessionEnd(context, info.sessionId, "stopped"))
+            .addAction(0, ChipRules.chipLabel("done", info.lang), sessionEnd(context, info.sessionId, "done"))
+            .addAction(0, ChipRules.chipLabel("stop", info.lang), sessionEnd(context, info.sessionId, "stopped"))
             .build()
         post(context, ID_SESSION, n)
     }
@@ -256,19 +258,19 @@ object Notifier {
             "start", "another" -> PendingIntent.getActivity(
                 context, code,
                 Intent(context, MainActivity::class.java)
-                    .setAction(if (action == "start") MainActivity.ACTION_START_SESSION else MainActivity.ACTION_ANOTHER_ROUND)
+                    .setAction(if (action == ChipAction.START) MainActivity.ACTION_START_SESSION else MainActivity.ACTION_ANOTHER_ROUND)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
                     .putExtra(AlarmReceiver.EXTRA_TASK_ID, taskId).putExtra(AlarmReceiver.EXTRA_NOTIFICATION_ID, notificationId),
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
             else -> PendingIntent.getBroadcast(
                 context, code,
-                Intent(context, AlarmReceiver::class.java).setAction(if (action == "later") AlarmReceiver.ACTION_LATER else AlarmReceiver.ACTION_DONE)
+                Intent(context, AlarmReceiver::class.java).setAction(if (action == ChipAction.LATER) AlarmReceiver.ACTION_LATER else AlarmReceiver.ACTION_DONE)
                     .putExtra(AlarmReceiver.EXTRA_TASK_ID, taskId).putExtra(AlarmReceiver.EXTRA_NOTIFICATION_ID, notificationId),
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
         }
-        val label = Logic.chipLabel(if (action == "start") "start5" else action, lang)
+        val label = ChipRules.chipLabel(if (action == ChipAction.START) "start5" else action, lang)
         return NotificationCompat.Action.Builder(0, label, intent).build()
     }
 

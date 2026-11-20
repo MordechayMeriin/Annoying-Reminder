@@ -1,5 +1,7 @@
 package com.prominder.myapp.llm
 
+import com.prominder.myapp.data.CANCELLED
+import com.prominder.myapp.data.TaskKind
 import com.prominder.myapp.data.AppSettings
 import com.prominder.myapp.data.OPEN
 import com.prominder.myapp.data.Store
@@ -7,7 +9,13 @@ import com.prominder.myapp.data.TaskLists
 import com.prominder.myapp.data.TaskRow
 import com.prominder.myapp.data.Times
 import com.prominder.myapp.diag.Diag
-import com.prominder.myapp.logic.Logic
+import com.prominder.myapp.logic.ChipRules
+import com.prominder.myapp.logic.Coaching
+import com.prominder.myapp.logic.Focus
+import com.prominder.myapp.logic.FocusSessions
+import com.prominder.myapp.logic.Pressure
+import com.prominder.myapp.logic.Schedule
+import com.prominder.myapp.logic.Texts
 import com.prominder.myapp.remind.Templates
 import com.prominder.myapp.remind.Ticker
 import java.time.Duration
@@ -38,7 +46,7 @@ data class CheckinText(
     val text: String,
     val kind: String,
     val title: String,
-    val chips: List<Logic.ChipJson>,
+    val chips: List<ChipRules.ChipJson>,
     val lang: String,
     val followups: Map<Long, Instant> = emptyMap(),
     /** The model that wrote it; null for a template. */
@@ -69,15 +77,15 @@ class Coach(private val store: Store, private val llm: Llm?, private val prompts
         val s = store.settings()
         val zone = s.zone
         val local = now.atZone(zone)
-        val today = Logic.focusDay(local, s.dayResetTime)
-        val meetings = group.filter { it.kind == "meeting" && Times.parseOrNull(it.dueAt) != null }
-        val fences = group.filter { it.kind == "fence" }
+        val today = Schedule.focusDay(local, s.dayResetTime)
+        val meetings = group.filter { it.kind == TaskKind.MEETING && Times.parseOrNull(it.dueAt) != null }
+        val fences = group.filter { it.kind == TaskKind.FENCE }
         val others = group.filter { it !in meetings && it !in fences }
-        val firstTask = group.firstOrNull { it.kind == "task" }
-        val lang = Logic.chipLang(reads.lastUserText(), firstTask?.title)
-        val stages = group.filter { it.kind == "task" }.associate { it.id to Logic.taskStage(it, reads.eventCounts(it, 7), today) }
+        val firstTask = group.firstOrNull { it.kind == TaskKind.TASK }
+        val lang = ChipRules.chipLang(reads.lastUserText(), firstTask?.title)
+        val stages = group.filter { it.kind == TaskKind.TASK }.associate { it.id to Coaching.taskStage(it, reads.eventCounts(it, 7), today) }
         val chips = firstTask?.let {
-            Logic.chipsJson(Logic.chipsFor(if (avoided) "avoided" else "checkin", stages[it.id]), lang, it.id)
+            ChipRules.chipsJson(ChipRules.chipsFor(if (avoided) "avoided" else "checkin", stages[it.id]), lang, it.id)
         }.orEmpty()
 
         var body = ""
@@ -98,29 +106,29 @@ class Coach(private val store: Store, private val llm: Llm?, private val prompts
             }
         }
         if (model == null) {
-            body = if (avoided && firstTask != null) Logic.text("avoid_ask", lang, "title" to firstTask.title)
+            body = if (avoided && firstTask != null) Texts.text("avoid_ask", lang, "title" to firstTask.title)
             else others.joinToString("\n") { Templates.templateLine(it, now, zone) }
         }
         val head = (meetings.map { Templates.meetingLine(it, now, zone) } + fences.map { Templates.fenceLine(it, zone, lang) }).joinToString("\n")
-        val text = Logic.clip(listOf(head, body.trim()).filter { it.isNotEmpty() }.joinToString("\n"), Templates.MAX_TEXT)
+        val text = Texts.clip(listOf(head, body.trim()).filter { it.isNotEmpty() }.joinToString("\n"), Templates.MAX_TEXT)
         return CheckinText(text, Templates.messageKind(group), Templates.pushTitle(group), chips, lang, followups, model)
     }
 
     private suspend fun checkinPrompt(
-        group: List<TaskRow>, sentToday: Map<Long, Int>, avoided: Boolean, chips: List<Logic.ChipJson>, stages: Map<Long, String>,
+        group: List<TaskRow>, sentToday: Map<Long, Int>, avoided: Boolean, chips: List<ChipRules.ChipJson>, stages: Map<Long, String>,
         lang: String, local: ZonedDateTime, today: LocalDate, s: AppSettings, reads: TickReads,
     ): MutableList<kotlinx.serialization.json.JsonObject> {
         val now = local.toInstant()
         val zone = local.zone
-        val start = Logic.dayStart(local, s.dayResetTime).toInstant()
+        val start = Schedule.dayStart(local, s.dayResetTime).toInstant()
         val ids = group.map { it.id }
         val facts = LlmContext.loadFacts(dao, group, now)
         val playbooks = if (avoided) listOf("avoiding")
-        else Logic.selectPlaybooks(null, stages.values, if (facts.stuckSince(ids, start)) setOf("stuck") else emptySet())
+        else Coaching.selectPlaybooks(null, stages.values, if (facts.stuckSince(ids, start)) setOf("stuck") else emptySet())
         val blocks = group.zip(LlmContext.taskContexts(group, local, facts, sentToday, today)).map { (t, block) ->
             when {
-                t.kind == "meeting" && t.dueAt != null -> block + "\n  (Shown above your text by the system: ${Templates.meetingLine(t, now, zone)})"
-                t.kind == "fence" -> block + "\n  (A hard stop. Shown above your text by the system: ${Templates.fenceLine(t, zone, lang)})"
+                t.kind == TaskKind.MEETING && t.dueAt != null -> block + "\n  (Shown above your text by the system: ${Templates.meetingLine(t, now, zone)})"
+                t.kind == TaskKind.FENCE -> block + "\n  (A hard stop. Shown above your text by the system: ${Templates.fenceLine(t, zone, lang)})"
                 t.remindRequested -> block + "\n  (The user asked to be reminded now.)"
                 else -> block
             }
@@ -149,20 +157,20 @@ class Coach(private val store: Store, private val llm: Llm?, private val prompts
         val s = store.settings()
         val zone = s.zone
         val local = now.atZone(zone)
-        val today = Logic.focusDay(local, s.dayResetTime)
+        val today = Schedule.focusDay(local, s.dayResetTime)
         val open = reads.openTasks()
         val endOfDay = local.toLocalDate().plusDays(1).atStartOfDay(zone).toInstant()
         val todayList = TaskLists.today(open, endOfDay)
-        val lang = Logic.chipLang(reads.lastUserText(), todayList.ifEmpty { open }.take(5).joinToString(" ") { it.title })
+        val lang = ChipRules.chipLang(reads.lastUserText(), todayList.ifEmpty { open }.take(5).joinToString(" ") { it.title })
         if (job == "morning") return morning(sunday, now, local, today, open, endOfDay, lang, reads, timeoutMs)
 
         val (focus, focusDone) = reads.focusToday(today)
         val firstOpen = focus.firstOrNull { it.id !in focusDone && it.status == OPEN }
         if (job == "checkin" && todayList.isEmpty() && firstOpen == null) return null
-        val chips = Logic.chipsJson(Logic.chipsFor(Templates.JOB_CHIPS.getValue(job), null), lang, firstOpen?.id)
-        val start = Logic.dayStart(local, s.dayResetTime).toInstant()
+        val chips = ChipRules.chipsJson(ChipRules.chipsFor(Templates.JOB_CHIPS.getValue(job), null), lang, firstOpen?.id)
+        val start = Schedule.dayStart(local, s.dayResetTime).toInstant()
         val sessions = dao.sessionsSince(Times.format(start))
-        val sessionStats = sessions.size to sessions.sumOf { Logic.actualMinutes(it, now) }
+        val sessionStats = sessions.size to sessions.sumOf { FocusSessions.actualMinutes(it, now) }
         val doneIds = reads.doneSince(start)
 
         if (canWrite(timeoutMs)) {
@@ -176,7 +184,7 @@ class Coach(private val store: Store, private val llm: Llm?, private val prompts
                 )
                 llm!!.complete(messages, emptyList(), 0.5, timeoutMs / 1000.0).also { r -> r.model?.let { models += it } }.content.trim()
             }
-            if (!written.isNullOrEmpty()) return Ticker.Daily(Logic.clip(written, Templates.MAX_TEXT), chips, model = models.lastOrNull())
+            if (!written.isNullOrEmpty()) return Ticker.Daily(Texts.clip(written, Templates.MAX_TEXT), chips, model = models.lastOrNull())
         }
         if (job == "checkin" && firstOpen != null) {
             val step = firstOpen.nextAction?.takeIf { it.isNotEmpty() } ?: firstOpen.title
@@ -197,10 +205,10 @@ class Coach(private val store: Store, private val llm: Llm?, private val prompts
     ): Ticker.Daily {
         val s = store.settings()
         val zone = local.zone
-        val suggestedIds = Logic.pickFocus(open, local)
+        val suggestedIds = Focus.pickFocus(open, local)
         val byId = open.associateBy { it.id }
         val suggested = suggestedIds.mapNotNull { byId[it] }
-        val meetings = Logic.meetingOccurrences(reads.meetingsBetween(now, endOfDay), now, endOfDay, zone)
+        val meetings = Schedule.meetingOccurrences(reads.meetingsBetween(now, endOfDay), now, endOfDay, zone)
         val stale = if (sunday) reads.staleTasks() else emptyList()
 
         var text = ""
@@ -210,15 +218,15 @@ class Coach(private val store: Store, private val llm: Llm?, private val prompts
             val models = mutableListOf<String>()
             val ctx = ToolContext("morning", now)
             // The chips name "the first one": as suggested, until the LLM changes the pick.
-            val preview = Logic.chipsJson(Logic.chipsFor("morning", null), lang, suggestedIds[0])
+            val preview = ChipRules.chipsJson(ChipRules.chipsFor("morning", null), lang, suggestedIds[0])
             val written = attempt("Morning plan", timeoutMs * 2) {
-                val start = Logic.dayStart(local, s.dayResetTime).toInstant()
+                val start = Schedule.dayStart(local, s.dayResetTime).toInstant()
                 val doneIds = reads.doneSince(start)
                 val sessions = dao.sessionsSince(Times.format(start))
                 val snapshot = snapshot("morning", local, today, open, TaskLists.today(open, endOfDay), doneIds,
-                    sessions.size to sessions.sumOf { Logic.actualMinutes(it, now) }, emptyList<TaskRow>() to emptySet(), suggested, meetings)
+                    sessions.size to sessions.sumOf { FocusSessions.actualMinutes(it, now) }, emptyList<TaskRow>() to emptySet(), suggested, meetings)
                 val messages = mutableListOf(
-                    message("system", prompts!!.render("daily_morning", Logic.selectPlaybooks("morning", signals = if (sunday) setOf("sunday") else emptySet()),
+                    message("system", prompts!!.render("daily_morning", Coaching.selectPlaybooks("morning", signals = if (sunday) setOf("sunday") else emptySet()),
                         preview.map { it.label }, preferences(), timeValues(local))),
                     message("user", snapshot + "\n\nToday's conversation so far:\n" + todayConversation(local, s, 12)),
                 )
@@ -227,24 +235,24 @@ class Coach(private val store: Store, private val llm: Llm?, private val prompts
             }
             picked = ctx.focus
             if (!written.isNullOrBlank()) {
-                text = Logic.clip(written.trim(), Templates.MAX_TEXT)
+                text = Texts.clip(written.trim(), Templates.MAX_TEXT)
                 model = models.lastOrNull()
             }
         }
         val focus: List<TaskRow> = picked?.let { ids -> dao.tasks(ids).associateBy { it.id }.let { m -> ids.mapNotNull { m[it] } } } ?: suggested
         val ids = focus.map { it.id }
         if (model == null) text = Templates.morningTemplate(focus, meetings, zone)
-        var chips = if (ids.isNotEmpty()) Logic.chipsJson(Logic.chipsFor("morning", null), lang, ids[0]) else emptyList()
+        var chips = if (ids.isNotEmpty()) ChipRules.chipsJson(ChipRules.chipsFor("morning", null), lang, ids[0]) else emptyList()
         var staleIds = emptyList<Long>()
         if (sunday) {
-            val wins = reads.doneSince(now.minus(Duration.ofDays(Logic.WEEK_WINS_DAYS))).size
+            val wins = reads.doneSince(now.minus(Duration.ofDays(Pressure.WEEK_WINS_DAYS))).size
             val offered = stale.filter { it.id !in ids } // not "do it today" and "drop it?" at once
             val extra = mutableListOf<String>()
-            if (wins > 0) extra += Logic.text(if (wins == 1) "wins_week_1" else "wins_week", lang, "n" to wins)
-            if (offered.isNotEmpty()) extra += Logic.text("stale", lang, "titles" to offered.joinToString(" · ") { it.title })
+            if (wins > 0) extra += Texts.text(if (wins == 1) "wins_week_1" else "wins_week", lang, "n" to wins)
+            if (offered.isNotEmpty()) extra += Texts.text("stale", lang, "titles" to offered.joinToString(" · ") { it.title })
             if (extra.isNotEmpty()) text += "\n\n" + extra.joinToString("\n")
             if (offered.isNotEmpty()) {
-                chips = chips + Logic.chipsJson(Logic.chipsFor("sunday", null), lang, null, offered.map { it.id })
+                chips = chips + ChipRules.chipsJson(ChipRules.chipsFor("sunday", null), lang, null, offered.map { it.id })
                 staleIds = offered.map { it.id }
             }
         }
@@ -258,27 +266,27 @@ class Coach(private val store: Store, private val llm: Llm?, private val prompts
     suspend fun reentry(now: Instant, reads: TickReads, timeoutMs: Long): Ticker.Daily {
         val s = store.settings()
         val local = now.atZone(s.zone)
-        val open = TaskLists.all(reads.openTasks().filter { it.kind == "task" && it.parentId == null })
-        val lang = Logic.chipLang(reads.lastUserText(), open.take(5).joinToString(" ") { it.title })
+        val open = TaskLists.all(reads.openTasks().filter { it.kind == TaskKind.TASK && it.parentId == null })
+        val lang = ChipRules.chipLang(reads.lastUserText(), open.take(5).joinToString(" ") { it.title })
         val overdue = open.any { t -> Times.parseOrNull(t.dueAt)?.let { it < now } == true }
-        val chips = Logic.chipsJson(Logic.chipsFor("reentry", null), lang, null).filter { overdue || it.id != "move_overdue" }
+        val chips = ChipRules.chipsJson(ChipRules.chipsFor("reentry", null), lang, null).filter { overdue || it.id != "move_overdue" }
         if (canWrite(timeoutMs)) {
             val models = mutableListOf<String>()
             val written = attempt("Re-entry message", timeoutMs) {
                 val messages = listOf(
-                    message("system", prompts!!.render("daily_reentry", Logic.selectPlaybooks("reentry"), chips.map { it.label }, preferences(),
+                    message("system", prompts!!.render("daily_reentry", Coaching.selectPlaybooks("reentry"), chips.map { it.label }, preferences(),
                         timeValues(local))),
                     message("user", "The user has been away for a few days. Some of their open tasks, only so you know their language " +
                         "(don't list, name or count them):\n" + open.take(5).joinToString("\n") { "- ${it.title}" }.ifEmpty { "(none)" }),
                 )
                 llm!!.complete(messages, emptyList(), 0.5, timeoutMs / 1000.0).also { r -> r.model?.let { models += it } }.content.trim()
             }
-            if (!written.isNullOrEmpty()) return Ticker.Daily(Logic.clip(written, 300), chips, kind = "reentry", model = models.lastOrNull())
+            if (!written.isNullOrEmpty()) return Ticker.Daily(Texts.clip(written, 300), chips, kind = "reentry", model = models.lastOrNull())
         }
-        return Ticker.Daily(Logic.text("reentry", lang), chips, kind = "reentry")
+        return Ticker.Daily(Texts.text("reentry", lang), chips, kind = "reentry")
     }
 
-    // ------------------------------------------------------------ the facts for a daily message (coach._daily_facts)
+    // ------------------------------------------------------------ the facts for a daily message
 
     private suspend fun snapshot(
         job: String, local: ZonedDateTime, today: LocalDate, open: List<TaskRow>, todayList: List<TaskRow>, doneIds: List<Long>,
@@ -292,14 +300,14 @@ class Coach(private val store: Store, private val llm: Llm?, private val prompts
             val counts = LlmContext.eventCounts(dao, shown, now, 7)
             parts += "Open for today (incl. overdue):\n" + shown.joinToString("\n") { LlmContext.formatTask(it, local, counts = counts[it.id].orEmpty(), today = today) }
         }
-        val done = dao.tasks(doneIds).filter { it.status != "cancelled" }.associateBy { it.id }.let { m -> doneIds.mapNotNull { m[it] } }
+        val done = dao.tasks(doneIds).filter { it.status != CANCELLED }.associateBy { it.id }.let { m -> doneIds.mapNotNull { m[it] } }
         parts += "Done today (steps count too):\n" +
             done.joinToString("\n") { "- ${it.title}" + if (it.parentId != null) " (a step)" else "" }.ifEmpty { "(nothing yet)" }
         if (sessions.first > 0) parts += "Focus sessions today: ${sessions.first} (${sessions.second} min)"
         val endOfDay = local.toLocalDate().plusDays(1).atStartOfDay(zone).toInstant()
         val upcoming = TaskLists.upcoming(open, endOfDay)
         if (upcoming.isNotEmpty()) parts += "Next 7 days:\n" + LlmContext.formatOpenItems(upcoming, local, emptySet())
-        val undated = TaskLists.all(open).filter { it.dueAt == null && it.parentId == null && it.kind == "task" }
+        val undated = TaskLists.all(open).filter { it.dueAt == null && it.parentId == null && it.kind == TaskKind.TASK }
         if (undated.isNotEmpty()) parts += "Open without a date:\n" + LlmContext.formatOpenItems(undated, local, emptySet())
         if (job == "morning") {
             parts += "Suggested Today's 3 (the code's pick: overdue, then due today, then priority):\n" + focusLines(suggested, emptySet()).ifEmpty { "(no open tasks)" }
@@ -315,7 +323,7 @@ class Coach(private val store: Store, private val llm: Llm?, private val prompts
     }.joinToString("\n")
 
     private suspend fun todayConversation(local: ZonedDateTime, s: AppSettings, limit: Int): String =
-        LlmContext.formatMessages(LlmContext.since(dao, Logic.dayStart(local, s.dayResetTime).toInstant(), limit), local).ifEmpty { "(nothing yet)" }
+        LlmContext.formatMessages(LlmContext.since(dao, Schedule.dayStart(local, s.dayResetTime).toInstant(), limit), local).ifEmpty { "(nothing yet)" }
 
     private suspend fun preferences(): List<String> = dao.preferences().map { it.text }
 

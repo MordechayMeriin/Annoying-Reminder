@@ -1,5 +1,6 @@
 package com.prominder.myapp.llm
 
+import com.prominder.myapp.data.TaskKind
 import com.prominder.myapp.diag.Diag
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -11,7 +12,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
-/** What the chat shows about the turn in progress (the web app's status area and delivery line). */
+/** What the chat shows about the turn in progress (the status under the chat and the delivery line). */
 data class ChatTurn(
     /** The text being sent; null when nothing is. */
     val sending: String? = null,
@@ -103,10 +104,10 @@ class Chat(private val scope: CoroutineScope, private val agent: () -> Agent) {
     }
 
     companion object {
-        /** The status line for a tool call (the web app's TOOL_LABEL). */
+        /** The status line for a tool call. */
         fun toolLabel(t: ToolStatus): String {
             val (what, which) = when (t.name) {
-                "add_task" -> (if (t.kind == "meeting") "📅 Saving a new meeting" else "📝 Writing a new task") to t.title
+                "add_task" -> (if (t.kind == TaskKind.MEETING) "📅 Saving a new meeting" else "📝 Writing a new task") to t.title
                 "update_setting" -> "⚙️ Changing a setting" to null
                 "remember_preference" -> "🧠 Remembering that" to null
                 "list_tasks" -> "🔎 Checking your tasks" to null

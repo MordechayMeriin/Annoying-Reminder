@@ -1,5 +1,6 @@
 package com.prominder.myapp.ui
 
+import com.prominder.myapp.data.TaskKind
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
@@ -47,7 +48,7 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 /**
- * Add or edit a task by hand. Only the title is needed; everything else is optional, as on the web app,
+ * Add or edit a task by hand. Only the title is needed; everything else is optional,
  * where the assistant filled these in from a sentence (it comes back in Phase D).
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -78,7 +79,7 @@ fun TaskFormScreen(
         val est = estimate.trim().takeIf { it.isNotEmpty() }?.let { it.toIntOrNull() ?: -1 }
         error = when {
             title.isBlank() -> "Give it a title."
-            kind != "task" && date == null -> "A ${Format.KIND_LABELS[kind]?.lowercase()} needs a date and time."
+            kind != TaskKind.TASK && date == null -> "A ${Format.KIND_LABELS[kind]?.lowercase()} needs a date and time."
             est != null && est !in 1..10000 -> "The estimate is minutes, 1 to 10000."
             else -> null
         }
@@ -107,14 +108,14 @@ fun TaskFormScreen(
             }
         }
         if (date == null) Muted("No date: it stays quiet until it's in Today's 3 or you tap ⏰ Later.", Modifier.padding(top = 4.dp))
-        if (kind == "meeting" && date != null) Muted("You're reminded before it starts (⚙ Settings → Meetings).", Modifier.padding(top = 4.dp))
+        if (kind == TaskKind.MEETING && date != null) Muted("You're reminded before it starts (⚙ Settings → Meetings).", Modifier.padding(top = 4.dp))
 
         if (date != null) {
             SectionTitle("Repeat")
             Chips(mapOf<String?, String>(null to "No") + Format.RECURRENCE_LABELS, recurrence) { recurrence = it }
         }
 
-        if (kind == "task") {
+        if (kind == TaskKind.TASK) {
             SectionTitle("How important")
             Chips(Format.PRIORITY_LABELS, priority) { priority = it }
         }

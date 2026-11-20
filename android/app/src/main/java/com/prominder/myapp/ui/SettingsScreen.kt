@@ -49,7 +49,7 @@ private val WEEKDAY_LABELS = linkedMapOf("sun" to "Sunday", "mon" to "Monday", "
     "thu" to "Thursday", "fri" to "Friday", "sat" to "Saturday")
 
 /**
- * ⚙ Settings: the web app's settings (stored the same way, and backed up), minus Pushover's account and sounds and
+ * ⚙ Settings: every setting the app keeps (backed up with your data), minus Pushover's account and sounds and
  * browser notifications, which the phone's own notification channels replace (the loudness rules stay, under
  * "How loud"). Plus what you asked of the assistant.
  */

@@ -1,7 +1,9 @@
 package com.prominder.myapp.remind
 
+import com.prominder.myapp.logic.ChipRules
+import com.prominder.myapp.logic.Texts
+import com.prominder.myapp.data.TaskKind
 import com.prominder.myapp.data.TaskRow
-import com.prominder.myapp.logic.Logic
 import com.prominder.myapp.logic.due
 import java.time.Duration
 import java.time.Instant
@@ -12,8 +14,8 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 /**
- * The words of the proactive messages when no LLM writes them, ported from backend/app/coach.py's templates
- * (template_line, meeting_line, fence_line, morning / evening / mid-day templates, the meeting digests). Meeting
+ * The words of the proactive messages when no LLM writes them: a task's line, a meeting's line, a hard stop's line,
+ * the morning / evening / mid-day templates and the meeting digests. Meeting
  * facts always come from code. Phase D puts the LLM in front of these; they stay as the fallback.
  */
 object Templates {
@@ -34,8 +36,8 @@ object Templates {
 
     /** meeting | reminder | nudge: a mixed group counts as a nudge (the per-task cap only gets stricter). */
     fun messageKind(group: List<TaskRow>): String = when {
-        group.all { it.kind == "meeting" } -> "meeting"
-        group.all { it.kind == "meeting" || it.kind == "fence" || it.remindRequested } -> "reminder"
+        group.all { it.kind == TaskKind.MEETING } -> "meeting"
+        group.all { it.kind == TaskKind.MEETING || it.kind == TaskKind.FENCE || it.remindRequested } -> "reminder"
         else -> "nudge"
     }
 
@@ -51,12 +53,12 @@ object Templates {
     }
 
     fun fenceLine(task: TaskRow, zone: ZoneId, lang: String = "en"): String =
-        Logic.text("fence", lang, "at" to (task.due?.atZone(zone)?.format(HHMM) ?: ""), "title" to task.title)
+        Texts.text("fence", lang, "at" to (task.due?.atZone(zone)?.format(HHMM) ?: ""), "title" to task.title)
 
     /** The fixed text for one task: the next action first, no counting failures. */
     fun templateLine(task: TaskRow, now: Instant, zone: ZoneId): String {
-        if (task.kind == "meeting" && task.due != null) return meetingLine(task, now, zone)
-        if (task.kind == "fence") return fenceLine(task, zone)
+        if (task.kind == TaskKind.MEETING && task.due != null) return meetingLine(task, now, zone)
+        if (task.kind == TaskKind.FENCE) return fenceLine(task, zone)
         val title = PRIORITY_PREFIX[task.priority].orEmpty() + task.title
         val due = task.due
         val whenText = when {
@@ -77,13 +79,13 @@ object Templates {
         val first = group.first()
         val icon = mapOf("meeting" to "📅 ", "fence" to "⛔ ")[first.kind] ?: PRIORITY_PREFIX[first.priority].orEmpty()
         var title = icon + first.title
-        if (first.kind == "task" && !first.nextAction.isNullOrEmpty()) title += ": ${first.nextAction}"
-        title = Logic.clip(title, PUSH_TITLE_MAX)
+        if (first.kind == TaskKind.TASK && !first.nextAction.isNullOrEmpty()) title += ": ${first.nextAction}"
+        title = Texts.clip(title, PUSH_TITLE_MAX)
         return if (group.size == 1) title else "$title (+${group.size - 1})"
     }
 
     /** The notification's buttons, for a check-in about exactly one task: ✓ Done and Later. */
-    fun hasTaskButtons(group: List<TaskRow>): Boolean = group.size == 1 && group[0].kind == "task"
+    fun hasTaskButtons(group: List<TaskRow>): Boolean = group.size == 1 && group[0].kind == TaskKind.TASK
 
     /** The morning plan without the LLM: Today's 3 (with the first step of #1), then meetings. */
     fun morningTemplate(focus: List<TaskRow>, meetings: List<Pair<Instant, TaskRow>>, zone: ZoneId): String {
@@ -123,7 +125,7 @@ object Templates {
             (listOf("📅 Tomorrow (${tomorrow.format(DAY_DATE)}):") + occurrences.map { (w, m) -> "${w.atZone(zone).format(HHMM)} — ${m.title}" })
                 .joinToString("\n")
         }
-        return Triple(Logic.clip(text, MAX_TEXT), MEETING_JOB_TITLES.getValue(job), occurrences.map { it.second.id }.distinct())
+        return Triple(Texts.clip(text, MAX_TEXT), MEETING_JOB_TITLES.getValue(job), occurrences.map { it.second.id }.distinct())
     }
 
     private fun dayLabel(local: ZonedDateTime, today: LocalDate): String = when (local.toLocalDate()) {
@@ -132,7 +134,7 @@ object Templates {
         else -> local.format(DAY_DATE)
     }
 
-    /** Chips as the server stored them: Python's json.dumps(…, ensure_ascii=False). */
-    fun encodeChips(chips: List<Logic.ChipJson>): String = com.prominder.myapp.data.Chips.encode(chips)
+    /** Chips as stored (Chips.encode). */
+    fun encodeChips(chips: List<ChipRules.ChipJson>): String = com.prominder.myapp.data.Chips.encode(chips)
 
 }

@@ -6,7 +6,7 @@ import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 
 /**
- * Times are stored the way the server stores them: fixed-width UTC text with microseconds
+ * Times are stored as the backup (backend/app/db.py) stores them: fixed-width UTC text with microseconds
  * (2026-11-16T08:30:00.000000Z). Text in that format sorts in time order, so SQL can compare it, and a row
  * restored from the backup goes back to it byte for byte. Dates are YYYY-MM-DD.
  */

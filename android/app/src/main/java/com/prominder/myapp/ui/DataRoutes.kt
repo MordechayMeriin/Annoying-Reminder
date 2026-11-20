@@ -1,5 +1,9 @@
 package com.prominder.myapp.ui
 
+import com.prominder.myapp.data.ChipAction
+import com.prominder.myapp.data.MessageKind
+import com.prominder.myapp.data.Role
+import com.prominder.myapp.data.TaskKind
 import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
@@ -47,7 +51,8 @@ import com.prominder.myapp.data.startOfDay
 import com.prominder.myapp.data.whatNow
 import com.prominder.myapp.diag.Diag
 import com.prominder.myapp.llm.Chat
-import com.prominder.myapp.logic.Logic
+import com.prominder.myapp.logic.ChipRules
+import com.prominder.myapp.logic.FocusSessions
 import java.time.Instant
 import java.time.ZoneId
 import kotlinx.coroutines.delay
@@ -128,16 +133,16 @@ fun HomeRoute(
     val latest by remember { store.dao.watchLatestSession() }.collectAsStateWithLifecycle(null)
     val sessionTask by remember(latest?.taskId) { store.dao.watchTask(latest?.taskId ?: -1) }.collectAsStateWithLifecycle(null)
     var picking by rememberSaveable { mutableStateOf(false) }
-    val lang = Logic.chipLang(messages.lastOrNull { it.role == "user" && it.kind == "chat" }?.content, sessionTask?.title)
+    val lang = ChipRules.chipLang(messages.lastOrNull { it.role == Role.USER && it.kind == MessageKind.CHAT }?.content, sessionTask?.title)
     val running = latest?.takeIf { it.endedAt == null }
     // "Where did you stop?": after a stopped or unanswered session, for a few hours, unless answered (wants_breadcrumb).
-    val offer = latest?.takeIf { running == null && Logic.wantsBreadcrumb(it, now) }
+    val offer = latest?.takeIf { running == null && FocusSessions.wantsBreadcrumb(it, now) }
     fun openTimer() = go(Route.Session)
 
     val focus = TaskLists.focus(focusRows, day)
     val done = TaskLists.doneToday(focus, doneEvents)
     // Parsing, formatting and decoding the buttons of 300 messages: only when they, or the day, change.
-    val showModel = settings.bool("show_model")
+    val showModel = settings.showModel
     val chatLines = remember(messages, zone, showModel, now.atZone(zone).toLocalDate()) { chatItems(messages, zone, now, showModel) }
     HomeScreen(
         state = HomeState(
@@ -149,7 +154,7 @@ fun HomeRoute(
             notice = notice,
             chat = ChatUi(turn.sending, turn.sentId, turn.steps, turn.typing, turn.error, canRetry = turn.failedId != null),
             canDictate = canDictate,
-            session = running?.let { SessionBarUi(sessionTask?.title.orEmpty(), Logic.sessionEndAt(it).toEpochMilli(), lang) },
+            session = running?.let { SessionBarUi(sessionTask?.title.orEmpty(), FocusSessions.sessionEndAt(it).toEpochMilli(), lang) },
             breadcrumb = offer?.let { o -> sessionTask?.let { BreadcrumbUi(o.id, it.title, lang) } },
             breadcrumbDraft = note,
             sessionsToday = sessionsToday,
@@ -169,7 +174,7 @@ fun HomeRoute(
         onChip = { c -> scope.launch { onNotice(chipAction(store, chat, c, zone, onSession = ::openTimer)) } },
         onMic = {
             dictatingNote = false
-            val lang = Logic.chipLang(draft.value.ifBlank { null } ?: messages.lastOrNull { it.role == "user" && it.kind == "chat" }?.content)
+            val lang = ChipRules.chipLang(draft.value.ifBlank { null } ?: messages.lastOrNull { it.role == Role.USER && it.kind == MessageKind.CHAT }?.content)
             try {
                 dictate.launch(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
                     .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
@@ -182,7 +187,7 @@ fun HomeRoute(
         focusInput = focusInput,
         onStart = { id ->
             scope.launch {
-                if (store.startSession(id, Logic.START_MIN_APP) != null) openTimer() else onNotice("That task isn't open any more.")
+                if (store.startSession(id, FocusSessions.START_MIN_APP) != null) openTimer() else onNotice("That task isn't open any more.")
             }
         },
         onOpenSession = ::openTimer,
@@ -207,7 +212,7 @@ fun HomeRoute(
         },
     )
     if (picking) {
-        val candidates = TaskLists.all(open.filter { it.kind == "task" }).map { it.id to it.title }
+        val candidates = TaskLists.all(open.filter { it.kind == TaskKind.TASK }).map { it.id to it.title }
         FocusPickerDialog(
             candidates = candidates,
             selected = focus.filter { it.status == OPEN }.map { it.id },
@@ -234,10 +239,10 @@ internal fun chatItems(rows: List<MessageRow>, zone: ZoneId, now: Instant, showM
  * A reply button: an action on the phone's data (no LLM), or a reply in your words. Returns a short answer to show.
  * ▶ Start and ▶ Another round open the timer ([onSession]).
  */
-internal suspend fun chipAction(store: Store, chat: Chat, c: Logic.ChipJson, zone: ZoneId, onSession: () -> Unit = {}): String? = when (c.action) {
+internal suspend fun chipAction(store: Store, chat: Chat, c: ChipRules.ChipJson, zone: ZoneId, onSession: () -> Unit = {}): String? = when (c.action) {
     null -> if (chat.send(c.label)) null else "One message at a time: wait for the reply."
     "start", "another" -> c.taskId?.let { id ->
-        val started = if (c.action == "another") store.startSession(id, another = true) else store.startSession(id, c.minutes)
+        val started = if (c.action == ChipAction.ANOTHER) store.startSession(id, another = true) else store.startSession(id, c.minutes)
         if (started != null) null.also { onSession() } else "That task isn't open any more."
     }
     "stop" -> c.taskId?.let { store.stopSession(it); "Stopped" }
@@ -273,7 +278,7 @@ fun SessionRoute(store: Store, onNotice: (String?) -> Unit, onBack: () -> Unit) 
         return
     }
     val title = task?.title.orEmpty()
-    val lang = Logic.chipLang(lastChat.lastOrNull { it.role == "user" && it.kind == "chat" }?.content, title)
+    val lang = ChipRules.chipLang(lastChat.lastOrNull { it.role == Role.USER && it.kind == MessageKind.CHAT }?.content, title)
     val now = rememberTicker()
     fun act(block: suspend () -> Unit) {
         if (busy) return
@@ -282,7 +287,7 @@ fun SessionRoute(store: Store, onNotice: (String?) -> Unit, onBack: () -> Unit) 
     }
     SessionScreen(
         ui = SessionUi(title, task?.nextAction?.takeIf { it.isNotEmpty() } ?: title, task?.resumeNote, s.plannedMin,
-            Times.parse(s.startedAt).toEpochMilli(), Logic.sessionEndAt(s).toEpochMilli(), lang),
+            Times.parse(s.startedAt).toEpochMilli(), FocusSessions.sessionEndAt(s).toEpochMilli(), lang),
         now = now,
         busy = busy,
         onDone = { act { store.endSession(s.id, "done"); onNotice(if (lang == "he") "בוצע ✓" else "Done ✓") } },
@@ -330,7 +335,7 @@ internal fun taskItem(t: TaskRow, zone: ZoneId, now: Instant, focusDay: String, 
     overdue = TaskLists.overdue(t, now),
     inFocus = t.focusDate == focusDay,
     parent = t.parentId?.let { p -> titles[p]?.let { "Step of: $it" } ?: "A step" },
-    canBeDone = t.kind != "fence",
+    canBeDone = t.kind != TaskKind.FENCE,
 )
 
 @Composable
@@ -381,7 +386,7 @@ fun TaskDetailRoute(store: Store, id: Long, onNotice: (String?) -> Unit, go: (Ro
         },
         onStart = {
             scope.launch {
-                if (store.startSession(id, Logic.START_MIN_APP) != null) go(Route.Session) else onNotice("That task isn't open any more.")
+                if (store.startSession(id, FocusSessions.START_MIN_APP) != null) go(Route.Session) else onNotice("That task isn't open any more.")
             }
         },
         onEdit = { go(Route.EditTask(id)) },

@@ -111,7 +111,7 @@ class ScreenshotTest {
     /** Phase D: the assistant at work: your message sent, its steps, the typing dots, and a check-in's reply buttons. */
     @Test
     fun chat_working() = shot("4d_chat_working") {
-        val chips = com.prominder.myapp.logic.Logic.chipsJson(com.prominder.myapp.logic.Logic.chipsFor("checkin", "planned"), "en", 1)
+        val chips = com.prominder.myapp.logic.ChipRules.chipsJson(com.prominder.myapp.logic.ChipRules.chipsFor("checkin", "planned"), "en", 1)
         HomeScreen(
             HomeState(
                 focus = listOf(FocusItem(1, "Write the quarterly report", "Today 15:00 · Important", done = false)),
@@ -131,7 +131,7 @@ class ScreenshotTest {
     /** The reply buttons under the latest message, and the model line (⚙ Show which AI model replied). */
     @Test
     fun chat_chips() = shot("4e_chat_chips") {
-        val chips = com.prominder.myapp.logic.Logic.chipsJson(com.prominder.myapp.logic.Logic.chipsFor("checkin", "planned"), "en", 1)
+        val chips = com.prominder.myapp.logic.ChipRules.chipsJson(com.prominder.myapp.logic.ChipRules.chipsFor("checkin", "planned"), "en", 1)
         HomeScreen(
             HomeState(
                 messages = listOf(

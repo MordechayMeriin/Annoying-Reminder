@@ -22,7 +22,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.prominder.myapp.ui.theme.Palette
 
-/** A rounded card, like the web app's `.card`. */
+/** A rounded card. */
 @Composable
 fun AppCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
     Card(
@@ -34,7 +34,7 @@ fun AppCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -
     }
 }
 
-/** A small uppercase section heading, like the web app's `h2`. */
+/** A small uppercase section heading. */
 @Composable
 fun SectionTitle(text: String, modifier: Modifier = Modifier) {
     Text(

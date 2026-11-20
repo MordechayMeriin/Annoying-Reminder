@@ -16,10 +16,9 @@ import kotlin.math.sin
 import kotlin.math.tan
 
 /**
- * Shabbat and holidays as don't-disturb time (pure, no I/O), ported from backend/app/jewish_calendar.py. The
- * server used the hdate library. Here the Hebrew calendar (which days are Shabbat and yom tov, in Israel or
- * outside) comes from KosherJava Zmanim, and the sun times from hdate's formula (see [sunMinutesUtc]), so the
- * minutes are the server's: RestCalendarTest checks them against the Python tests and a table of hdate's answers.
+ * Shabbat and holidays as don't-disturb time (pure, no I/O). The Hebrew calendar (which days are Shabbat and yom
+ * tov, in Israel or outside) comes from KosherJava Zmanim, and the sun times from the hdate library's formula (see
+ * [sunMinutesUtc]): RestCalendarTest checks them against a table of hdate's answers.
  *
  * A rest period runs from candle lighting before the first day of Shabbat / yom tov until havdalah after the
  * last one, so a holiday next to Shabbat is one period. It's widened by a margin on each side. Only Shabbat and
@@ -29,7 +28,7 @@ data class RestConfig(
     val zone: ZoneId,
     val latitude: Double,
     val longitude: Double,
-    /** Kept for the setting; the formula ignores it, as the server did. */
+    /** Kept for the setting; hdate's formula ignores it. */
     val altitude: Double = 0.0,
     val diaspora: Boolean = false,
     /** candle lighting = sunset - this */
@@ -91,7 +90,7 @@ object RestCalendar {
     /**
      * Minutes after 00:00 UTC on [d] when the sun is [deg] degrees from the zenith while setting (90.833 = sunset,
      * 98.5 = three stars), or null where it never gets there. hdate's own formula (NOAA's low-accuracy solar
-     * equations, whole minutes cut off), as the server ran it, so every time matches it to the minute. KosherJava's
+     * equations, whole minutes cut off), so every time matches hdate's to the minute. KosherJava's
      * more precise astronomy differs by 1-3 minutes, which the 60-minute margins swallow, but the tests are the spec.
      */
     fun sunMinutesUtc(d: LocalDate, deg: Double, latitude: Double, longitude: Double): Int? {

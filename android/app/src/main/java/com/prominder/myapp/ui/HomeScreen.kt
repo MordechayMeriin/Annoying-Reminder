@@ -1,5 +1,7 @@
 package com.prominder.myapp.ui
 
+import com.prominder.myapp.data.MessageKind
+import com.prominder.myapp.data.Role
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -56,7 +58,7 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
-import com.prominder.myapp.logic.Logic.ChipJson
+import com.prominder.myapp.logic.ChipRules.ChipJson
 import com.prominder.myapp.ui.theme.Palette
 
 /*
@@ -112,7 +114,7 @@ data class HomeState(
 )
 
 /**
- * The main screen, like the web app's: Today's 3 on top, the chat with the assistant below (Phase D). The reply
+ * The main screen: Today's 3 on top, the chat with the assistant below (Phase D). The reply
  * buttons sit under the latest message; while the assistant works, its steps and the typing dots show under the chat.
  */
 @Composable
@@ -183,8 +185,8 @@ fun HomeScreen(
             val chat = state.chat
             val last = state.messages.lastOrNull()
             // The reply buttons: under the latest message while it's the assistant's and nothing is being sent.
-            val chipsFor = last?.takeIf { it.role == "assistant" && it.chips.isNotEmpty() && chat.sending == null }?.id
-            val modelFor = state.messages.lastOrNull { it.role == "assistant" }?.id
+            val chipsFor = last?.takeIf { it.role == Role.ASSISTANT && it.chips.isNotEmpty() && chat.sending == null }?.id
+            val modelFor = state.messages.lastOrNull { it.role == Role.ASSISTANT }?.id
             if (state.messages.isEmpty() && chat.sending == null) {
                 Muted("No messages yet. Write anything: a task, a question, how it's going.", Modifier.align(Alignment.Center).padding(24.dp))
             } else {
@@ -360,12 +362,12 @@ fun DoneCircle(done: Boolean, onClick: () -> Unit) {
 
 @Composable
 private fun ChatLine(m: ChatItem, delivery: String? = null, model: String? = null) {
-    if (m.kind == "event") {
+    if (m.kind == MessageKind.EVENT) {
         Text("${m.content}  ${m.time}", color = Palette.Muted, fontSize = 12.sp, textAlign = TextAlign.Center,
             modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp))
         return
     }
-    val mine = m.role == "user"
+    val mine = m.role == Role.USER
     Row(Modifier.fillMaxWidth().padding(vertical = 3.dp), horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start) {
         Column(
             Modifier.widthIn(max = 320.dp).clip(RoundedCornerShape(14.dp)).background(if (mine) Palette.Card2 else Palette.Card)

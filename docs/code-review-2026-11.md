@@ -195,3 +195,27 @@ only exercise in an emergency), then 9 and 10 (the cheapest performance wins).
 - Template fallback everywhere: a reminder never depends on the model answering.
 - The checks in the tool loop: one retry for bad arguments, parsing a tool call written as text, and a timeout on the
   whole turn.
+
+---
+
+## Status: all findings fixed
+
+| # | What was done |
+|---|---|
+| 1 | Saving a non-default setting deletes its tombstone (`Store.saveSetting`); the Room 1 → 2 migration removes any stale one. The server writes a key that's both written and deleted in one upload, never both, and `write_batch` writes each key once. Tests on both ends. |
+| 2 | Restore comes in pages (`paged` + `cursor`, about 1.5 MB each) and is gzipped. The phone saves all pages in one transaction. App versions before paging still get everything in one answer. |
+| 3 | The phone sends 200 rows per request, in change-number order, and remembers each request that got through. The server gives up with 503 "busy" after 40 s instead of running into the Lambda's timeout. |
+| 4, 5 | Layout 2: no secondary indexes, events in one partition (`event` / `<task_id>#<time>#<rid>`, one query, no second list of event kinds), no `children` or `mtask#` items. `sync.migrate()` moves an old table resumably: in the daily run, before a restore, and from `scripts/aws_lambda_setup.py`. |
+| 6 | `Replanner`: changes are conflated, so a burst of changes is one plan. |
+| 7 | `Store.write` keeps its state in the transaction's coroutine context; a nested `write` joins the outer change. |
+| 8 | A change that wrote nothing doesn't use up a change number. |
+| 9 | Chat lines are `remember`ed; the draft is read only by the message field; the UI models are `@Immutable`. |
+| 10 | Every route collects with `collectAsStateWithLifecycle`. |
+| 11 | Room version 2: `seq` indexes on all 8 tables, `messages.created_at`, and a `message_tasks` link table instead of the `LIKE`, with a migration test. Diagnostics refreshes at most every 2 s. |
+| 12 | The tick writes its messages in parallel and reads the open tasks once per step. |
+| 13 | `DiagLog` writes on one background thread; Diagnostics reads it on `Dispatchers.IO`. |
+| Low | Comments describe the code (or name commit b09e82e for removed tests); task kinds, message kinds, event kinds, roles and chip actions are constants (`data/Kinds.kt`) and settings have typed accessors; `Logic` is split by topic (`Schedule`, `Loudness`, `Contacts`, `ChipRules`, `Coaching`, `Focus`, `FocusSessions`, `Texts`, `Pressure`); a check-in whose task closed while it was being written is rewritten for the tasks still open; the home screen's clock moves on every minute and on returning to the app; the per-minute limits say they're per instance, and a call that got a 503 doesn't count toward the daily cap; `ReplyWorker` gets its own turn's error; button failures are logged under `notify`. |
+
+**One step for the owner (optional):** run `python3 scripts/aws_lambda_setup.py` again in CloudShell. It moves the data
+if the daily run hasn't finished yet, drops the two unused indexes, and gives their capacity to the table (25/25).
+Until then everything works, and new writes already skip the indexes.

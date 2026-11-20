@@ -24,8 +24,9 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 /**
- * The chat agent on a real (in-memory) database, ported from backend/tests/test_agent.py, test_chat_progress.py and
- * test_model_tag.py: replies continue the thread, the LLM decides the task, tool calling is robust, progress is reported.
+ * The chat agent on a real (in-memory) database: replies continue the thread, the LLM decides the task, tool calling
+ * is robust, progress is reported. The cases of test_agent.py, test_chat_progress.py and test_model_tag.py (the
+ * Python server's tests, removed in b09e82e).
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [29])
@@ -226,7 +227,7 @@ class AgentTest {
     @Test fun `a tap on a reason button records why the task is avoided`() {
         val t = task("Tax return")
         said("assistant", "This keeps slipping, and that's fine. What's in the way?", "nudge", listOf(t.id),
-            chips = Chips.encode(com.prominder.myapp.logic.Logic.chipsJson(com.prominder.myapp.logic.Logic.chipsFor("avoided", null), "en", t.id)))
+            chips = Chips.encode(com.prominder.myapp.logic.ChipRules.chipsJson(com.prominder.myapp.logic.ChipRules.chipsFor("avoided", null), "en", t.id)))
         val r = chat(ScriptedLlm(listOf(says("Let's make it smaller."))), "Too big")
         assertEquals(listOf(t.id), r.taskIds)
         val e = events(t.id).single()

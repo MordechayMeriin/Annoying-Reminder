@@ -28,8 +28,8 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 /**
- * The backup against a fake backend. restore-sample.json is a real /sync/restore answer, written by the backend's
- * own code (backend/scripts/make_android_sync_sample.py), so the format is checked against the server's.
+ * The backup against a fake backend. restore-sample.json is a real /sync/restore answer, and the backend's own tests
+ * (backend/tests/test_sync.py) upload and restore the same file, so both sides are checked against one format.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [29])

@@ -1,5 +1,6 @@
 package com.prominder.myapp.data
 
+import com.prominder.myapp.logic.FocusSessions
 import androidx.room.withTransaction
 import java.security.SecureRandom
 import java.time.Instant
@@ -61,7 +62,7 @@ class Store(
         val s = settings()
         check(form)
         val due = form.dueAt?.let(Times::format)
-        val remind = form.dueAt?.let { if (form.kind == "meeting") it.minusSeconds(60L * s.meetingLeadMin) else it }?.let(Times::format)
+        val remind = form.dueAt?.let { if (form.kind == TaskKind.MEETING) it.minusSeconds(60L * s.meetingLeadMin) else it }?.let(Times::format)
         val row = TaskRow(
             id = nextId(META_TASK_COUNTER, dao.maxTaskId()),
             parentId = parentId,
@@ -81,7 +82,7 @@ class Store(
         row
     }
 
-    /** tasks.update for the fields the form edits. A new time resets the nagging and counts as a requested reminder. */
+    /** The fields the form edits. A new time resets the nagging and counts as a requested reminder. */
     suspend fun edit(id: Long, form: TaskForm): TaskRow? = write {
         val t = dao.task(id) ?: return@write null
         check(form)
@@ -96,7 +97,7 @@ class Store(
         )
         val due = form.dueAt?.let(Times::format)
         if (due != t.dueAt || form.kind != t.kind) {
-            val remind = form.dueAt?.let { if (form.kind == "meeting") it.minusSeconds(60L * s.meetingLeadMin) else it }
+            val remind = form.dueAt?.let { if (form.kind == TaskKind.MEETING) it.minusSeconds(60L * s.meetingLeadMin) else it }
             new = new.copy(dueAt = due, remindAt = remind?.let(Times::format), remindRequested = remind != null,
                 nagCount = 0, escalated = false, parkedUntil = null)
         }
@@ -115,13 +116,13 @@ class Store(
     }
 
     /**
-     * ✓ Done (actions.apply "done" + tasks.complete). A recurring task rolls on to its next time instead of
+     * ✓ Done. A recurring task rolls on to its next time instead of
      * closing; an open task's open steps are done with it. A hard stop can't be "done", only cancelled.
      * [chatEvent]: write "[Marked done: …]" in the chat (a tap); the assistant's own tool call doesn't.
      */
     suspend fun complete(id: Long, chatEvent: Boolean = true): TaskRow? = write {
         val t = dao.task(id) ?: return@write null
-        if (t.status != OPEN || t.kind == "fence") return@write t
+        if (t.status != OPEN || t.kind == TaskKind.FENCE) return@write t
         closeSessions(id, "done")
         addEvent(id, "done")
         val now = clock()
@@ -143,10 +144,10 @@ class Store(
         new
     }
 
-    /** ⏰ Later: the time is decided by code (logic.later_time), so you never have to pick one. Returns it. */
+    /** ⏰ Later: the time is decided by code, so you never have to pick one. Returns it. */
     suspend fun later(id: Long): Instant? = write {
         val t = dao.task(id) ?: return@write null
-        if (t.status != OPEN || t.kind == "fence") return@write null
+        if (t.status != OPEN || t.kind == TaskKind.FENCE) return@write null
         val s = settings()
         val whenLocal = DayMath.laterTime(clock().atZone(s.zone), s.morningTime)
         putTask(t.copy(remindAt = Times.format(whenLocal.toInstant()), remindRequested = true, nagCount = 0, escalated = false,
@@ -172,7 +173,7 @@ class Store(
 
     // ------------------------------------------------------------ Today's 3
 
-    /** tasks.set_focus: these (at most 3, open, not meetings) become Today's 3, in this order. */
+    /** These (at most 3, open, not meetings) become Today's 3, in this order. */
     suspend fun setFocus(ids: List<Long>, day: LocalDate): List<TaskRow> = write { setFocusIn(ids, day) }
 
     /** ☆ / ★ on a task: add it to Today's 3 (if there's room) or take it out. False when it's full. */
@@ -282,14 +283,14 @@ class Store(
         dao.linkMessage(row)
     }
 
-    /** thread.add: a message in the chat. Chips as JSON text (Chips.encode). Public for the assistant (llm/). */
+    /** A message in the chat. Chips as JSON text (Chips.encode). Public for the assistant (llm/). */
     suspend fun addMessageNow(role: String, content: String, kind: String, taskIds: List<Long> = emptyList(),
                               chips: String = "[]", model: String? = null): MessageRow = write { addMessage(role, content, kind, taskIds, chips, model) }
 
     internal suspend fun addMessage(role: String, content: String, kind: String, taskIds: List<Long> = emptyList(),
                                     chips: String = "[]", model: String? = null): MessageRow {
         val tx = tx()
-        if (role == "user") tx.userActed = true
+        if (role == Role.USER) tx.userActed = true
         val ids = taskIds.distinct()
         val row = MessageRow(nextId(META_MESSAGE_COUNTER, dao.maxMessageId()), role, content, kind, ids.firstOrNull(), ids,
             chips, model, nowText())
@@ -297,7 +298,7 @@ class Store(
         return row
     }
 
-    /** thread.add_event: something you did outside the chat, written as your own message so the assistant reads it. */
+    /** Something you did outside the chat, written as your own message so the assistant reads it. */
     internal suspend fun addChatEvent(text: String, taskIds: List<Long>) {
         addMessage("user", text, "event", taskIds)
     }
@@ -306,13 +307,13 @@ class Store(
         if (!old.description.isNullOrEmpty() && old.description != newText) addEvent(old.id, "description_changed", old.description)
     }
 
-    /** actions.close_task_sessions: the task is done, cancelled or parked, so its open session ends with it. */
+    /** The task is done, cancelled or parked, so its open session ends with it. */
     internal suspend fun closeSessions(taskId: Long, outcome: String) {
         dao.openSessions(taskId).forEach { closeSession(it, outcome) }
     }
 
     /**
-     * actions.close_session: records an outcome (done | another | stopped | paused) with a session_ended event (paused:
+     * Records an outcome (done | another | stopped | paused) with a session_ended event (paused:
      * a paused event), "stopped, 7 of 25 min". Null if it was already closed (a second tap).
      */
     internal suspend fun closeSession(s: SessionRow, outcome: String, endedAt: Instant = clock()): SessionRow? {
@@ -320,7 +321,7 @@ class Store(
         val closed = cur.copy(endedAt = Times.format(endedAt), outcome = outcome)
         putSession(closed)
         addEvent(closed.taskId, if (outcome == "paused") "paused" else "session_ended",
-            "$outcome, ${com.prominder.myapp.logic.Logic.actualMinutes(closed, clock())} of ${closed.plannedMin} min")
+            "$outcome, ${FocusSessions.actualMinutes(closed, clock())} of ${closed.plannedMin} min")
         return closed
     }
 
@@ -333,7 +334,7 @@ class Store(
         val out = mutableListOf<TaskRow>()
         for ((index, id) in wanted.withIndex()) {
             val t = dao.task(id) ?: continue
-            if (t.status != OPEN || t.kind != "task") continue
+            if (t.status != OPEN || t.kind != TaskKind.TASK) continue
             val new = t.copy(focusDate = date, focusRank = index + 1)
             putTask(new)
             out += new
@@ -372,7 +373,7 @@ class Store(
         const val TITLE_MAX = 200
         const val DESCRIPTION_MAX = 800
         const val NEXT_ACTION_MAX = 200
-        val KINDS = listOf("task", "meeting", "fence")
+        val KINDS = TaskKind.ALL
         val RECURRENCES = listOf("daily", "weekdays", "weekly", "monthly")
 
         const val META_SEQ = "seq"
@@ -389,10 +390,10 @@ class Store(
         private val DAY_TIME = DateTimeFormatter.ofPattern("EEE HH:mm", Locale.ENGLISH)
         private val random = SecureRandom()
 
-        /** db.rand(): 8 hex characters. */
+        /** An event's random suffix: 8 hex characters. */
         fun rid(): String = "%08x".format(random.nextInt())
 
-        /** tasks._clip: trimmed, cut with "…" when too long, null when empty. */
+        /** Trimmed, cut with "…" when too long, null when empty. */
         fun clip(text: String?, limit: Int): String? {
             val t = text?.trim() ?: return null
             if (t.isEmpty()) return null

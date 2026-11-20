@@ -29,6 +29,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 
 /** Runs first, whenever Android starts the app: for the screen, an alarm, or after a restart. */
@@ -91,11 +92,12 @@ class ReminderApp : Application() {
         Diag.log("app", "App started (${BuildConfig.VERSION_NAME})")
         SyncScheduler.daily(this)
         Reminders.startSafetyNet(this)
-        Reminders.replan(this)
+        // At once, not through the replanner: starting up is one event, not a burst of changes.
+        scope.launch { Reminders.plan(this@ReminderApp) }
         addNewTaskShortcut()
     }
 
-    /** "New task" when you long-press the app icon: opens the chat, ready to type or dictate (the web app's shortcut). */
+    /** "New task" when you long-press the app icon: opens the chat, ready to type or dictate. */
     private fun addNewTaskShortcut() {
         runCatching {
             val shortcut = ShortcutInfoCompat.Builder(this, "new_task")

@@ -85,7 +85,7 @@ data class MessageRow(
     val kind: String = "chat",
     @SerialName("task_id") @ColumnInfo(name = "task_id") val taskId: Long? = null,
     @SerialName("task_ids") @ColumnInfo(name = "task_ids") val taskIds: List<Long> = emptyList(),
-    /** The reply buttons under the message, as JSON text (as the server stores them). */
+    /** The reply buttons under the message, as JSON text (as the backup stores them). */
     val chips: String? = null,
     /** The LLM that wrote it; null when code did. */
     val model: String? = null,

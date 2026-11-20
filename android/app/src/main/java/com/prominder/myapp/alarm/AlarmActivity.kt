@@ -12,7 +12,7 @@ import androidx.lifecycle.lifecycleScope
 import com.prominder.myapp.MainActivity
 import com.prominder.myapp.ReminderApp
 import com.prominder.myapp.diag.Diag
-import com.prominder.myapp.logic.Logic
+import com.prominder.myapp.logic.ChipRules
 import com.prominder.myapp.notify.Notifier
 import com.prominder.myapp.ui.AlarmScreen
 import com.prominder.myapp.ui.AlarmUi
@@ -78,8 +78,8 @@ class AlarmActivity : ComponentActivity() {
             title = intent.getStringExtra(EXTRA_TITLE) ?: "Alarm",
             text = intent.getStringExtra(EXTRA_TEXT).orEmpty(),
             scheduledAt = intent.getLongExtra(EXTRA_SCHEDULED_AT, System.currentTimeMillis()),
-            doneLabel = taskId?.let { Logic.chipLabel("done", lang) },
-            laterLabel = taskId?.let { Logic.chipLabel("later", lang) },
+            doneLabel = taskId?.let { ChipRules.chipLabel("done", lang) },
+            laterLabel = taskId?.let { ChipRules.chipLabel("later", lang) },
             canOpen = !isTest,
             rings = intent.getIntExtra(EXTRA_RINGS, 1),
         )

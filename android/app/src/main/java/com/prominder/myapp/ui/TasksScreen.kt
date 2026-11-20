@@ -40,7 +40,7 @@ data class TasksState(
     val all: List<TaskItem> = emptyList(),
 )
 
-/** The task drawer of the web app as a screen: Today (overdue & today, coming up) and All open. */
+/** The task lists: Today (overdue & today, coming up) and All open. */
 @Composable
 fun TasksScreen(
     state: TasksState,

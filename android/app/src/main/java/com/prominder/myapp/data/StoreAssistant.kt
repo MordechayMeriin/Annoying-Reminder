@@ -1,6 +1,11 @@
 package com.prominder.myapp.data
 
-import com.prominder.myapp.logic.Logic
+import com.prominder.myapp.logic.ChipRules
+import com.prominder.myapp.logic.Coaching
+import com.prominder.myapp.logic.Focus
+import com.prominder.myapp.logic.Pressure
+import com.prominder.myapp.logic.Schedule
+import com.prominder.myapp.logic.Texts
 import com.prominder.myapp.logic.due
 import java.time.Duration
 import java.time.Instant
@@ -8,11 +13,11 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 /*
- * The changes the assistant makes (its tools, Phase D) and the reply buttons that act on several tasks, ported from
- * backend/app/tasks.py and actions.py. Each is one Store transaction, like the screens' own changes.
+ * The changes the assistant makes (its tools, Phase D) and the reply buttons that act on several tasks. Each is one
+ * Store transaction, like the screens' own changes.
  */
 
-/** The fields tasks.update changes; only the keys given are touched. */
+/** The fields [updateTask] may change; only the keys given are touched. */
 val UPDATABLE = setOf(
     "title", "description", "kind", "priority", "due_at", "remind_at", "recurrence", "next_action", "estimate_min", "resume_note",
 )
@@ -21,7 +26,7 @@ const val RESUME_NOTE_MAX = 300
 const val PREFERENCES_MAX = 20
 const val PREFERENCE_CHARS = 200
 
-/** tasks.create, with every field the assistant can set. The reminder defaults to the due time (a meeting's: its lead). */
+/** A new task, with every field the assistant can set. The reminder defaults to the due time (a meeting's: its lead). */
 suspend fun Store.createTask(
     title: String, kind: String = "task", priority: Int = 1, description: String? = null, dueAt: Instant? = null,
     remindAt: Instant? = null, recurrence: String? = null, parentId: Long? = null, nextAction: String? = null, estimateMin: Int? = null,
@@ -29,7 +34,7 @@ suspend fun Store.createTask(
     checkFields(kind = kind, priority = priority, recurrence = recurrence, estimateMin = estimateMin)
     require(title.isNotBlank()) { "The title is empty." }
     val s = settings()
-    val remind = remindAt ?: dueAt?.let { if (kind == "meeting") it.minusSeconds(60L * s.meetingLeadMin) else it }
+    val remind = remindAt ?: dueAt?.let { if (kind == TaskKind.MEETING) it.minusSeconds(60L * s.meetingLeadMin) else it }
     val row = TaskRow(
         id = nextId(Store.META_TASK_COUNTER, dao.maxTaskId()),
         parentId = parentId,
@@ -50,7 +55,7 @@ suspend fun Store.createTask(
 }
 
 /**
- * tasks.update. [fields] maps a name from [UPDATABLE] to its new value (times as Instants, null clears). A new time
+ * Changes a task. [fields] maps a name from [UPDATABLE] to its new value (times as Instants, null clears). A new time
  * resets the nagging, counts as a requested reminder and ends a park; a changed description keeps the old text as a
  * description_changed event.
  */
@@ -77,8 +82,8 @@ suspend fun Store.updateTask(id: Long, fields: Map<String, Any?>): TaskRow? = wr
         var remindSet = "remind_at" in f
         var remind = f["remind_at"] as Instant?
         if (!remindSet && due != null) {
-            // The lead of the task's kind before this change, as on the server.
-            remind = if (t.kind == "meeting") due.minusSeconds(60L * settings().meetingLeadMin) else due
+            // The lead of the task's kind before this change.
+            remind = if (t.kind == TaskKind.MEETING) due.minusSeconds(60L * settings().meetingLeadMin) else due
             remindSet = true
         }
         if (remindSet) new = new.copy(remindAt = remind?.let(Times::format))
@@ -91,7 +96,7 @@ suspend fun Store.updateTask(id: Long, fields: Map<String, Any?>): TaskRow? = wr
     new
 }
 
-/** tasks.set_followup: the next check-in. [requested]: you asked for that time (it doesn't use up the per-task cap). */
+/** The next check-in. [requested]: you asked for that time (it doesn't use up the per-task cap). */
 suspend fun Store.setFollowup(id: Long, at: Instant, requested: Boolean): TaskRow? = write {
     val t = dao.task(id)?.takeIf { it.status == OPEN } ?: return@write null
     val new = t.copy(remindAt = Times.format(at), remindRequested = requested, nagCount = 0, escalated = false, parkedUntil = null)
@@ -99,7 +104,7 @@ suspend fun Store.setFollowup(id: Long, at: Instant, requested: Boolean): TaskRo
     new
 }
 
-/** tasks.block: waiting on someone or something; looked at again at [until]. */
+/** Waiting on someone or something; looked at again at [until]. */
 suspend fun Store.block(id: Long, reason: String, until: Instant): TaskRow? = write {
     val t = dao.task(id)?.takeIf { it.status == OPEN } ?: return@write null
     val new = t.copy(blockedReason = reason, blockedUntil = Times.format(until), remindAt = Times.format(until), remindRequested = false, nagCount = 0)
@@ -116,25 +121,25 @@ suspend fun Store.unblock(id: Long): TaskRow? = write {
     new
 }
 
-/** tasks.reset_avoidance: a fresh start (a reason given, progress made): earlier postponements stop counting, a park ends. */
+/** A fresh start (a reason given, progress made): earlier postponements stop counting, a park ends. */
 suspend fun Store.resetAvoidance(id: Long) = write {
     val t = dao.task(id) ?: return@write
     putTask(t.copy(avoidResetAt = nowText(), avoidAsks = 0, avoidAskedAt = null, parkedUntil = null))
 }
 
-/** tasks.add_event, for the tools (postponed, committed, progress, stuck, avoided…). */
+/** An event in a task's history, for the tools (postponed, committed, progress, stuck, avoided…). */
 suspend fun Store.taskEvent(id: Long, kind: String, note: String? = null, avoidReason: String? = null) = write {
     require(kind in EVENT_KINDS) { "Unknown event kind: $kind" }
-    require(avoidReason == null || avoidReason in Logic.AVOID_REASONS) { "Unknown avoid reason: $avoidReason" }
+    require(avoidReason == null || avoidReason in Coaching.AVOID_REASONS) { "Unknown avoid reason: $avoidReason" }
     addEvent(id, kind, note, avoidReason)
 }
 
-/** sessions.close_notes_for_task: where you stopped was saved in the chat, so the app needn't ask again. */
+/** Where you stopped was saved in the chat, so the app needn't ask again. */
 suspend fun Store.closeNotesForTask(id: Long) = write {
     for (s in dao.sessionsOf(id)) if (s.noteClosedAt == null) putSession(s.copy(noteClosedAt = nowText()))
 }
 
-/** preferences.add: one short line. IllegalArgumentException when it's empty or the list is full. */
+/** One short line. IllegalArgumentException when it's empty or the list is full. */
 suspend fun Store.addPreference(text: String): PreferenceRow = write {
     val line = text.split(Regex("\\s+")).filter { it.isNotEmpty() }.joinToString(" ").take(PREFERENCE_CHARS)
     require(line.isNotEmpty()) { "The preference is empty." }
@@ -146,14 +151,14 @@ suspend fun Store.addPreference(text: String): PreferenceRow = write {
     row
 }
 
-/** thread.link: which tasks a message is about. */
+/** Which tasks a message is about. */
 suspend fun Store.linkMessage(id: Long, taskIds: List<Long>) = write {
     val m = dao.message(id) ?: return@write
     val ids = taskIds.distinct()
     putMessage(m.copy(taskIds = ids, taskId = ids.firstOrNull()))
 }
 
-/** tasks.list_tasks: the lists the assistant can ask for. */
+/** The lists the assistant can ask for. */
 suspend fun Store.listTasks(scope: String): List<TaskRow> {
     val s = settings()
     val now = now()
@@ -169,7 +174,7 @@ suspend fun Store.listTasks(scope: String): List<TaskRow> {
     }
 }
 
-// ------------------------------------------------------------ reply buttons on several tasks (actions.py)
+// ------------------------------------------------------------ reply buttons on several tasks
 
 private val DAY_DATE: DateTimeFormatter = DateTimeFormatter.ofPattern("EEE dd/MM", Locale.ENGLISH)
 
@@ -178,8 +183,8 @@ private fun titles(rows: List<TaskRow>, limit: Int = 5): String {
     return shown + if (rows.size > limit) " (+${rows.size - limit})" else ""
 }
 
-/** Not now (actions.park): no check-ins for a week, out of Today's 3. Returns when the park ends. */
-suspend fun Store.notNow(id: Long, days: Long = Logic.PARK_DAYS): Instant? = write {
+/** Not now: no check-ins for a week, out of Today's 3. Returns when the park ends. */
+suspend fun Store.notNow(id: Long, days: Long = Pressure.PARK_DAYS): Instant? = write {
     val t = dao.task(id)?.takeIf { it.status == OPEN } ?: return@write null
     closeSessions(id, "stopped")
     val until = now().plus(Duration.ofDays(days))
@@ -195,12 +200,12 @@ suspend fun Store.moveOverdue(): List<TaskRow> = write {
     val s = settings()
     val now = now()
     val moved = mutableListOf<TaskRow>()
-    val overdue = dao.openTasks().filter { t -> t.kind == "task" && t.due?.let { it < now } == true }.sortedWith(compareBy({ it.dueAt }, { it.id }))
+    val overdue = dao.openTasks().filter { t -> t.kind == TaskKind.TASK && t.due?.let { it < now } == true }.sortedWith(compareBy({ it.dueAt }, { it.id }))
     for (t in overdue) {
         val due = t.due!!
         val new = if (t.recurrence != null) DayMath.nextFutureOccurrence(due, t.recurrence, s.zone, now)
-        else Logic.movedToNextWeek(due.atZone(s.zone), now).toInstant()
-        val remind = if (t.kind == "meeting") new.minusSeconds(60L * s.meetingLeadMin) else new
+        else Pressure.movedToNextWeek(due.atZone(s.zone), now).toInstant()
+        val remind = if (t.kind == TaskKind.MEETING) new.minusSeconds(60L * s.meetingLeadMin) else new
         val row = t.copy(dueAt = Times.format(new), remindAt = Times.format(remind), remindRequested = true, nagCount = 0, escalated = false,
             parkedUntil = null)
         putTask(row)
@@ -232,29 +237,29 @@ suspend fun Store.keep(ids: List<Long>): List<TaskRow> = write {
 }
 
 /**
- * What now? (actions.what_now): one task to do now, picked by code (Logic.pickNext), no LLM. Writes the tap as an
+ * What now?: one task to do now, picked by code (Focus.pickNext), no LLM. Writes the tap as an
  * event and the answer as the assistant's message, with ▶ Start · Low energy · Something else.
  */
 suspend fun Store.whatNow(lowEnergy: Boolean = false, exclude: List<Long> = emptyList(), chip: String = "what_now"): MessageRow = write {
     val s = settings()
     val now = now()
     val local = now.atZone(s.zone)
-    val today = Logic.focusDay(local, s.dayResetTime)
+    val today = Schedule.focusDay(local, s.dayResetTime)
     val open = TaskLists.all(dao.openTasks())
     val focus = TaskLists.focus(dao.focusTasks(today.toString()), today.toString())
     val since = Times.format(today.atStartOfDay(s.zone).toInstant())
-    val done = TaskLists.doneToday(focus, focus.flatMap { t -> dao.eventsSince(t.id, since).filter { it.kind == "done" } })
+    val done = TaskLists.doneToday(focus, focus.flatMap { t -> dao.eventsSince(t.id, since).filter { it.kind == EventKind.DONE } })
     val end = now.plus(Duration.ofHours(12))
-    val fixed = open.filter { t -> (t.kind == "meeting" || t.kind == "fence") && t.due?.let { it < end && (it >= now || t.recurrence != null) } == true }
-    val next = Logic.meetingOccurrences(fixed, now, end, s.zone).firstOrNull { it.first > now }
-    val pick = Logic.pickNext(open, now, next?.first, Logic.DEFAULT_MULTIPLIER, lowEnergy, today = today, doneIds = done, exclude = exclude)
-    val lang = Logic.chipLang(dao.latestOfKindsBy(listOf("chat"), "user")?.content, open.take(5).joinToString(" ") { it.title })
-    addChatEvent("[${Logic.chipLabel(chip, lang)}]", emptyList())
-    val text = Logic.whatNowText(pick, lang, next?.first?.atZone(s.zone))
+    val fixed = open.filter { t -> (t.kind == TaskKind.MEETING || t.kind == TaskKind.FENCE) && t.due?.let { it < end && (it >= now || t.recurrence != null) } == true }
+    val next = Schedule.meetingOccurrences(fixed, now, end, s.zone).firstOrNull { it.first > now }
+    val pick = Focus.pickNext(open, now, next?.first, Focus.DEFAULT_MULTIPLIER, lowEnergy, today = today, doneIds = done, exclude = exclude)
+    val lang = ChipRules.chipLang(dao.latestOfKindsBy(listOf("chat"), "user")?.content, open.take(5).joinToString(" ") { it.title })
+    addChatEvent("[${ChipRules.chipLabel(chip, lang)}]", emptyList())
+    val text = Texts.whatNowText(pick, lang, next?.first?.atZone(s.zone))
     val task = pick?.task
     val chips = if (task == null) emptyList() else {
         val offered = (exclude + task.id).distinct()
-        Logic.chipsJson(Logic.chipsFor("what_now", null), lang, task.id).mapNotNull { c ->
+        ChipRules.chipsJson(ChipRules.chipsFor("what_now", null), lang, task.id).mapNotNull { c ->
             when (c.id) {
                 "start" -> c.copy(minutes = pick.minutes)
                 "low_energy" -> if (lowEnergy || pick.reason == "bonus") null else c.copy(lowEnergy = true)
@@ -267,10 +272,7 @@ suspend fun Store.whatNow(lowEnergy: Boolean = false, exclude: List<Long> = empt
 }
 
 /** tasks.EVENT_KINDS */
-val EVENT_KINDS = setOf(
-    "postponed", "committed", "progress", "stuck", "blocked", "unblocked", "ignored", "done", "description_changed",
-    "session_started", "session_ended", "paused", "parked", "avoided",
-)
+val EVENT_KINDS = EventKind.ALL
 
 private fun checkFields(kind: String, priority: Int?, recurrence: String?, estimateMin: Int?) {
     require(kind in Store.KINDS) { "Unknown kind: $kind" }

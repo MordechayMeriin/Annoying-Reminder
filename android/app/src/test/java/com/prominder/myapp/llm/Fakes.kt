@@ -26,7 +26,7 @@ fun calls(tool: String, vararg args: Pair<String, Any>) = Calls(tool, buildJsonO
 })
 
 /**
- * Stands in for the model (backend/tests/fakes.py's ScriptedLLM): answers with the given steps in order (then with
+ * Stands in for the model: answers with the given steps in order (then with
  * nothing), records every request, and reports [model] as the model that answered.
  */
 class ScriptedLlm(steps: List<Step>, private val model: String = "test/model") : Llm {

@@ -227,7 +227,7 @@ private fun MainRoutes(app: ReminderApp, auth: AuthRepository, session: Session)
             // The log changes whenever something happens (an alarm rings, a backup runs), dozens of lines a tick:
             // reload at most every 2 seconds, and read the file and the database off the main thread.
             @OptIn(kotlinx.coroutines.FlowPreview::class)
-            val logVersion by remember { Diag.log.version.sample(2_000) }.collectAsStateWithLifecycle(Diag.log.version.value)
+            val logVersion by remember { Diag.log.version.sample(2_000) }.collectAsStateWithLifecycle(0)
             val lines by produceState(emptyList<String>(), logVersion) { value = withContext(Dispatchers.IO) { Diag.log.lines() } }
             val syncFacts by produceState(emptyList<Pair<String, String>>(), logVersion) { value = syncFacts(app) }
             val summary = diagnosticsFacts(context, session, facts, logVersion) + syncFacts

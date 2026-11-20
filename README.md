@@ -38,7 +38,7 @@ safety, the reply buttons and which coaching playbook applies are deterministic 
 the messages and can adjust follow-ups through tools, within those limits.
 
 ### Task stages
-Every task has a stage ([`Logic.taskStage`](android/app/src/main/java/com/prominder/myapp/logic/Logic.kt)), and the app's move depends on it:
+Every task has a stage ([`Coaching.taskStage`](android/app/src/main/java/com/prominder/myapp/logic/Coaching.kt)), and the app's move depends on it:
 **captured** (you said it) → **clarified** (it has a next action, filled in silently in the same turn) →
 **planned** (in Today's 3) → **in session** (you tapped ▶ Start: a timer runs) → **done**. A session you
 stop, or don't answer at its end, leaves the task **paused**, with an optional "where did you stop?". A
@@ -47,7 +47,7 @@ task postponed or ignored 3+ times in 7 days is **avoided**: the nagging stops
 
 ### Reply buttons ("chips")
 Every proactive message, and every chat reply about exactly one open task, comes with 2–4 buttons,
-chosen by code from the message kind and the task's stage ([`Logic.chipsFor`](android/app/src/main/java/com/prominder/myapp/logic/Logic.kt)),
+chosen by code from the message kind and the task's stage ([`ChipRules.chipsFor`](android/app/src/main/java/com/prominder/myapp/logic/ChipRules.kt)),
 in Hebrew or English (the language of your latest message). They show only under the latest message
 and disappear once you reply.
 
@@ -87,7 +87,7 @@ tasks count; no streaks, no zeros). The evening review leads with them too.
 
 ### What now?
 Tap **What now?** (on the focus card or the mid-day check-in) and code picks **one** thing, in under a
-second, with no LLM ([`Logic.pickNext`](android/app/src/main/java/com/prominder/myapp/logic/Logic.kt)): the first of Today's 3 not done yet, if
+second, with no LLM ([`Focus.pickNext`](android/app/src/main/java/com/prominder/myapp/logic/Focus.kt)): the first of Today's 3 not done yet, if
 its estimate × 1.5 fits before your next meeting; otherwise the shortest one that fits; if nothing fits,
 5 minutes of the first. The answer is "Do this: {first step} ({n} min)" with ▶ Start · Low energy ·
 Something else. **Low energy** picks the smallest task estimated at 15 minutes or less (or 5 minutes of
@@ -140,7 +140,7 @@ screen and used by the next check-in ("You stopped at row 40"), and it's cleared
 
 ### Gentler pressure
 The more you avoid something, the quieter the app gets about it, not the louder: pressure on an avoided
-task feeds shame, and shame feeds avoidance. All of it is decided by code ([`Logic.kt`](android/app/src/main/java/com/prominder/myapp/logic/Logic.kt)).
+task feeds shame, and shame feeds avoidance. All of it is decided by code ([`Pressure.kt`](android/app/src/main/java/com/prominder/myapp/logic/Pressure.kt)).
 
 - **Avoided tasks.** After 3 postponed or ignored check-ins in 7 days, ordinary check-ins about the task
   stop. You get **one** message ("Taxes keeps slipping, and that's fine. What's in the way?") with
@@ -178,7 +178,7 @@ interfered. Each tick:
 1. Tasks whose `remind_at` has passed are due for contact, if they may get check-ins at all (Today's 3,
    due within 48 hours, reminders you asked for, meetings and hard stops; see [Today's 3](#todays-3)).
    Parked tasks never are; during a lapse only meetings, hard stops and reminders you asked for.
-2. Guardrails, in code, before any LLM call ([`Logic.contactDecision`](android/app/src/main/java/com/prominder/myapp/logic/Logic.kt)):
+2. Guardrails, in code, before any LLM call ([`Contacts.contactDecision`](android/app/src/main/java/com/prominder/myapp/logic/Contacts.kt)):
    - Shabbat / holidays and quiet hours are never overruled, whatever the priority (meetings included)
    - while a focus session runs (until it ends + 10 min) only meetings, hard stops and its own end
      check-in are sent
@@ -206,7 +206,7 @@ Diagnostics keeps a log of every tick: what was due, what was sent, and why anyt
 ("skipped: quiet hours", "skipped: min gap, 12 of 20 min"). Share sends it.
 
 ### How loud: normal, urgent, alarm
-Every message gets a **level**, decided by code ([`Logic.alertLevel`](android/app/src/main/java/com/prominder/myapp/logic/Logic.kt)). Each level is a
+Every message gets a **level**, decided by code ([`Loudness.alertLevel`](android/app/src/main/java/com/prominder/myapp/logic/Loudness.kt)). Each level is a
 notification channel, so its sound and vibration are yours to change in Android's settings.
 
 | Level | When | On the phone |
@@ -277,7 +277,7 @@ an LLM wrote. Nothing shows when code wrote the latest message (a template, a bu
 [`backend/app/prompts/`](backend/app/prompts/): `core.md` (who the assistant is and the communication
 rules, in every prompt) and [`playbooks/`](backend/app/prompts/playbooks/) (`planning`, `stuck`,
 `avoiding`, `overwhelmed`, `reentry`, `celebrate`, `sunday`). Code picks at most two per call
-([`Logic.selectPlaybooks`](android/app/src/main/java/com/prominder/myapp/logic/Logic.kt)): the morning gets `planning`, an avoided task
+([`Coaching.selectPlaybooks`](android/app/src/main/java/com/prominder/myapp/logic/Coaching.kt)): the morning gets `planning`, an avoided task
 `avoiding`, an "I'm stuck" tap or a stuck event today `stuck`, the first morning of the week `sunday`,
 the message after a lapse `reentry`, and so on; with no signal, the core only.
 Smaller prompts get better behaviour from cheaper models. `system.md` (chat), `checkin.md` and

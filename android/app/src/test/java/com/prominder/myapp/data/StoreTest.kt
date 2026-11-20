@@ -17,8 +17,8 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 /**
- * The task operations on a real (in-memory) Room database, checked against what backend/app/tasks.py and
- * actions.py do (their tests: test_tools.py, test_phase1_flow.py, test_review_fixes.py).
+ * The task operations on a real (in-memory) Room database, with the cases of test_tools.py, test_phase1_flow.py
+ * and test_review_fixes.py (the Python server's tests, removed in b09e82e).
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [29])

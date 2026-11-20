@@ -8,7 +8,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.LayoutDirection
 
-/** The web app's palette (web/style.css): dark, with an amber accent. */
+/** The app's palette: dark, with an amber accent. */
 object Palette {
     val Bg = Color(0xFF111827)
     val Card = Color(0xFF1F2937)

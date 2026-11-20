@@ -1,18 +1,18 @@
 package com.prominder.myapp.llm
 
-import com.prominder.myapp.logic.Logic
+import com.prominder.myapp.logic.Coaching
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** Prompt rendering (backend/app/prompting.py) on the real prompt files. */
+/** Prompt rendering (Prompts.kt) on the real prompt files in backend/app/prompts/. */
 class PromptsTest {
     private val prompts = testPrompts()
 
     @Test fun `every prompt and playbook the app uses exists`() {
         Prompts.NAMES.forEach { assertTrue(it, prompts.load(it).isNotBlank()) }
-        Logic.PLAYBOOKS.forEach { assertTrue(it, prompts.load("playbooks/$it").isNotBlank()) }
+        Coaching.PLAYBOOKS.forEach { assertTrue(it, prompts.load("playbooks/$it").isNotBlank()) }
     }
 
     @Test fun `placeholders are filled, unknown braces stay`() {

@@ -1,6 +1,6 @@
 package com.prominder.myapp.data
 
-import com.prominder.myapp.logic.Logic.ChipJson
+import com.prominder.myapp.logic.ChipRules.ChipJson
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -10,9 +10,9 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.longOrNull
 
-/** The reply buttons under a message, as stored (JSON text, the way the server's thread.py wrote them). */
+/** The reply buttons under a message, as stored (JSON text, the same in the backup). */
 object Chips {
-    /** Python's json.dumps(…, ensure_ascii=False), key for key. */
+    /** JSON with ", " and ": " separators and non-ASCII kept as is, key for key: the same text older rows have. */
     fun encode(chips: List<ChipJson>): String = chips.joinToString(", ", "[", "]") { c ->
         val fields = mutableListOf("\"id\": ${str(c.id)}", "\"label\": ${str(c.label)}")
         c.action?.let { fields += "\"action\": ${str(it)}" }
