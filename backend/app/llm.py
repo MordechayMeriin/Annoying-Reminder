@@ -1,14 +1,12 @@
-"""OpenRouter client with model fallback, a daily call cap and a strict timeout.
+"""OpenRouter client with model fallback and a strict timeout.
 
-Anything that means "no usable answer right now" (cap reached, 429, timeout, network error,
-server error, malformed response) raises LLMUnavailable, so callers can fall back to templates.
+Anything that means "no usable answer right now" (429, timeout, network error, server error, malformed response)
+raises LLMUnavailable, so the phone can fall back to its templates. The daily cap and the rate limit are
+llm_proxy.py's.
 """
 
 import logging
-from contextlib import contextmanager
-from contextvars import ContextVar
-from datetime import date, datetime
-from typing import Any, Iterator
+from typing import Any
 
 import httpx
 
@@ -17,67 +15,15 @@ from .config import get_settings
 
 log = logging.getLogger("llm")
 
-_calls_today: dict[date, int] = {}
-
-# The models that answered inside a track_models() block. A list, not a value: asyncio.wait_for and
-# to_thread run the call in a copy of the context, and the copy still points at the same list.
-_answered_by: ContextVar[list[str] | None] = ContextVar("answered_by", default=None)
-
 
 class LLMUnavailable(RuntimeError):
     """No answer from the LLM right now. Use a fallback; this is not a bug."""
 
 
-class LLMLimitReached(LLMUnavailable):
-    """Our own daily cap (LLM_CALLS_PER_DAY) is used up."""
-
-
-def _count_call() -> None:
-    s = get_settings()
-    today = datetime.now(s.tz).date()
-    for d in list(_calls_today):
-        if d != today:
-            del _calls_today[d]
-    if _calls_today.get(today, 0) >= s.llm_calls_per_day:
-        raise LLMLimitReached("Daily LLM call limit reached")
-    _calls_today[today] = _calls_today.get(today, 0) + 1
-
-
-@contextmanager
-def track_models() -> Iterator[list[str]]:
-    """
-    Collects the model of every answer received inside the block, in order (the last one wrote the
-    final text). Used to show which model wrote a message, when the owner turns that on.
-    """
-    models: list[str] = []
-    token = _answered_by.set(models)
-    try:
-        yield models
-    finally:
-        _answered_by.reset(token)
-
-
-def record_model(model: str | None) -> None:
-    """Note the model that answered (OpenRouter says which one, after any fallback)."""
-    models = _answered_by.get()
-    if models is not None and model:
-        models.append(model)
-
-
-def last_model(models: list[str], used: bool = True) -> str | None:
-    """The model behind a message: the last one that answered, or None if the text isn't the LLM's."""
-    return models[-1] if used and models else None
-
-
-def calls_today() -> int:
-    return _calls_today.get(datetime.now(get_settings().tz).date(), 0)
-
-
 async def chat_completion(messages: list[dict[str, Any]], tools: list[dict] | None = None,
                           temperature: float = 0.3, max_tokens: int | None = None,
-                          timeout: float | None = None) -> dict[str, Any]:
-    """Returns the assistant message dict ({role, content, tool_calls?})."""
-    _count_call()
+                          timeout: float | None = None) -> tuple[dict[str, Any], str | None]:
+    """The assistant message dict ({role, content, tool_calls?}) and the model that wrote it (after any fallback)."""
     s = get_settings()
     body: dict[str, Any] = {
         "model": s.openrouter_models[0],
@@ -94,7 +40,7 @@ async def chat_completion(messages: list[dict[str, Any]], tools: list[dict] | No
     if tools:
         body["tools"] = tools
         body["tool_choice"] = "auto"
-        body["parallel_tool_calls"] = False  # a hint; we still handle several calls if they come
+        body["parallel_tool_calls"] = False  # a hint; the phone still handles several calls if they come
 
     try:
         r = await httpclient.client().post(
@@ -118,5 +64,4 @@ async def chat_completion(messages: list[dict[str, Any]], tools: list[dict] | No
         message = data["choices"][0]["message"]
     except (ValueError, KeyError, IndexError, TypeError) as e:
         raise LLMUnavailable(f"Malformed OpenRouter response: {e}") from e
-    record_model(data.get("model"))
-    return message
+    return message, data.get("model") or None

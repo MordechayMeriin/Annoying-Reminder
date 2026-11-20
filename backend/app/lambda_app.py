@@ -1,5 +1,5 @@
 """
-The backend on AWS Lambda (Android Phase C): everything the phone still needs from a server, moved off Render.
+The backend: one AWS Lambda function, everything the phone still needs from a server.
 
     GET  /health
     POST /auth/google                                       Google sign-in → the app's own login token (auth.py)
@@ -7,37 +7,30 @@ The backend on AWS Lambda (Android Phase C): everything the phone still needs fr
     POST /llm, GET /prompts                                 the assistant: one model call, the prompt files (llm_proxy.py)
     (EventBridge, once a day)                               "is the phone still alive?" (alive.py)
 
-It's the same code as on Render (auth.py, sync.py and the DynamoDB layer under them), in a small FastAPI app
-behind a Lambda function URL (Mangum turns the URL's events into ASGI requests). The web app's endpoints and /tick
-aren't here: after the handover the web app is switched off and the phone reminds you itself. Since Phase D the
-phone runs the assistant too, and comes here only for the model call (the key stays on the server).
+A small FastAPI app behind a Lambda function URL (Mangum turns the URL's events into ASGI requests). The phone
+does everything else itself: it keeps the data, reminds you, and runs the assistant, coming here only for the
+model call (the OpenRouter key stays on the server).
 
 AWS credentials come from the function's role, so there are no keys to keep. The settings it needs, as the
-function's environment variables: DYNAMODB_TABLE, GOOGLE_CLIENT_ID, OWNER_GOOGLE_EMAIL, ACTION_SECRET (the same
-value as on Render, so the phone stays logged in), ALERT_EMAIL (optional), OPENROUTER_API_KEY and OPENROUTER_MODELS
-(Phase D: the assistant; optional LLM_CALLS_PER_DAY, LLM_PER_MINUTE, LLM_TIMEOUT_S, LLM_REASONING_EFFORT). scripts/aws_lambda_setup.py sets up
-the function, its role, the URL and the daily schedule; .github/workflows/backend.yml deploys new code.
+function's environment variables: DYNAMODB_TABLE, GOOGLE_CLIENT_ID, OWNER_GOOGLE_EMAIL, ACTION_SECRET (signs the
+phone's login), ALERT_EMAIL (optional), OPENROUTER_API_KEY and OPENROUTER_MODELS (optional LLM_CALLS_PER_DAY,
+LLM_PER_MINUTE, LLM_TIMEOUT_S, LLM_REASONING_EFFORT, TIMEZONE). scripts/aws_lambda_setup.py sets up the function,
+its role, the URL and the daily schedule; .github/workflows/backend.yml deploys new code.
 """
 
 import json
 import logging
-import os
 import time
 from collections import deque
 from typing import Any
 
-# config.py asks for the web app's values at startup, which this function doesn't use. The LLM's two may be missing
-# until the setup script has run again for Phase D: then /llm says so (llm_proxy.configured).
-for _name in ("CRON_SECRET", "OPENROUTER_API_KEY", "OPENROUTER_MODELS", "WEB_ORIGIN", "API_URL"):
-    os.environ.setdefault(_name, "unused-on-lambda")
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.responses import JSONResponse
+from mangum import Mangum
+from pydantic import BaseModel, Field
 
-from fastapi import Depends, FastAPI, HTTPException  # noqa: E402
-from fastapi.responses import JSONResponse  # noqa: E402
-from mangum import Mangum  # noqa: E402
-from pydantic import BaseModel, Field  # noqa: E402
-
-from . import alive, auth, llm_proxy, sync  # noqa: E402
-from .auth import require_owner  # noqa: E402
+from . import alive, auth, llm_proxy, sync
+from .auth import require_owner
 
 logging.getLogger().setLevel(logging.INFO)
 log = logging.getLogger("lambda")

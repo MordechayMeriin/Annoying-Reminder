@@ -1,5 +1,5 @@
 """
-DynamoDB storage: one table, and the few generic operations the data modules build on.
+DynamoDB storage: one table, and the few generic operations the backup (sync.py) and the Lambda build on.
 
 Single-table layout. Every item has a partition key `pk` and a sort key `sk` (both strings), plus up to
 two global secondary indexes (GSI1 and GSI2, keys g1pk/g1sk and g2pk/g2sk, projecting every
@@ -16,24 +16,19 @@ attribute). Numeric ids are zero-padded in keys so text order is number order.
     focus session   sess                <id>                sess#open / <id> (open only)    sesstask#<task_id> / <id>
     preference      pref                <id>
     setting         setting             <key>
-    push device     push                <endpoint>
-    daily job run   job                 <job>#<date>
     id counter      counter             <name>
+    backup status   sync                status / alive_alert
+    LLM calls       llm                 day#<date>          (the daily cap, llm_proxy.py)
+
+The web app's items (push devices, daily job runs) may still be in the table; nothing reads them.
 
 Times are stored as fixed-width UTC text (2026-11-16T08:30:00.000000Z), so they sort correctly, and
 dates as YYYY-MM-DD. A missing attribute is None. Index keys are derived from the row on every write
 (Entity.item), so they can't drift from the data.
 
-Writes that depend on the current state use mutate(): read (strongly consistent), change in Python,
-write back only if nobody else wrote in between (a version number), retry otherwise. That gives the
-same guarantees as the old single-statement SQL updates (an overlapping tick can't claim a task or a
-session end twice). Index queries are eventually consistent (normally milliseconds behind).
-
-These functions block (boto3). Async code calls them through asyncio.to_thread, as before. The boto3
-client is thread-safe and created once.
+These functions block (boto3). The boto3 client is thread-safe and created once.
 """
 
-import secrets
 import threading
 import time
 from datetime import date, datetime, timezone
@@ -49,7 +44,7 @@ from . import config
 
 _TIME_FMT = "%Y-%m-%dT%H:%M:%S.%fZ"
 
-# The table (scripts/aws_setup.py creates it; the tests create it in moto). Provisioned capacity that
+# The table (scripts/aws_lambda_setup.py creates it; the tests create it in moto). Provisioned capacity that
 # adds up to DynamoDB's always-free 25 read + 25 write units per account and region.
 CAPACITY = {"table": (13, 11), "GSI1": (8, 9), "GSI2": (4, 5)}
 
@@ -82,10 +77,6 @@ _client_lock = threading.Lock()
 _ser, _de = TypeSerializer(), TypeDeserializer()
 
 
-class ConflictError(RuntimeError):
-    """mutate() kept losing the race with other writers (shouldn't happen with one user)."""
-
-
 def client():
     global _client
     if _client is None:
@@ -100,10 +91,6 @@ def client():
                                   connect_timeout=5, read_timeout=10, max_pool_connections=20),
                 )
     return _client
-
-
-def close_pool() -> None:
-    """Nothing to close (kept so shutdown code doesn't need to know the storage)."""
 
 
 def _table() -> str:
@@ -211,78 +198,8 @@ def get_raw(pk: str, sk: str) -> dict[str, Any] | None:
     return from_attr(r["Item"]) if "Item" in r else None
 
 
-def get(entity: Entity, pk: str, sk: str) -> dict[str, Any] | None:
-    raw = get_raw(pk, sk)
-    return entity.row(raw) if raw else None
-
-
-def get_many(entity: Entity, keys: list[tuple[str, str]]) -> list[dict[str, Any]]:
-    """Several items by key (any order; missing ones are left out)."""
-    out: list[dict[str, Any]] = []
-    unique = list(dict.fromkeys(keys))
-    for i in range(0, len(unique), 100):
-        request = {_table(): {"Keys": [to_attr({"pk": pk, "sk": sk}) for pk, sk in unique[i:i + 100]],
-                              "ConsistentRead": True}}
-        for _ in range(10):
-            r = client().batch_get_item(RequestItems=request)
-            out.extend(entity.row(from_attr(it)) for it in r["Responses"].get(_table(), []))
-            request = r.get("UnprocessedKeys") or {}
-            if not request:
-                break
-    return out
-
-
-def put(entity: Entity, row: dict[str, Any], *, new: bool = False) -> bool:
-    """Write a whole item. new=True: only if no item has these keys yet (False when one exists)."""
-    args: dict[str, Any] = {"TableName": _table(), "Item": entity.item(row, version=1)}
-    if new:
-        args["ConditionExpression"] = "attribute_not_exists(pk)"
-    try:
-        client().put_item(**args)
-    except ClientError as e:
-        if new and e.response["Error"]["Code"] == "ConditionalCheckFailedException":
-            return False
-        raise
-    return True
-
-
 def put_raw(values: dict[str, Any]) -> None:
     client().put_item(TableName=_table(), Item=to_attr(values))
-
-
-def delete(pk: str, sk: str) -> bool:
-    """True when there was an item to delete."""
-    r = client().delete_item(TableName=_table(), Key=to_attr({"pk": pk, "sk": sk}), ReturnValues="ALL_OLD")
-    return "Attributes" in r
-
-
-def mutate(entity: Entity, pk: str, sk: str,
-           change: Callable[[dict[str, Any]], dict[str, Any] | None]) -> dict[str, Any] | None:
-    """
-    Read the row, let `change` return the new row (or None to leave it as it is), and write it back if
-    nobody wrote in between. Returns the new row; None when the item doesn't exist or `change` said no.
-    `change` may run more than once (after a lost race), so it must not have side effects.
-    """
-    for _ in range(8):
-        raw = get_raw(pk, sk)
-        if raw is None:
-            return None
-        row = entity.row(raw)
-        new = change(dict(row))
-        if new is None:
-            return None
-        version = int(raw.get("v", 0))
-        try:
-            client().put_item(
-                TableName=_table(), Item=entity.item(new, version=version + 1),
-                ConditionExpression="attribute_exists(pk) AND (attribute_not_exists(v) OR v = :v)",
-                ExpressionAttributeValues=to_attr({":v": version}),
-            )
-            return new
-        except ClientError as e:
-            if e.response["Error"]["Code"] != "ConditionalCheckFailedException":
-                raise
-    raise ConflictError(f"Too many concurrent writes to {pk}/{sk}")
 
 
 def query(pk: str, *, index: str | None = None, sk_op: str | None = None, sk: Any = None,
@@ -329,20 +246,6 @@ def query(pk: str, *, index: str | None = None, sk_op: str | None = None, sk: An
         args["ExclusiveStartKey"] = r["LastEvaluatedKey"]
 
 
-def query_rows(entity: Entity, pk: str, **kw: Any) -> list[dict[str, Any]]:
-    return [entity.row(it) for it in query(pk, **kw)]
-
-
-def next_id(name: str) -> int:
-    """The next number in a counter (like a bigserial column)."""
-    r = client().update_item(
-        TableName=_table(), Key=to_attr({"pk": "counter", "sk": name}),
-        UpdateExpression="ADD n :one", ExpressionAttributeValues=to_attr({":one": 1}),
-        ReturnValues="UPDATED_NEW",
-    )
-    return int(from_attr(r["Attributes"])["n"])
-
-
 def set_counter_at_least(name: str, value: int) -> None:
     """For imports: make sure the counter won't hand out ids up to `value` again."""
     try:
@@ -370,16 +273,3 @@ def write_batch(puts: list[dict[str, Any]] = (), deletes: list[tuple[str, str]] 
             time.sleep(min(0.2 * 2 ** attempt, 5))   # over the provisioned capacity: wait for it to refill
         else:
             raise RuntimeError("DynamoDB kept refusing part of a batch write")
-
-
-def transact(puts: list[dict[str, Any]] = (), deletes: list[tuple[str, str]] = ()) -> None:
-    """All or nothing (up to 100 items)."""
-    items = ([{"Put": {"TableName": _table(), "Item": it}} for it in puts]
-             + [{"Delete": {"TableName": _table(), "Key": to_attr({"pk": pk, "sk": sk})}} for pk, sk in deletes])
-    if items:
-        client().transact_write_items(TransactItems=items)
-
-
-def rand() -> str:
-    """A short random suffix that keeps sort keys unique when two items share a time."""
-    return secrets.token_hex(4)

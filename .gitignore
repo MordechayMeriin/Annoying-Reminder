@@ -8,5 +8,3 @@ venv/
 .pytest_cache/
 .DS_Store
 
-# Generated at build time (web/build-config.sh)
-web/config.js

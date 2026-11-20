@@ -5,8 +5,8 @@ day (EventBridge → the Lambda, see lambda_app.py) this reads when the phone la
 upload, and the phone uploads at least once a day). If that's over two days ago, you get an email. At most one
 email a day while it lasts; nothing before the handover.
 
-The email goes through Amazon SES from your own address to itself, the identity scripts/aws_setup.py verified
-(SES's sandbox only sends between verified addresses, which is all this needs).
+The email goes through Amazon SES from your own address to itself, the identity scripts/aws_lambda_setup.py
+verified (SES's sandbox only sends between verified addresses, which is all this needs).
 """
 
 import logging

@@ -58,37 +58,29 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
 }
 
 object SyncScheduler {
-    private const val SOON = "sync-soon"
-    private const val NOW = "sync-now"
+    private const val CONVENIENT = "sync-convenient"
     private const val DAILY = "sync-daily"
-
-    /**
-     * While the app is being built (until Phase F) the backup runs a couple of minutes after every change, so a
-     * reinstall loses minutes, not a day. Changes made meanwhile go into the same upload.
-     */
-    val SOON_DELAY_MIN = 2L
 
     private val online = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
 
-    fun soon(context: Context) {
+    /**
+     * The cheap extra run, when you leave the app with changes not yet backed up: only on Wi-Fi (or another network
+     * that isn't metered) and with the battery not low, whenever Android finds that convenient. A lost or reset phone
+     * then loses minutes rather than up to a day. Changes made meanwhile go into the same upload.
+     */
+    fun whenConvenient(context: Context) {
+        val constraints = Constraints.Builder()
+            .setRequiredNetworkType(NetworkType.UNMETERED)
+            .setRequiresBatteryNotLow(true)
+            .build()
         val request = OneTimeWorkRequestBuilder<SyncWorker>()
-            .setInitialDelay(SOON_DELAY_MIN, TimeUnit.MINUTES)
-            .setConstraints(online)
+            .setConstraints(constraints)
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 1, TimeUnit.MINUTES)
             .build()
-        workManager(context)?.enqueueUniqueWork(SOON, ExistingWorkPolicy.KEEP, request)
+        workManager(context)?.enqueueUniqueWork(CONVENIENT, ExistingWorkPolicy.KEEP, request)
     }
 
-    /** Right away (Sync now, the app going to the background). */
-    fun now(context: Context) {
-        val request = OneTimeWorkRequestBuilder<SyncWorker>()
-            .setConstraints(online)
-            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 1, TimeUnit.MINUTES)
-            .build()
-        workManager(context)?.enqueueUniqueWork(NOW, ExistingWorkPolicy.REPLACE, request)
-    }
-
-    /** Once a day whatever happens: the safety net, and the "phone is alive" signal. */
+    /** Once a day whatever happens, on any network: the backup itself, and the "phone is alive" signal. */
     fun daily(context: Context) {
         val request = PeriodicWorkRequestBuilder<SyncWorker>(24, TimeUnit.HOURS, 6, TimeUnit.HOURS)
             .setConstraints(online)

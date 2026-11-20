@@ -1,26 +1,28 @@
 """
-Move the backend from Render to AWS Lambda (Android Phase C). Run once, as an admin of your AWS account. Safe to
-run again: it finds what exists and only adds or updates what's missing.
+Set up the backend on AWS Lambda. Run once, as an admin of your AWS account. Safe to run again: it finds what exists
+and only adds or updates what's missing.
 
-The easiest place is AWS CloudShell (the >_ icon at the top of the AWS console, in the region of your DynamoDB
-table, the same as AWS_REGION on Render). It has Python, boto3 and your login:
+The easiest place is AWS CloudShell (the >_ icon at the top of the AWS console, in your region). It has Python,
+boto3 and your login:
 
     git clone https://github.com/MordechayMeriin/Annoying-Reminder.git && cd Annoying-Reminder/backend
     python3 scripts/aws_lambda_setup.py
-    # It asks for the values from Render → annoying-reminder-api → Environment: GOOGLE_CLIENT_ID,
-    # OWNER_GOOGLE_EMAIL, ACTION_SECRET, and (Phase D, the assistant) OPENROUTER_API_KEY and OPENROUTER_MODELS.
-    # Secrets are typed, not shown. Run again, it only asks for what the function doesn't have yet.
+    # It asks for GOOGLE_CLIENT_ID, OWNER_GOOGLE_EMAIL, OPENROUTER_API_KEY and OPENROUTER_MODELS (secrets are typed,
+    # not shown). Run again, it only asks for what the function doesn't have yet.
 
 What it creates (all inside the always-free limits for one user):
-  1. A role for the function "prominder-api": this table only, sending email from your address, its own logs.
-  2. The function itself (Python 3.12), with a stand-in until GitHub Actions deploys the real code, and its
-     settings. ACTION_SECRET is Render's, so the phone stays logged in. The OpenRouter key lives here, never on
-     the phone (Phase D).
-  3. Its HTTPS address (a "function URL"). The app checks every login itself, as on Render.
-  4. The daily "is the phone still alive?" run (EventBridge, 06:00 UTC).
-  5. GitHub's way in (OIDC): a role GitHub Actions can take, from this repository's main branch only, that
+  1. The DynamoDB table (the phone's backup), if it isn't there yet.
+  2. Your email address in SES, for the alive check's email (AWS sends a link to click, once).
+  3. A role for the function "prominder-api": this table only, sending email from your address, its own logs.
+  4. The function itself (Python 3.12), with a stand-in until GitHub Actions deploys the real code, and its
+     settings. ACTION_SECRET signs the phone's login: made up here the first time, kept after that. The OpenRouter
+     key lives here, never on the phone.
+  5. Its HTTPS address (a "function URL"). The app checks every login itself.
+  6. The daily "is the phone still alive?" run (EventBridge, 06:00 UTC).
+  7. GitHub's way in (OIDC): a role GitHub Actions can take, from this repository's main branch only, that
      may only update this function's code. No AWS keys are stored in GitHub.
-At the end it prints the three GitHub variables to set.
+  8. A monthly budget of $1 that emails you if AWS ever expects to charge anything (--no-budget skips it).
+At the end it prints the GitHub variables to set.
 """
 
 import argparse
@@ -28,6 +30,7 @@ import getpass
 import io
 import json
 import os
+import secrets
 import sys
 import time
 import urllib.request
@@ -37,14 +40,15 @@ from pathlib import Path
 import boto3
 from botocore.exceptions import ClientError
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from aws_setup import ses_identity  # noqa: E402
+from app.db import table_spec  # noqa: E402
 
 FUNCTION = "prominder-api"
 ROLE = "prominder-lambda"
 DEPLOY_ROLE = "prominder-github-deploy"
 RULE = "prominder-alive-check"
+BUDGET_NAME = "prominder-free-tier-guard"
 SCHEDULE = "cron(0 6 * * ? *)"   # 06:00 UTC: 08:00 in Israel's winter, 09:00 in summer
 GITHUB_OIDC = "token.actions.githubusercontent.com"
 TIMEOUT_S = 60   # one model call takes up to LLM_TIMEOUT_S (25 s), plus a cold start
@@ -62,14 +66,51 @@ def step(text: str) -> None:
     print(f"\n== {text}")
 
 
+HINTS = {
+    "GOOGLE_CLIENT_ID": "Google Cloud → APIs & Services → Credentials → the 'Web application' client's ID",
+    "OWNER_GOOGLE_EMAIL": "the one Google account allowed in",
+    "OPENROUTER_API_KEY": "openrouter.ai → Keys",
+    "OPENROUTER_MODELS": "comma-separated, in fallback order",
+}
+
+
 def ask(name: str, given: str | None, secret: bool = False, current: dict[str, str] | None = None) -> str:
     """A value from the command line, the environment, the function's current settings, or typed in."""
     value = (given or os.environ.get(name, "") or (current or {}).get(name, "")).strip()
     if value == "unused-on-lambda":
         value = ""
     while not value:
-        value = (getpass.getpass if secret else input)(f"{name} (from Render → annoying-reminder-api → Environment): ").strip()
+        value = (getpass.getpass if secret else input)(f"{name} ({HINTS.get(name, '')}): ").strip()
     return value
+
+
+def ses_identity(ses, email: str) -> bool:
+    """True when the address is verified for sending."""
+    try:
+        r = ses.get_email_identity(EmailIdentity=email)
+    except ses.exceptions.NotFoundException:
+        ses.create_email_identity(EmailIdentity=email)
+        print(f"Sent a verification email to {email}. Click the link in it (check spam).")
+        return False
+    if r.get("VerifiedForSendingStatus"):
+        print(f"{email} is verified for sending.")
+        return True
+    print(f"{email} isn't verified yet. Click the link in AWS's email (check spam).")
+    return False
+
+
+def dynamodb_table(ddb, name: str) -> str:
+    try:
+        r = ddb.describe_table(TableName=name)
+        print(f"Table {name} exists ({r['Table']['TableStatus']}).")
+        return r["Table"]["TableArn"]
+    except ddb.exceptions.ResourceNotFoundException:
+        pass
+    r = ddb.create_table(**table_spec(name))
+    print(f"Creating table {name}…")
+    ddb.get_waiter("table_exists").wait(TableName=name)
+    print("Created.")
+    return r["TableDescription"]["TableArn"]
 
 
 def current_env(lam) -> dict[str, str]:
@@ -150,7 +191,7 @@ def function_url(lam) -> str:
     except lam.exceptions.ResourceNotFoundException:
         url = lam.create_function_url_config(FunctionName=FUNCTION, AuthType="NONE")["FunctionUrl"]
         print("Created the function URL.")
-    # Anyone may reach the URL; the app's own login check (auth.py) decides who gets in, as on Render.
+    # Anyone may reach the URL; the app's own login check (auth.py) decides who gets in.
     _permission(lam, "public-url", Action="lambda:InvokeFunctionUrl", Principal="*", FunctionUrlAuthType="NONE")
     try:
         _permission(lam, "public-url-invoke", Action="lambda:InvokeFunction", Principal="*", InvokedViaFunctionUrl=True)
@@ -226,6 +267,27 @@ def github_deploy_role(iam, account: str, repo: str, function_arn: str) -> str:
     return arn
 
 
+def budget(budgets, account: str, email: str) -> None:
+    try:
+        budgets.describe_budget(AccountId=account, BudgetName=BUDGET_NAME)
+        print("The $1 budget alert exists.")
+        return
+    except budgets.exceptions.NotFoundException:
+        pass
+    notifications = [
+        {"Notification": {"NotificationType": kind, "ComparisonOperator": "GREATER_THAN", "Threshold": 1.0,
+                          "ThresholdType": "PERCENTAGE"},
+         "Subscribers": [{"SubscriptionType": "EMAIL", "Address": email}]}
+        for kind in ("ACTUAL", "FORECASTED")
+    ]
+    budgets.create_budget(
+        AccountId=account,
+        Budget={"BudgetName": BUDGET_NAME, "BudgetLimit": {"Amount": "1", "Unit": "USD"},
+                "TimeUnit": "MONTHLY", "BudgetType": "COST"},
+        NotificationsWithSubscribers=notifications)
+    print(f"Created a $1/month budget: AWS emails {email} if it ever expects a charge.")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--region", default=os.environ.get("AWS_REGION") or boto3.session.Session().region_name or "us-west-2",
@@ -236,6 +298,7 @@ def main() -> None:
     p.add_argument("--owner-email", help="OWNER_GOOGLE_EMAIL")
     p.add_argument("--alert-email", help="where the 'phone is silent' email goes (default: the owner's address)")
     p.add_argument("--openrouter-models", help="OPENROUTER_MODELS: comma-separated, in fallback order")
+    p.add_argument("--no-budget", action="store_true", help="skip the $1/month budget alert")
     a = p.parse_args()
 
     session = boto3.session.Session(region_name=a.region)
@@ -245,14 +308,14 @@ def main() -> None:
 
     google_client_id = ask("GOOGLE_CLIENT_ID", a.google_client_id, current=have)
     owner = ask("OWNER_GOOGLE_EMAIL", a.owner_email, current=have).lower()
-    action_secret = ask("ACTION_SECRET", None, secret=True, current=have)
+    # Kept once it exists (changing it logs the phone out); made up the first time.
+    action_secret = have.get("ACTION_SECRET") or os.environ.get("ACTION_SECRET") or secrets.token_urlsafe(32)
     openrouter_key = ask("OPENROUTER_API_KEY", None, secret=True, current=have)
     openrouter_models = ask("OPENROUTER_MODELS", a.openrouter_models, current=have)
     alert = (a.alert_email or have.get("ALERT_EMAIL") or owner).lower()
 
     step(f"The table ({a.region})")
-    table_arn = session.client("dynamodb").describe_table(TableName=a.table)["Table"]["TableArn"]
-    print(f"Found {a.table}.")
+    table_arn = dynamodb_table(session.client("dynamodb"), a.table)
 
     step("The address the alive check emails from and to")
     if not ses_identity(session.client("sesv2"), alert):
@@ -277,11 +340,19 @@ def main() -> None:
     step("GitHub Actions' way in")
     deploy_arn = github_deploy_role(iam, account, a.repo, function_arn)
 
+    if not a.no_budget:
+        step("A budget alert")
+        try:
+            budget(session.client("budgets"), account, alert)
+        except ClientError as e:   # not allowed for this login: optional
+            print(f"Skipped ({e.response['Error']['Code']}).")
+
     step("Done. Now in GitHub → the repository → Settings → Secrets and variables → Actions → Variables:")
     print(f"  AWS_DEPLOY_ROLE_ARN = {deploy_arn}")
     print(f"  AWS_REGION          = {a.region}")
-    print(f"  API_URL             = {url}      ← only after the check in docs/android-phase-c.md")
-    print("Then run the 'Backend' workflow (Actions → Backend → Run workflow) to deploy the code.")
+    print(f"  API_URL             = {url}")
+    print("Then run the 'Backend' workflow (Actions → Backend → Run workflow) to deploy the code, and the 'Android'")
+    print("workflow (with 'upload' ticked) so the app uses this address.")
 
 
 if __name__ == "__main__":

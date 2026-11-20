@@ -29,13 +29,13 @@ class MainActivity : ComponentActivity() {
         (application as ReminderApp).visible = true
     }
 
-    /** Leaving the app: back up what changed now, rather than in a couple of minutes. */
+    /** Leaving the app with changes not backed up yet: back them up when convenient (on Wi-Fi), not only at the daily run. */
     override fun onStop() {
         super.onStop()
         val app = application as ReminderApp
         app.visible = false
         lifecycleScope.launch {
-            if (app.store.hasData() && app.sync.pending() > 0) SyncScheduler.now(app)
+            if (app.store.hasData() && app.sync.pending() > 0) SyncScheduler.whenConvenient(app)
         }
     }
 

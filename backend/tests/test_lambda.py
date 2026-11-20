@@ -24,7 +24,6 @@ def _new_table():
 def table():
     with mock_aws():
         _new_table()
-        sync._forget_cache()
         yield
         db._client = None
 
@@ -69,9 +68,9 @@ def test_the_backup_needs_the_owners_login(lam, table):
     assert status == 200 and body["handedOverAt"] is None
 
 
-def test_a_login_token_from_render_still_works(lam, table):
-    """Same ACTION_SECRET → the same signing key: the phone stays logged in across the move."""
-    token = owner_token()   # what Render handed out
+def test_a_login_token_keeps_working(lam, table):
+    """Same ACTION_SECRET → the same signing key: the phone stays logged in across deploys (and the move from Render)."""
+    token = owner_token()
     assert call(lam, "POST", "/sync/restore", {"handover": True, "device": "Galaxy S9"}, token)[0] == 200
     status, body = call(lam, "GET", "/sync/status", token=token)
     assert body["handedOverAt"] and body["device"] == "Galaxy S9"

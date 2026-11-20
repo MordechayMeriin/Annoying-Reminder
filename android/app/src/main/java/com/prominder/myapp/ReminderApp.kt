@@ -38,11 +38,13 @@ class ReminderApp : Application() {
     /** Background work that outlives a screen: ticks, notification buttons. */
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
-    /** Your data: the phone's database, and every change to it (each one schedules the backup and re-plans the next tick). */
+    /**
+     * Your data: the phone's database, and every change to it (each one re-plans the next tick). The backup runs once
+     * a day, and when you leave the app on Wi-Fi (SyncScheduler), not after every change.
+     */
     val db: AppDatabase by lazy { AppDatabase.open(this) }
     val store: Store by lazy {
         Store(db, onChange = {
-            SyncScheduler.soon(this)
             Reminders.replan(this)
         }, onUserActivity = {
             // As the server's cancel_alarms: writing in the chat or tapping anything means you've seen it.

@@ -49,9 +49,9 @@ private val WEEKDAY_LABELS = linkedMapOf("sun" to "Sunday", "mon" to "Monday", "
     "thu" to "Thursday", "fri" to "Friday", "sat" to "Saturday")
 
 /**
- * ⚙ Settings: the same ones as the web app (they're stored the same way and backed up), minus Pushover's account and
- * sounds and browser notifications, which the phone's own notification channels replace (its loudness rules stay,
- * under "How loud"). Plus what you asked of the assistant.
+ * ⚙ Settings: the web app's settings (stored the same way, and backed up), minus Pushover's account and sounds and
+ * browser notifications, which the phone's own notification channels replace (the loudness rules stay, under
+ * "How loud"). Plus what you asked of the assistant.
  */
 @Composable
 fun SettingsScreen(
@@ -66,8 +66,8 @@ fun SettingsScreen(
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         item { TopBar("Settings", onBack = onBack) }
         item {
-            Muted("Most of these shape reminders and the assistant's messages, which come back in the next updates. " +
-                "They're kept and backed up already.")
+            Muted("They shape when reminders come, how loud they are, and the assistant's messages. A change applies " +
+                "from the next reminder check. You can also just say it in the chat.")
         }
         items.groupBy { it.group }.forEach { (group, rows) ->
             item(key = "g$group") { SectionTitle(group) }

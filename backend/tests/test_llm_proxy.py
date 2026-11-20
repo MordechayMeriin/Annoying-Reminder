@@ -3,7 +3,7 @@
 import pytest
 from test_lambda import call, owner_token, table  # noqa: F401  (the fixture)
 
-from app import llm, llm_proxy
+from app import llm_proxy
 from app.llm import LLMUnavailable
 
 ASK = {"messages": [{"role": "user", "content": "hi"}], "temperature": 0.5}
@@ -23,8 +23,7 @@ def model(monkeypatch):
 
     async def fake(messages, tools=None, temperature=0.3, max_tokens=None, timeout=None):
         calls.append({"messages": messages, "tools": tools, "temperature": temperature, "timeout": timeout})
-        llm.record_model("google/gemini-2.5-flash")
-        return {"role": "assistant", "content": "Hello!", "tool_calls": None, "refusal": None}
+        return {"role": "assistant", "content": "Hello!", "tool_calls": None, "refusal": None}, "google/gemini-2.5-flash"
 
     monkeypatch.setattr(llm_proxy, "chat_completion", fake)
     return calls
@@ -54,7 +53,7 @@ def test_tool_calls_are_passed_through(lam, table, monkeypatch):
     calls = [{"id": "c1", "type": "function", "function": {"name": "list_tasks", "arguments": "{\"scope\": \"open\"}"}}]
 
     async def fake(messages, **kw):
-        return {"role": "assistant", "content": None, "tool_calls": calls}
+        return {"role": "assistant", "content": None, "tool_calls": calls}, None
 
     monkeypatch.setattr(llm_proxy, "chat_completion", fake)
     status, body = call(lam, "POST", "/llm", ASK, owner_token())
@@ -109,3 +108,8 @@ def test_prompts_lists_every_file_with_a_version(lam, table):
     assert "playbooks/stuck" in names and "{core}" in body["prompts"]["system"]
     assert len(body["version"]) == 16
     assert call(lam, "GET", "/prompts", token=owner_token())[1]["version"] == body["version"]
+
+
+def test_an_empty_key_is_not_set_up_either(lam, table, model, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "")
+    assert call(lam, "POST", "/llm", ASK, owner_token())[1]["code"] == "not_configured"

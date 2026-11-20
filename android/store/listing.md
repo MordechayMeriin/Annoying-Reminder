@@ -59,7 +59,7 @@ foreground service, no background location, and doesn't read usage stats.
 **Does your app collect or share any of the required user data types?** Yes.
 **Is all of the user data encrypted in transit?** Yes (HTTPS only).
 **Do you provide a way for users to request that their data is deleted?** Yes: the owner controls the
-Supabase project and can delete everything there; uninstalling deletes everything on the phone.
+AWS account that holds the backup and can delete everything there; uninstalling deletes everything on the phone.
 
 | Data type | Collected | Shared | Optional? | Why |
 |---|---|---|---|---|
@@ -70,6 +70,6 @@ Supabase project and can delete everything there; uninstalling deletes everythin
 \* The Diagnostics log stays on the phone unless you tap Share yourself. Crash reports in the Play Console
 come from Google Play, not from the app.
 
-"Shared" is **No** because Supabase (database), AWS (the server function) and the AI provider only process
+"Shared" is **No** because AWS (the backup database and the server function) and the AI provider only process
 data on the owner's behalf, which Play's form counts as service providers, not sharing. None of it is used
 for ads or analytics, and none is sold.

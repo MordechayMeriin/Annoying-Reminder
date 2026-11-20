@@ -27,10 +27,10 @@ defaults:
     working-directory: android
 
 env:
-  # Public values (the web app ships them to every browser), kept as repository *variables*.
-  # Google sign-in: the OAuth "Web application" client id (the same as GOOGLE_CLIENT_ID on Render).
+  # Public values (anyone can read them out of the app), kept as repository *variables*.
+  # Google sign-in: the OAuth "Web application" client id (the same as GOOGLE_CLIENT_ID on the Lambda).
   GOOGLE_WEB_CLIENT_ID: ${{ vars.GOOGLE_WEB_CLIENT_ID }}
-  # Optional: the backend's address (default https://annoying-reminder-api.onrender.com, in app/build.gradle.kts).
+  # The backend: the Lambda's function URL (backend/scripts/aws_lambda_setup.py prints it). Required for a release.
   API_URL: ${{ vars.API_URL }}
   # Every Play upload needs a higher versionCode: the run number followed by the attempt (run 12 → 121,
   # its re-run → 122, run 13 → 131), so it always goes up.
@@ -109,6 +109,12 @@ jobs:
         run: |
           echo "::error::ANDROID_UPLOAD_KEYSTORE_BASE64 isn't set. See android/README.md, 'Upload key'."
           exit 1
+
+      - name: Check the backend's address
+        run: |
+          echo "API_URL = '$API_URL'"
+          [[ "$API_URL" == https://* && "$API_URL" != *onrender.com* ]] || {
+            echo "::error::The variable API_URL must be the Lambda's function URL (https://….lambda-url.<region>.on.aws). Render is gone."; exit 1; }
 
       - name: Write the upload key
         env:

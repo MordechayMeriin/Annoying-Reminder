@@ -147,6 +147,11 @@ def test_a_token_for_a_former_owner_is_401():
     assert owner_check(token) == 401
 
 
+def test_a_token_from_another_provider_is_401(google):
+    """The web app's Cognito tokens (RS256) aren't accepted any more: only the app's own login token is."""
+    assert owner_check(google_token()) == 401
+
+
 def test_a_notification_button_secret_isnt_the_login_key():
     """The login key is derived from ACTION_SECRET, not ACTION_SECRET itself."""
     now = int(time.time())
@@ -159,7 +164,7 @@ def test_a_notification_button_secret_isnt_the_login_key():
 
 @pytest.fixture
 def client():
-    from app.main import app
+    from app.lambda_app import app
     with TestClient(app) as c:
         yield c
 

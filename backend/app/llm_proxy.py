@@ -9,7 +9,7 @@ limits that protect the OpenRouter account:
 - a rate limit (LLM_PER_MINUTE, default 30), per instance, like the login's;
 - a timeout per call (LLM_TIMEOUT_S, default 25; the phone may ask for less, never more).
 
-One request is one model call: the phone's tool loop (llm_loop.py, ported) makes several. Anything that means
+One request is one model call: the phone's tool loop (ToolLoop.kt) makes several. Anything that means
 "no usable answer right now" is a 503 the phone answers with its templates, the cap is a 429 with code "limit".
 
 GET /prompts hands out the prompt files of this deployment, so a prompt can change without a new app release: the
@@ -22,18 +22,21 @@ import os
 import time
 from collections import deque
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from botocore.exceptions import ClientError
 
 from . import db
 from .config import get_settings
-from .llm import LLMLimitReached, LLMUnavailable, chat_completion, last_model, track_models
-from .prompting import PROMPT_DIR
+from .llm import LLMUnavailable, chat_completion
 
 log = logging.getLogger("llm_proxy")
 
-NOT_SET = "unused-on-lambda"   # lambda_app.py's stand-in for a variable the function doesn't have yet
+# The prompt files: the phone ships a copy (android/app/build.gradle.kts copies them in) and prefers these.
+PROMPT_DIR = Path(__file__).parent / "prompts"
+# An earlier version's stand-in for a variable the function didn't have yet: counts as not set.
+NOT_SET = "unused-on-lambda"
 
 
 class ProxyError(Exception):
@@ -114,18 +117,15 @@ async def complete(messages: list[dict[str, Any]], tools: list[dict[str, Any]] |
     s = get_settings()
     timeout = min(timeout_s or s.llm_timeout_s, s.llm_timeout_s)
     try:
-        with track_models() as models:
-            message = await chat_completion(messages, tools=tools or None, temperature=temperature,
-                                            max_tokens=max_tokens, timeout=timeout)
-    except LLMLimitReached:
-        raise ProxyError(429, "Daily LLM limit reached. Reminders still work.", "limit") from None
+        message, model = await chat_completion(messages, tools=tools or None, temperature=temperature,
+                                               max_tokens=max_tokens, timeout=timeout)
     except LLMUnavailable as e:
         log.warning("LLM unavailable: %s", e)
         raise ProxyError(503, "The assistant is unavailable right now. Try again in a minute.", "unavailable") from None
     out = {"role": "assistant", "content": message.get("content") or ""}
     if message.get("tool_calls"):
         out["tool_calls"] = message["tool_calls"]
-    return {"message": out, "model": last_model(models)}
+    return {"message": out, "model": model}
 
 
 def prompt_files() -> dict[str, Any]:

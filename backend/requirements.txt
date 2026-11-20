@@ -1,9 +1,4 @@
-fastapi>=0.115
-uvicorn[standard]>=0.30
-httpx>=0.27
+# Everything for running the backend's tests and scripts on a computer: the Lambda function's own dependencies,
+# plus boto3, which Lambda's Python runtime already has. Tests also need: pytest "moto[dynamodb]".
+-r lambda/requirements.txt
 boto3>=1.35
-PyJWT[crypto]>=2.9
-pywebpush>=2.0
-tzdata>=2024.1
-hdate>=1.2,<2
-mangum>=0.19          # the same app on AWS Lambda (app/lambda_app.py)
