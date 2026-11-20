@@ -1,30 +1,30 @@
 """
 DynamoDB storage: one table, and the few generic operations the backup (sync.py) and the Lambda build on.
 
-Single-table layout. Every item has a partition key `pk` and a sort key `sk` (both strings), plus up to
-two global secondary indexes (GSI1 and GSI2, keys g1pk/g1sk and g2pk/g2sk, projecting every
-attribute). Numeric ids are zero-padded in keys so text order is number order.
+Single-table layout. Every item has a partition key `pk` and a sort key `sk` (both strings). There are no
+secondary indexes: every read is a Query on one partition. Numeric ids are zero-padded in keys so text order is
+number order.
 
-    item            pk                  sk                  GSI1                            GSI2
-    task            task                <id>                task#<status> / <id>; done ones
-                                                            by completed_at
-    task's steps    children            <parent id>         (a number set of step ids)
-    Today's 3       focus               <date>              (the ids in order)
-    task event      ev#<task_id>        <time>#<rand>       ev#<kind> / <time>
-    message         msg                 <id>                msg#<kind> / <id>
-    message link    mtask#<task_id>     <message id>        (one per task a message is about)
-    focus session   sess                <id>                sess#open / <id> (open only)    sesstask#<task_id> / <id>
+    item            pk                  sk
+    task            task                <id>
+    Today's 3       focus               <date>                      (the ids in order)
+    task event      event               <task_id>#<time>#<rand>
+    message         msg                 <id>
+    focus session   sess                <id>
     preference      pref                <id>
     setting         setting             <key>
     id counter      counter             <name>
-    backup status   sync                status / alive_alert
-    LLM calls       llm                 day#<date>          (the daily cap, llm_proxy.py)
+    backup status   sync                status / alive_alert / layout
+    LLM calls       llm                 day#<date>                  (the daily cap, llm_proxy.py)
 
-The web app's items (push devices, daily job runs) may still be in the table; nothing reads them.
+Tables made before layout 2 also had two indexes (GSI1, GSI2) and items nothing reads any more (a task's steps,
+message ↔ task links, events in one partition per task). sync.migrate() moves the events and deletes the rest;
+scripts/aws_lambda_setup.py then drops the indexes and gives their capacity back to the table. Index attributes
+(g1pk, …) left on older items are harmless and disappear when the item is next written.
 
 Times are stored as fixed-width UTC text (2026-11-16T08:30:00.000000Z), so they sort correctly, and
-dates as YYYY-MM-DD. A missing attribute is None. Index keys are derived from the row on every write
-(Entity.item), so they can't drift from the data.
+dates as YYYY-MM-DD. A missing attribute is None. Keys are derived from the row on every write (Entity.item), so
+they can't drift from the data.
 
 These functions block (boto3). The boto3 client is thread-safe and created once.
 """
@@ -44,33 +44,22 @@ from . import config
 
 _TIME_FMT = "%Y-%m-%dT%H:%M:%S.%fZ"
 
-# The table (scripts/aws_lambda_setup.py creates it; the tests create it in moto). Provisioned capacity that
-# adds up to DynamoDB's always-free 25 read + 25 write units per account and region.
-CAPACITY = {"table": (13, 11), "GSI1": (8, 9), "GSI2": (4, 5)}
+# The table (scripts/aws_lambda_setup.py creates it; the tests create it in moto). Provisioned capacity: all of
+# DynamoDB's always-free 25 read + 25 write units per account and region.
+CAPACITY = (25, 25)
 
 
 def table_spec(name: str) -> dict[str, Any]:
     """CreateTable arguments."""
-    def throughput(part: str) -> dict[str, int]:
-        r, w = CAPACITY[part]
-        return {"ReadCapacityUnits": r, "WriteCapacityUnits": w}
-
+    r, w = CAPACITY
     return {
         "TableName": name,
         "BillingMode": "PROVISIONED",
-        "AttributeDefinitions": [{"AttributeName": a, "AttributeType": "S"}
-                                 for a in ("pk", "sk", "g1pk", "g1sk", "g2pk", "g2sk")],
+        "AttributeDefinitions": [{"AttributeName": a, "AttributeType": "S"} for a in ("pk", "sk")],
         "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}, {"AttributeName": "sk", "KeyType": "RANGE"}],
-        "ProvisionedThroughput": throughput("table"),
-        "GlobalSecondaryIndexes": [
-            {"IndexName": f"GSI{n}",
-             "KeySchema": [{"AttributeName": f"g{n}pk", "KeyType": "HASH"},
-                           {"AttributeName": f"g{n}sk", "KeyType": "RANGE"}],
-             "Projection": {"ProjectionType": "ALL"},
-             "ProvisionedThroughput": throughput(f"GSI{n}")}
-            for n in (1, 2)
-        ],
+        "ProvisionedThroughput": {"ReadCapacityUnits": r, "WriteCapacityUnits": w},
     }
+
 
 _client = None
 _client_lock = threading.Lock()
@@ -202,19 +191,12 @@ def put_raw(values: dict[str, Any]) -> None:
     client().put_item(TableName=_table(), Item=to_attr(values))
 
 
-def query(pk: str, *, index: str | None = None, sk_op: str | None = None, sk: Any = None,
-          forward: bool = True, limit: int | None = None, page_size: int | None = None) -> Iterator[dict[str, Any]]:
-    """
-    Items in one partition, in sort-key order (forward=False: newest / largest first), fetched page by
-    page as the caller iterates. sk_op: "=", "<", "<=", ">", ">=", "begins_with" or "between" (sk is then
-    a pair). On an index, pk / sk name that index's keys. limit: stop after this many items.
-    """
-    pk_name, sk_name = ("pk", "sk") if index is None else (f"g{index[-1]}pk", f"g{index[-1]}sk")
+def _query_args(pk: str, sk_op: str | None, sk: Any, forward: bool) -> dict[str, Any]:
     cond = "#pk = :pk"
     values: dict[str, Any] = {":pk": pk}
-    names = {"#pk": pk_name}
+    names = {"#pk": "pk"}
     if sk_op:
-        names["#sk"] = sk_name
+        names["#sk"] = "sk"
         if sk_op == "between":
             cond += " AND #sk BETWEEN :a AND :b"
             values.update({":a": sk[0], ":b": sk[1]})
@@ -224,13 +206,18 @@ def query(pk: str, *, index: str | None = None, sk_op: str | None = None, sk: An
         else:
             cond += f" AND #sk {sk_op} :a"
             values[":a"] = sk
-    args: dict[str, Any] = {"TableName": _table(), "KeyConditionExpression": cond,
-                            "ExpressionAttributeNames": names, "ExpressionAttributeValues": to_attr(values),
-                            "ScanIndexForward": forward}
-    if index is None:
-        args["ConsistentRead"] = True
-    else:
-        args["IndexName"] = index
+    return {"TableName": _table(), "KeyConditionExpression": cond, "ExpressionAttributeNames": names,
+            "ExpressionAttributeValues": to_attr(values), "ScanIndexForward": forward, "ConsistentRead": True}
+
+
+def query(pk: str, *, sk_op: str | None = None, sk: Any = None, forward: bool = True, limit: int | None = None,
+          page_size: int | None = None) -> Iterator[dict[str, Any]]:
+    """
+    Items in one partition, in sort-key order (forward=False: newest / largest first), fetched page by
+    page as the caller iterates. sk_op: "=", "<", "<=", ">", ">=", "begins_with" or "between" (sk is then
+    a pair). limit: stop after this many items.
+    """
+    args = _query_args(pk, sk_op, sk, forward)
     if limit is not None or page_size is not None:
         args["Limit"] = page_size or min(limit, 100)
     n = 0
@@ -246,6 +233,20 @@ def query(pk: str, *, index: str | None = None, sk_op: str | None = None, sk: An
         args["ExclusiveStartKey"] = r["LastEvaluatedKey"]
 
 
+def query_page(pk: str, *, after: dict[str, Any] | None = None,
+               page_size: int = 100) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """
+    One page of a partition, in sort-key order: its items, and the key to continue after (None at the end). For
+    reads that must stop part-way and continue in a later request (sync.restore's pages).
+    """
+    args = _query_args(pk, None, None, True)
+    args["Limit"] = page_size
+    if after:
+        args["ExclusiveStartKey"] = after
+    r = client().query(**args)
+    return [from_attr(it) for it in r.get("Items", [])], r.get("LastEvaluatedKey")
+
+
 def set_counter_at_least(name: str, value: int) -> None:
     """For imports: make sure the counter won't hand out ids up to `value` again."""
     try:
@@ -259,10 +260,27 @@ def set_counter_at_least(name: str, value: int) -> None:
             raise
 
 
-def write_batch(puts: list[dict[str, Any]] = (), deletes: list[tuple[str, str]] = ()) -> None:
-    """Many plain puts (typed items) and deletes, 25 per request, retrying what DynamoDB sends back."""
-    requests = ([{"PutRequest": {"Item": it}} for it in puts]
-                + [{"DeleteRequest": {"Key": to_attr({"pk": pk, "sk": sk})}} for pk, sk in deletes])
+class Busy(RuntimeError):
+    """DynamoDB kept throttling past the request's deadline. What was written stays written (puts and deletes are
+    idempotent), so the caller can simply send the same request again later."""
+
+
+def write_batch(puts: list[dict[str, Any]] = (), deletes: list[tuple[str, str]] = (), *,
+                deadline: float | None = None) -> None:
+    """
+    Many plain puts (typed items) and deletes, 25 per request, retrying what DynamoDB sends back.
+
+    One BatchWriteItem may not touch the same item twice (DynamoDB refuses the whole request), so each key is
+    written once: the last put of a key wins, and a put wins over a delete of the same key (the caller's live row
+    exists, so it wasn't deleted for good). deadline (time.monotonic()): give up with Busy rather than retry past it,
+    so a throttled request ends before the Lambda's own timeout.
+    """
+    by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    for pk, sk in deletes:
+        by_key[(pk, sk)] = {"DeleteRequest": {"Key": to_attr({"pk": pk, "sk": sk})}}
+    for it in puts:
+        by_key[(it["pk"]["S"], it["sk"]["S"])] = {"PutRequest": {"Item": it}}
+    requests = list(by_key.values())
     for i in range(0, len(requests), 25):
         pending = {_table(): requests[i:i + 25]}
         for attempt in range(40):
@@ -270,6 +288,9 @@ def write_batch(puts: list[dict[str, Any]] = (), deletes: list[tuple[str, str]] 
             pending = r.get("UnprocessedItems") or {}
             if not pending:
                 break
-            time.sleep(min(0.2 * 2 ** attempt, 5))   # over the provisioned capacity: wait for it to refill
+            wait = min(0.2 * 2 ** attempt, 5)   # over the provisioned capacity: wait for it to refill
+            if deadline is not None and time.monotonic() + wait > deadline:
+                raise Busy("DynamoDB is throttling the writes; try again later")
+            time.sleep(wait)
         else:
-            raise RuntimeError("DynamoDB kept refusing part of a batch write")
+            raise Busy("DynamoDB kept refusing part of a batch write")

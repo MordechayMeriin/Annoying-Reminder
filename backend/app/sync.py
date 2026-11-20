@@ -9,10 +9,16 @@ comes back byte for byte.
 
 The handover: the first restore with handover=true marks the data as the phone's (`sync/status`). The daily
 "is the phone still alive?" check (alive.py) starts counting from then.
+
+Restore comes in pages (`paged: true`, then the `next` cursor of each answer), each well under the 6 MB a Lambda
+function URL can return, so it keeps working however long the chat grows. Uploads are small (the phone sends at
+most a few hundred rows per request) and stop with db.Busy before the Lambda's timeout when DynamoDB throttles.
 """
 
+import base64
+import json
 import logging
-from collections import defaultdict
+import time
 from typing import Any
 
 from . import db
@@ -26,13 +32,6 @@ log = logging.getLogger("sync")
 # fields (android/app/src/main/java/com/prominder/myapp/data/Rows.kt); test_sync.py checks them against the
 # Android tests' sample.
 
-def _task_keys(t: dict[str, Any]) -> dict[str, str]:
-    done_at = t.get("completed_at") if t["status"] == "done" else None
-    return {"pk": "task", "sk": pad(t["id"]),
-            # Open tasks by id; done ones by when they were finished.
-            "g1pk": f"task#{t['status']}", "g1sk": ts(done_at) if done_at else pad(t["id"])}
-
-
 TASK = Entity(
     {"id": "int", "parent_id": "int", "title": "str", "description": "str", "kind": "str", "priority": "int",
      "status": "str", "due_at": "dt", "remind_at": "dt", "remind_requested": "bool", "recurrence": "str",
@@ -41,33 +40,33 @@ TASK = Entity(
      "estimate_min": "int", "focus_date": "date", "focus_rank": "int", "resume_note": "str",
      "parked_until": "dt", "stale_offered_at": "dt", "avoid_asked_at": "dt", "avoid_asks": "int",
      "avoid_reset_at": "dt"},
-    _task_keys,
+    lambda t: {"pk": "task", "sk": pad(t["id"])},
     defaults={"kind": "task", "priority": 1, "status": "open", "remind_requested": False, "nag_count": 0,
               "escalated": False, "avoid_asks": 0},
 )
 
+
+def _event_sk(task_id: int, created_at: str, rid: str) -> str:
+    return f"{pad(task_id)}#{created_at}#{rid}"
+
+
+# Every event in one partition, by task and time: restore reads them with one query, whatever their kind.
 EVENT = Entity(
     {"task_id": "int", "kind": "str", "note": "str", "avoid_reason": "str", "created_at": "dt", "rid": "str"},
-    lambda e: {"pk": f"ev#{e['task_id']}", "sk": f"{ts(e['created_at'])}#{e['rid']}",
-               "g1pk": f"ev#{e['kind']}", "g1sk": ts(e["created_at"])},
+    lambda e: {"pk": "event", "sk": _event_sk(e["task_id"], ts(e["created_at"]), e["rid"])},
 )
-# Every kind of event: restore reads the events through the kind index, one kind at a time.
-EVENT_KINDS = {"postponed", "committed", "progress", "stuck", "blocked", "unblocked", "ignored", "done",
-               "description_changed", "session_started", "session_ended", "paused", "parked", "avoided"}
 
 MESSAGE = Entity(
     {"id": "int", "role": "str", "content": "str", "kind": "str", "task_id": "int", "task_ids": "ints",
      "chips": "str", "model": "str", "created_at": "dt"},
-    lambda m: {"pk": "msg", "sk": pad(m["id"]), "g1pk": f"msg#{m['kind']}", "g1sk": pad(m["id"])},
+    lambda m: {"pk": "msg", "sk": pad(m["id"])},
     defaults={"kind": "chat", "task_ids": []},
 )
 
 SESSION = Entity(
     {"id": "int", "task_id": "int", "started_at": "dt", "planned_min": "int", "ended_at": "dt", "outcome": "str",
      "end_sent_at": "dt", "note_closed_at": "dt"},
-    # GSI1 lists only open sessions; GSI2 a task's sessions.
-    lambda x: {"pk": "sess", "sk": pad(x["id"]), "g2pk": f"sesstask#{x['task_id']}", "g2sk": pad(x["id"]),
-               **({"g1pk": "sess#open", "g1sk": pad(x["id"])} if x.get("ended_at") is None else {})},
+    lambda x: {"pk": "sess", "sk": pad(x["id"])},
 )
 
 PREFERENCE = Entity({"id": "int", "text": "str", "created_at": "dt"}, lambda p: {"pk": "pref", "sk": pad(p["id"])})
@@ -79,6 +78,12 @@ TABLES = (*ENTITIES, "settings", "focus")
 # Ids handed out by a counter, so the phone can continue after the highest one.
 COUNTERS = {"tasks": "task", "messages": "message", "sessions": "session", "preferences": "preference"}
 MAX_ROWS = 2000        # per upload request; the phone sends larger changes in several requests
+# Each table's partition, in the order restore reads them.
+PARTITIONS = (("tasks", "task"), ("events", "event"), ("messages", "msg"), ("sessions", "sess"),
+              ("preferences", "pref"), ("settings", "setting"), ("focus", "focus"))
+PAGE_BYTES = 1_500_000     # a restore page's rows, as JSON: far below the function URL's 6 MB, even without gzip
+PAGE_SECONDS = 20          # and the time one page may take to read
+WRITE_SECONDS = 40         # an upload's writes give up (db.Busy) after this, before the function's 60 s timeout
 
 
 class SyncError(ValueError):
@@ -119,38 +124,94 @@ def _plain(entity: Entity, raw: dict[str, Any]) -> dict[str, Any]:
             for name, kind in entity.fields.items()}
 
 
-def export_all() -> dict[str, Any]:
+def _restored_row(table: str, raw: dict[str, Any]) -> dict[str, Any]:
+    if table == "settings":
+        return {"key": raw["sk"], "value": raw.get("value"), "updated_at": raw.get("updated_at")}
+    if table == "focus":
+        return {"date": raw["sk"], "ids": [int(i) for i in raw.get("ids", [])]}
+    return _plain(ENTITIES[table], raw)
+
+
+def _encode_cursor(part: int, after: dict[str, Any] | None) -> str:
+    state = {"p": part, "sk": after["sk"]["S"] if after else None}
+    return base64.urlsafe_b64encode(json.dumps(state).encode()).decode()
+
+
+def _decode_cursor(cursor: str | None) -> tuple[int, dict[str, Any] | None]:
+    if not cursor:
+        return 0, None
+    try:
+        state = json.loads(base64.urlsafe_b64decode(cursor.encode()))
+        part, sk = int(state["p"]), state.get("sk")
+        if not 0 <= part <= len(PARTITIONS) or not (sk is None or isinstance(sk, str)):
+            raise ValueError
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+        raise SyncError("restore: the cursor isn't one this server gave out") from None
+    after = None if sk is None or part == len(PARTITIONS) else db.to_attr({"pk": PARTITIONS[part][1], "sk": sk})
+    return part, after
+
+
+def export_page(cursor: str | None = None, *, max_bytes: int | None = None,
+                max_seconds: float | None = None) -> tuple[dict[str, list[dict[str, Any]]], str | None]:
     """
-    Every row the phone keeps, and the id counters. Read with Query only (the function's role may not Scan, see
-    scripts/aws_lambda_setup.py): one partition per kind of item, and the events through their kind index.
+    The rows the phone keeps, from `cursor` on (None: from the start), up to about max_bytes of JSON or max_seconds
+    of reading (None: no limit). Returns them by table, and the cursor to continue from (None: that was all).
+    Read with Query only (the function's role may not Scan, see scripts/aws_lambda_setup.py).
     """
     tables: dict[str, list[dict[str, Any]]] = {name: [] for name in TABLES}
-    for pk, table in (("task", "tasks"), ("msg", "messages"), ("sess", "sessions"), ("pref", "preferences")):
-        tables[table] = [_plain(ENTITIES[table], raw) for raw in db.query(pk)]
-    for kind in sorted(EVENT_KINDS):
-        tables["events"] += [_plain(EVENT, raw) for raw in db.query(f"ev#{kind}", index="GSI1")]
-    tables["settings"] = [{"key": raw["sk"], "value": raw.get("value"), "updated_at": raw.get("updated_at")}
-                          for raw in db.query("setting")]
-    tables["focus"] = [{"date": raw["sk"], "ids": [int(i) for i in raw.get("ids", [])]} for raw in db.query("focus")]
-    counters = {raw["sk"]: int(raw.get("n", 0)) for raw in db.query("counter")}
-    for name, rows in tables.items():
-        rows.sort(key=lambda row: [str(row.get(k)) for k in ("date", "key", "task_id", "created_at", "rid")]
-                  if "id" not in row else [row["id"]])
+    part, after = _decode_cursor(cursor)
+    size, started = 0, time.monotonic()
+    while part < len(PARTITIONS):
+        table, pk = PARTITIONS[part]
+        items, after = db.query_page(pk, after=after)
+        for raw in items:
+            row = _restored_row(table, raw)
+            tables[table].append(row)
+            size += len(json.dumps(row, ensure_ascii=False))
+        if after is None:
+            part += 1
+        if part < len(PARTITIONS) and (
+                (max_bytes is not None and size >= max_bytes)
+                or (max_seconds is not None and time.monotonic() - started >= max_seconds)):
+            return tables, _encode_cursor(part, after)
+    return tables, None
+
+
+def counters() -> dict[str, int]:
+    return {raw["sk"]: int(raw.get("n", 0)) for raw in db.query("counter")}
+
+
+def export_all() -> dict[str, Any]:
+    """Every row the phone keeps, and the id counters, in one piece (scripts/metrics.py; app versions before paging)."""
+    tables, _ = export_page()
+    found = counters()
     for table, counter in COUNTERS.items():   # never behind the data (an import that skipped a counter)
-        counters[counter] = max([counters.get(counter, 0), *(row["id"] for row in tables[table])])
-    return {"tables": tables, "counters": counters}
+        found[counter] = max([found.get(counter, 0), *(row["id"] for row in tables[table])])
+    return {"tables": tables, "counters": found}
 
 
-def restore(*, handover: bool, device: str) -> dict[str, Any]:
-    """Everything, for an empty phone. handover=True also makes the phone the owner of the data."""
-    data = export_all()
+def restore(*, handover: bool, device: str, paged: bool = False, cursor: str | None = None) -> dict[str, Any]:
+    """
+    Everything, for an empty phone. handover=True also makes the phone the owner of the data.
+
+    paged=True: one page, with `next` (the cursor for the following page, None on the last one). The counters come
+    with the last page; the phone hands out ids after both them and its highest id, so they're never behind the data.
+    Without paged (app versions before paging): everything in one answer.
+    """
+    if not migrate(deadline=time.monotonic() + WRITE_SECONDS):
+        raise db.Busy("The backup is being reorganized. Try again in a minute.")
     now = db.ts(db.now_utc())
-    fields = {"last_restore_at": now, "device": device}
-    if handover and not handed_over():
-        fields["handover_at"] = now
-        log.warning("Handover: the phone (%s) owns the data from now on", device)
-    _touch(**fields)
-    return {**data, "status": status(), "serverTime": now}
+    if cursor is None:   # the first (or only) page: record the restore once
+        fields = {"last_restore_at": now, "device": device}
+        if handover and not handed_over():
+            fields["handover_at"] = now
+            log.warning("Handover: the phone (%s) owns the data from now on", device)
+        _touch(**fields)
+    if not paged:
+        return {**export_all(), "status": status(), "serverTime": now}
+    tables, next_cursor = export_page(cursor, max_bytes=PAGE_BYTES, max_seconds=PAGE_SECONDS)
+    return {"tables": tables, "counters": counters() if next_cursor is None else {}, "next": next_cursor,
+            "status": status(), "serverTime": now}
 
 
 # ---------------------------------------------------------------- upload
@@ -179,11 +240,10 @@ def _require(table: str, row: dict[str, Any], *names: str) -> None:
 
 
 def build_upload(tables: dict[str, list[dict[str, Any]]],
-                 deletes: dict[str, list[Any]]) -> tuple[list[dict[str, Any]], list[tuple[str, str]],
-                                                         dict[int, set[int]], dict[str, int]]:
+                 deletes: dict[str, list[Any]]) -> tuple[list[dict[str, Any]], list[tuple[str, str]], dict[str, int]]:
     """
-    Checks everything first (nothing is written if one row is wrong). Returns the typed items to put, the keys
-    to delete, the steps to add to each parent's list, and the counters to raise.
+    Checks everything first (nothing is written if one row is wrong). Returns the typed items to put, the keys to
+    delete, and the counters to raise.
     """
     unknown = (set(tables) | set(deletes)) - set(TABLES)
     if unknown:
@@ -193,7 +253,6 @@ def build_upload(tables: dict[str, list[dict[str, Any]]],
 
     puts: list[dict[str, Any]] = []
     removes: list[tuple[str, str]] = []
-    children: dict[int, set[int]] = defaultdict(set)
     counters: dict[str, int] = {}
 
     for table, entity in ENTITIES.items():
@@ -201,15 +260,12 @@ def build_upload(tables: dict[str, list[dict[str, Any]]],
             row = _decode(entity, table, raw)
             if table == "tasks":
                 _require(table, row, "id", "title", "status", "created_at")
-                if row["parent_id"] is not None:
-                    children[row["parent_id"]].add(row["id"])
             elif table == "events":
                 _require(table, row, "task_id", "kind", "created_at", "rid")
             elif table == "messages":
                 _require(table, row, "id", "role", "content", "created_at")
                 row["task_ids"] = list(dict.fromkeys(row["task_ids"] or []))
                 row["task_id"] = row["task_ids"][0] if row["task_ids"] else row["task_id"]
-                puts += [db.to_attr({"pk": f"mtask#{t}", "sk": pad(row["id"])}) for t in row["task_ids"]]
             elif table == "sessions":
                 _require(table, row, "id", "task_id", "started_at", "planned_min")
             elif table == "preferences":
@@ -236,30 +292,81 @@ def build_upload(tables: dict[str, list[dict[str, Any]]],
             raise SyncError(f"focus: {raw!r} needs a date and a list of ids") from None
         puts.append(db.to_attr({"pk": "focus", "sk": day, "ids": ids}))
 
-    keys = {"tasks": lambda k: ("task", pad(k)), "messages": lambda k: ("msg", pad(k)),
-            "sessions": lambda k: ("sess", pad(k)), "preferences": lambda k: ("pref", pad(k)),
-            "settings": lambda k: ("setting", str(k)), "focus": lambda k: ("focus", str(k)),
-            # an event's key: [task_id, created_at, rid]
-            "events": lambda k: (f"ev#{int(k[0])}", f"{k[1]}#{k[2]}")}
+    keys = {"tasks": lambda k: [("task", pad(k))], "messages": lambda k: [("msg", pad(k))],
+            "sessions": lambda k: [("sess", pad(k))], "preferences": lambda k: [("pref", pad(k))],
+            "settings": lambda k: [("setting", str(k))], "focus": lambda k: [("focus", str(k))],
+            # an event's key: [task_id, created_at, rid]; also where layout 1 kept it, in case it wasn't moved yet
+            "events": lambda k: [("event", _event_sk(int(k[0]), str(k[1]), str(k[2]))),
+                                 (f"ev#{int(k[0])}", f"{k[1]}#{k[2]}")]}
     for table, items in deletes.items():
         for k in items:
             try:
-                removes.append(keys[table](k))
+                removes += keys[table](k)
             except (TypeError, ValueError, IndexError, KeyError):
                 raise SyncError(f"{table}: can't delete {k!r}") from None
-    return puts, removes, children, counters
+    # A row that's written and deleted in the same upload exists on the phone (it deletes its own row when it
+    # writes a tombstone), so the write wins. Sending both would also make DynamoDB refuse the whole batch.
+    written = {(it["pk"]["S"], it["sk"]["S"]) for it in puts}
+    removes = [k for k in dict.fromkeys(removes) if k not in written]
+    return puts, removes, counters
 
 
 def upload(tables: dict[str, list[dict[str, Any]]], deletes: dict[str, list[Any]], *, device: str) -> dict[str, Any]:
-    """Store what the phone changed. The phone's copy always wins: rows are written as they are."""
-    puts, removes, children, counters = build_upload(tables, deletes)
-    db.write_batch(puts, removes)
-    for parent, ids in children.items():
-        db.client().update_item(
-            TableName=db._table(), Key=db.to_attr({"pk": "children", "sk": pad(parent)}),
-            UpdateExpression="ADD ids :ids", ExpressionAttributeValues={":ids": {"NS": [str(i) for i in sorted(ids)]}})
+    """
+    Store what the phone changed. The phone's copy always wins: rows are written as they are. Raises db.Busy when
+    DynamoDB throttles past WRITE_SECONDS; what was written stays, and the phone sends the same request again later.
+    """
+    puts, removes, counters = build_upload(tables, deletes)
+    db.write_batch(puts, removes, deadline=time.monotonic() + WRITE_SECONDS)
     for name, value in counters.items():
         db.set_counter_at_least(name, value)
     now = db.ts(db.now_utc())
     _touch(last_upload_at=now, device=device)
     return {"ok": True, "written": len(puts), "deleted": len(removes), "serverTime": now}
+
+
+# ---------------------------------------------------------------- layout 2 (one-off migration)
+
+_LAYOUT_KEY = ("sync", "layout")
+LAYOUT = 2
+
+
+def migrated() -> bool:
+    return int((db.get_raw(*_LAYOUT_KEY) or {}).get("v", 0)) >= LAYOUT
+
+
+def migrate(deadline: float | None = None) -> bool:
+    """
+    Moves a table from layout 1 to layout 2 (db.py): each task's events from their own partition (ev#<task_id>) into
+    the one `event` partition, and deletes the items nothing reads (a task's steps, message ↔ task links). Safe to
+    stop at any point and run again: progress is saved after each task, and an event is written at its new key
+    before its old one is deleted. Returns True once the table is on layout 2; False when the deadline
+    (time.monotonic()) came first. Tasks are never deleted, so going through them finds every old event.
+    """
+    state = db.get_raw(*_LAYOUT_KEY) or {}
+    if int(state.get("v", 0)) >= LAYOUT:
+        return True
+
+    def save(**fields: Any) -> None:
+        state.update(fields)
+        db.put_raw({**state, "pk": _LAYOUT_KEY[0], "sk": _LAYOUT_KEY[1]})
+
+    def out_of_time() -> bool:
+        return deadline is not None and time.monotonic() >= deadline
+
+    if not state.get("children_done"):
+        db.write_batch(deletes=[(it["pk"], it["sk"]) for it in db.query("children")], deadline=deadline)
+        save(children_done=True)
+    after = state.get("after")
+    for task in (db.query("task", sk_op=">", sk=after) if after else db.query("task")):
+        if out_of_time():
+            return False
+        task_id = int(task["sk"])
+        old = list(db.query(f"ev#{task_id}"))
+        db.write_batch([EVENT.item(EVENT.row(it), version=1) for it in old], deadline=deadline)
+        links = list(db.query(f"mtask#{task_id}"))
+        db.write_batch(deletes=[(it["pk"], it["sk"]) for it in old + links], deadline=deadline)
+        save(after=task["sk"])
+    save(v=LAYOUT, migrated_at=db.ts(db.now_utc()))
+    log.warning("The backup is on layout %d now", LAYOUT)
+    return True

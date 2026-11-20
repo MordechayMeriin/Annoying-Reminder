@@ -84,6 +84,7 @@ def test_no_answer_is_a_503_the_phone_falls_back_on(lam, table, monkeypatch):
     monkeypatch.setattr(llm_proxy, "chat_completion", down)
     status, body = call(lam, "POST", "/llm", ASK, owner_token())
     assert status == 503 and body["code"] == "unavailable"
+    assert llm_proxy.used_today() == 0   # no answer: it doesn't count against the daily cap
 
 
 def test_not_set_up_yet_says_so(lam, table, model, monkeypatch):

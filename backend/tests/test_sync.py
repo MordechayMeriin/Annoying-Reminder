@@ -6,6 +6,7 @@ and encodes, so both sides are checked against the same data.
 
 import copy
 import json
+import time
 from pathlib import Path
 
 import boto3
@@ -20,13 +21,13 @@ from app.config import get_settings
 SAMPLE = json.loads((Path(__file__).resolve().parents[2] / "android/app/src/test/resources/restore-sample.json").read_text())
 
 
-def _new_table():
+def _new_table(spec=None):
     db._client = None
     aws = boto3.client("dynamodb", region_name=get_settings().aws_region)
     name = get_settings().dynamodb_table
     if name in aws.list_tables()["TableNames"]:
         aws.delete_table(TableName=name)
-    aws.create_table(**db.table_spec(name))
+    aws.create_table(**(spec or db.table_spec)(name))
 
 
 @pytest.fixture
@@ -94,9 +95,11 @@ def test_restore_needs_no_scan_permission(client, monkeypatch):
     monkeypatch.setattr(db, "client", lambda: NoScan())
     out = ok(client.post("/sync/restore", json={"handover": True}))
     assert len(out["tables"]["tasks"]) == 3 and len(out["tables"]["events"]) == 1
+    page = ok(client.post("/sync/restore", json={"paged": True}))
+    assert len(page["tables"]["tasks"]) == 3 and page["next"] is None
 
 
-def test_an_upload_keeps_the_links_counters_and_deletes(client):
+def test_an_upload_keeps_counters_and_deletes(client):
     ok(client.post("/sync/upload", json={"tables": tables()}))
     created = "2026-11-18T09:00:00.000000Z"
     step = {"id": 10, "parent_id": 1, "title": "Send it", "status": "open", "created_at": created, "priority": 2}
@@ -109,8 +112,6 @@ def test_an_upload_keeps_the_links_counters_and_deletes(client):
         },
         "deletes": {"preferences": [1], "settings": ["morning_time"]},
     }))
-    assert set(map(int, db.get_raw("children", db.pad(1))["ids"])) == {2, 10}   # the parent's steps
-    assert [it["sk"] for it in db.query("mtask#10")] == [db.pad(5)]              # the message's task link, once
     st = ok(client.get("/sync/status"))
     assert st["lastUploadAt"] and st["device"] == "Galaxy S9"
     out = ok(client.post("/sync/restore", json={}))
@@ -119,6 +120,165 @@ def test_an_upload_keeps_the_links_counters_and_deletes(client):
     assert t["messages"][-1]["task_ids"] == [10] and t["messages"][-1]["task_id"] == 10
     assert t["preferences"] == [] and t["settings"] == []
     assert out["counters"]["task"] == 10 and out["counters"]["message"] == 5   # past the phone's highest ids
+
+
+def test_only_the_rows_themselves_are_stored(client):
+    """Layout 2: no index keys, no step lists, no message links; events in one partition by task and time."""
+    ok(client.post("/sync/upload", json={"tables": tables()}))
+    for pk in ("task", "msg", "sess", "event"):
+        for item in db.query(pk):
+            assert not {"g1pk", "g1sk", "g2pk", "g2sk"} & set(item), item
+    assert list(db.query("children")) == [] and list(db.query("mtask#1")) == []
+    event = SAMPLE["tables"]["events"][0]
+    assert [it["sk"] for it in db.query("event")] == [f"{db.pad(event['task_id'])}#{event['created_at']}#{event['rid']}"]
+
+
+def test_a_setting_set_reset_and_set_again_is_stored(client):
+    """The phone once sent a setting both as a row and as a delete: DynamoDB refused the whole batch, for good."""
+    ok(client.post("/sync/upload", json={"tables": tables()}))
+    row = {"key": "morning_time", "value": "07:30", "updated_at": "2026-11-18T09:00:00.000000Z"}
+    out = ok(client.post("/sync/upload", json={"tables": {"settings": [row]}, "deletes": {"settings": ["morning_time"]}}))
+    assert out["written"] == 1 and out["deleted"] == 0
+    assert db.get_raw("setting", "morning_time")["value"] == "07:30"
+
+
+def test_a_put_and_a_delete_of_one_key_in_different_groups_of_25(client):
+    """The write wins even when the two would land in different BatchWriteItem requests."""
+    rows = [{"key": f"k{i:02d}", "value": "x", "updated_at": "2026-11-18T09:00:00.000000Z"} for i in range(40)]
+    ok(client.post("/sync/upload", json={"tables": {"settings": rows}, "deletes": {"settings": ["k39", "gone"]}}))
+    assert db.get_raw("setting", "k39")["value"] == "x"
+
+
+def test_a_throttled_upload_stops_before_the_lambdas_timeout(client, monkeypatch):
+    real = db.client()
+
+    class Throttled:
+        def __getattr__(self, name):
+            if name == "batch_write_item":
+                return lambda RequestItems: {"UnprocessedItems": RequestItems}
+            return getattr(real, name)
+    monkeypatch.setattr(db, "client", lambda: Throttled())
+    monkeypatch.setattr(sync, "WRITE_SECONDS", 0.5)
+    started = time.monotonic()
+    r = client.post("/sync/upload", json={"tables": tables()})
+    assert r.status_code == 503 and r.json()["code"] == "busy"   # the phone tries again later
+    assert time.monotonic() - started < 5
+
+
+def _restore_pages(client, **body):
+    pages, cursor = [], None
+    while True:
+        page = ok(client.post("/sync/restore", json={"paged": True, "cursor": cursor, **body}))
+        pages.append(page)
+        cursor = page["next"]
+        if cursor is None:
+            return pages
+
+
+def test_restore_in_pages_returns_every_row_once(client, monkeypatch):
+    messages = [{"id": i, "role": "user", "content": "x" * 300, "kind": "chat", "task_ids": [],
+                 "created_at": "2026-11-18T09:00:00.000000Z"} for i in range(1, 451)]
+    ok(client.post("/sync/upload", json={"tables": tables()}))
+    ok(client.post("/sync/upload", json={"tables": {"messages": messages}}))
+    monkeypatch.setattr(sync, "PAGE_BYTES", 40_000)   # about 100 messages a page
+    pages = _restore_pages(client, handover=True, device="Galaxy S9")
+    assert len(pages) > 3
+    got = [m["id"] for p in pages for m in p["tables"]["messages"]]
+    assert got == list(range(1, 451))
+    assert sum(len(p["tables"]["tasks"]) for p in pages) == 3
+    assert all(p["counters"] == {} for p in pages[:-1]) and pages[-1]["counters"]["message"] == 450
+    assert pages[0]["status"]["handedOverAt"] and pages[-1]["status"]["handedOverAt"] == pages[0]["status"]["handedOverAt"]
+
+
+def test_restore_in_pages_matches_restore_in_one_piece(client):
+    ok(client.post("/sync/upload", json={"tables": tables()}))
+    pages = _restore_pages(client)
+    assert len(pages) == 1 and pages[0]["tables"] == SAMPLE["tables"]
+
+
+def test_a_cursor_from_elsewhere_is_refused(client):
+    r = client.post("/sync/restore", json={"paged": True, "cursor": "not-a-cursor"})
+    assert r.status_code == 422 and "cursor" in r.json()["detail"]
+
+
+def test_a_large_restore_is_gzipped(client):
+    messages = [{"id": i, "role": "user", "content": "hello " * 50, "kind": "chat", "task_ids": [],
+                 "created_at": "2026-11-18T09:00:00.000000Z"} for i in range(1, 201)]
+    ok(client.post("/sync/upload", json={"tables": {"messages": messages}}))
+    r = client.post("/sync/restore", json={"paged": True}, headers={"Accept-Encoding": "gzip"})
+    assert r.status_code == 200 and r.headers["content-encoding"] == "gzip"
+    assert len(r.json()["tables"]["messages"]) == 200
+
+
+# ---------------------------------------------------------------- layout 1 → 2
+
+def _layout1_spec(name):
+    """The table as layout 1 made it: two indexes."""
+    spec = db.table_spec(name)
+    spec["AttributeDefinitions"] = [{"AttributeName": a, "AttributeType": "S"}
+                                    for a in ("pk", "sk", "g1pk", "g1sk", "g2pk", "g2sk")]
+    spec["GlobalSecondaryIndexes"] = [
+        {"IndexName": f"GSI{n}", "KeySchema": [{"AttributeName": f"g{n}pk", "KeyType": "HASH"},
+                                               {"AttributeName": f"g{n}sk", "KeyType": "RANGE"}],
+         "Projection": {"ProjectionType": "ALL"}, "ProvisionedThroughput": {"ReadCapacityUnits": 1, "WriteCapacityUnits": 1}}
+        for n in (1, 2)]
+    return spec
+
+
+def _layout1_items():
+    """A backup written by layout 1: events per task, step lists, message links, index keys."""
+    t1 = "2026-11-17T08:00:00.000000Z"
+    db.put_raw({"pk": "task", "sk": db.pad(1), "id": 1, "title": "Write report", "status": "open", "created_at": t1,
+                "g1pk": "task#open", "g1sk": db.pad(1)})
+    db.put_raw({"pk": "task", "sk": db.pad(2), "id": 2, "parent_id": 1, "title": "Outline", "status": "open",
+                "created_at": t1, "g1pk": "task#open", "g1sk": db.pad(2)})
+    for task_id, rid, kind in ((1, "aaaa0001", "postponed"), (1, "aaaa0002", "done"), (2, "bbbb0001", "stuck")):
+        db.put_raw({"pk": f"ev#{task_id}", "sk": f"{t1}#{rid}", "task_id": task_id, "kind": kind, "created_at": t1,
+                    "rid": rid, "v": 1, "g1pk": f"ev#{kind}", "g1sk": t1})
+    db.put_raw({"pk": "children", "sk": db.pad(1), "ids": {2}})
+    db.put_raw({"pk": "msg", "sk": db.pad(1), "id": 1, "role": "user", "content": "hi", "kind": "chat",
+                "task_ids": [1], "task_id": 1, "created_at": t1, "g1pk": "msg#chat", "g1sk": db.pad(1)})
+    db.put_raw({"pk": "mtask#1", "sk": db.pad(1)})
+
+
+def test_a_layout1_backup_is_moved_and_restores_completely(client):
+    _new_table(_layout1_spec)
+    _layout1_items()
+    assert not sync.migrated()
+    out = ok(client.post("/sync/restore", json={"paged": True}))   # restore moves it first
+    assert sync.migrated()
+    assert sorted(e["rid"] for e in out["tables"]["events"]) == ["aaaa0001", "aaaa0002", "bbbb0001"]
+    assert [t["title"] for t in out["tables"]["tasks"]] == ["Write report", "Outline"]
+    assert list(db.query("ev#1")) == [] and list(db.query("ev#2")) == []
+    assert list(db.query("children")) == [] and list(db.query("mtask#1")) == []
+    assert ok(client.post("/sync/restore", json={"paged": True}))["tables"] == out["tables"]   # once is enough
+
+
+def test_the_move_stops_at_its_deadline_and_continues_later(client, monkeypatch):
+    _new_table(_layout1_spec)
+    _layout1_items()
+    clock = iter([0.0])   # time runs out after the first task
+    monkeypatch.setattr(sync.time, "monotonic", lambda: next(clock, 99.0))
+    assert sync.migrate(deadline=1.0) is False
+    assert list(db.query("ev#1")) == [] and len(list(db.query("ev#2"))) == 1   # task 1 moved, task 2 not yet
+    monkeypatch.setattr(sync.time, "monotonic", time.monotonic)
+    assert sync.migrate() is True
+    assert len(list(db.query("event"))) == 3 and list(db.query("ev#2")) == []
+
+
+def test_restore_waits_while_the_move_isnt_finished(client, monkeypatch):
+    _new_table(_layout1_spec)
+    _layout1_items()
+    monkeypatch.setattr(sync, "migrate", lambda deadline=None: False)
+    r = client.post("/sync/restore", json={"paged": True})
+    assert r.status_code == 503 and r.json()["code"] == "busy"
+
+
+def test_an_event_delete_also_removes_it_where_layout1_kept_it(client):
+    _new_table(_layout1_spec)
+    _layout1_items()
+    ok(client.post("/sync/upload", json={"deletes": {"events": [[2, "2026-11-17T08:00:00.000000Z", "bbbb0001"]]}}))
+    assert list(db.query("ev#2")) == []
 
 
 @pytest.mark.parametrize("bad, deletes, why", [
@@ -153,3 +313,21 @@ def test_the_handover_is_recorded_once(client):
     assert handed and sync.handed_over()
     again = ok(client.post("/sync/restore", json={"handover": True}))   # a reinstall: restore works, same handover
     assert again["status"]["handedOverAt"] == handed and len(again["tables"]["tasks"]) == 3
+
+
+def test_the_setup_script_brings_a_layout1_table_up_to_date(client):
+    import importlib.util
+    path = Path(__file__).resolve().parents[1] / "scripts/aws_lambda_setup.py"
+    spec = importlib.util.spec_from_file_location("aws_lambda_setup", path)
+    setup = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(setup)
+    _new_table(_layout1_spec)
+    _layout1_items()
+    s = get_settings()
+    ddb = boto3.client("dynamodb", region_name=s.aws_region)
+    setup.upgrade_table(ddb, s.dynamodb_table, s.aws_region)
+    t = ddb.describe_table(TableName=s.dynamodb_table)["Table"]
+    assert t.get("GlobalSecondaryIndexes", []) == []
+    assert (t["ProvisionedThroughput"]["ReadCapacityUnits"], t["ProvisionedThroughput"]["WriteCapacityUnits"]) == db.CAPACITY
+    assert sync.migrated() and len(list(db.query("event"))) == 3
+    setup.upgrade_table(ddb, s.dynamodb_table, s.aws_region)   # a re-run changes nothing
