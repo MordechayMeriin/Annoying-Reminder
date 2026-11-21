@@ -1,5 +1,6 @@
 package com.prominder.myapp.llm
 
+import com.prominder.myapp.data.Role
 import com.prominder.myapp.data.Chips
 import com.prominder.myapp.data.MessageRow
 import com.prominder.myapp.data.Store
@@ -10,7 +11,9 @@ import com.prominder.myapp.data.listTasks
 import com.prominder.myapp.data.resetAvoidance
 import com.prominder.myapp.data.taskEvent
 import com.prominder.myapp.diag.Diag
-import com.prominder.myapp.logic.Logic
+import com.prominder.myapp.logic.ChipRules
+import com.prominder.myapp.logic.Coaching
+import com.prominder.myapp.logic.Schedule
 import com.prominder.myapp.remind.Ticker
 import java.time.Duration
 import java.time.Instant
@@ -26,7 +29,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
-/** A status for the chat while a turn runs ("📝 Writing a new task: Dentist"): agent.tool_status. */
+/** A status for the chat while a turn runs ("📝 Writing a new task: Dentist"). */
 data class ToolStatus(val name: String, val title: String? = null, val kind: String? = null, val taskTitle: String? = null)
 
 /** What the chat shows while the assistant works. */
@@ -40,7 +43,7 @@ sealed interface ChatProgress {
 data class ChatResult(val reply: String, val changed: Boolean, val userMessageId: Long, val replyMessageId: Long, val taskIds: List<Long>)
 
 /**
- * The chat agent, ported from backend/app/agent.py: your messages → replies and task changes (tool calling).
+ * The chat agent: your messages → replies and task changes (tool calling).
  *
  * The model sees the system prompt (with the situational playbooks code chose), a "likely topic" block, and today's
  * messages only (the chat resets daily at the day-reset time; task descriptions and histories carry the long-term
@@ -96,7 +99,7 @@ class Agent(private val store: Store, private val llm: Llm, private val prompts:
                 }.text
             } ?: TIMEOUT_REPLY.also { Diag.log("llm", "Chat turn stopped after ${CHAT_TURN_TIMEOUT_MS / 1000} s") }
         } finally {
-            linked = Logic.linkTaskIds(ctx.actedOn, turn.checkinIds)
+            linked = Coaching.linkTaskIds(ctx.actedOn, turn.checkinIds)
             withContext(NonCancellable) { store.linkMessage(turn.userMsg.id, linked) }
         }
         if (reply.isEmpty()) reply = if (ctx.changed) "Done." else "Sorry, I couldn't process that. Try again?"
@@ -110,20 +113,20 @@ class Agent(private val store: Store, private val llm: Llm, private val prompts:
     private suspend fun startTurn(text: String, now: Instant, retryOf: Long?, onSaved: (MessageRow) -> Unit): Turn {
         val s = store.settings()
         val local = now.atZone(s.zone)
-        val start = Logic.dayStart(local, s.dayResetTime).toInstant()
+        val start = Schedule.dayStart(local, s.dayResetTime).toInstant()
 
         val earlier = retryOf?.let { dao.message(it) }
         val history = LlmContext.since(dao, start, 41).filter { earlier == null || it.id < earlier.id }.takeLast(40)
         val userMsg = earlier ?: store.addMessageNow("user", text, "chat")
         onSaved(userMsg)
-        val today = Logic.focusDay(local, s.dayResetTime)
+        val today = Schedule.focusDay(local, s.dayResetTime)
 
         val last = dao.latestOfKinds(Ticker.PROACTIVE_KINDS)
         val lastAt = Times.parseOrNull(last?.createdAt)
-        val linkHours = s.double("reply_link_hours")
+        val linkHours = s.replyLinkHours
         val recent = last?.takeIf { lastAt != null && Duration.between(lastAt, now).seconds <= linkHours * 3600 }
         val open = store.listTasks("open")
-        var candidateIds = Logic.selectCandidateTasks(text, now, lastAt, last?.taskIds.orEmpty(), recentTaskIds(start), open, linkHours)
+        var candidateIds = Coaching.selectCandidateTasks(text, now, lastAt, last?.taskIds.orEmpty(), recentTaskIds(start), open, linkHours)
         val reason = avoidReasonTap(text, history, last)
         if (reason != null) {
             // A reason button: recorded here, and the task gets a fresh start (no more reason messages, no park).
@@ -137,15 +140,15 @@ class Agent(private val store: Store, private val llm: Llm, private val prompts:
 
         // Which playbooks (code decides): the likely tasks' stages, plus simple signals from this turn.
         val facts = LlmContext.loadFacts(dao, candidates, now)
-        val lastReply = history.indexOfLast { it.role == "assistant" }
-        val signals = Logic.chatSignals(text, history.drop(lastReply + 1).map { it.kind to it.content }, facts.stuckSince(candidateIds, start),
+        val lastReply = history.indexOfLast { it.role == Role.ASSISTANT }
+        val signals = Coaching.chatSignals(text, history.drop(lastReply + 1).map { it.kind to it.content }, facts.stuckSince(candidateIds, start),
             local, open.count { it.focusDate == today.toString() })
-        val stages = candidates.map { Logic.taskStage(it, facts.counts[it.id], today) }
-        val lang = Logic.chipLang(text)
+        val stages = candidates.map { Coaching.taskStage(it, facts.counts[it.id], today) }
+        val lang = ChipRules.chipLang(text)
         val system = prompts.render(
             "system",
-            playbooks = Logic.selectPlaybooks(null, stages, signals),
-            chips = Logic.chipsFor("chat_task", null).map { Logic.chipLabel(it.id, lang) },
+            playbooks = Coaching.selectPlaybooks(null, stages, signals),
+            chips = ChipRules.chipsFor("chat_task", null).map { ChipRules.chipLabel(it.id, lang) },
             preferences = dao.preferences().map { it.text },
             values = mapOf(
                 "now" to local.format(NOW), "weekday" to weekday(local), "tz" to s.zone.id,
@@ -156,7 +159,7 @@ class Agent(private val store: Store, private val llm: Llm, private val prompts:
         return Turn(history, userMsg, checkinIds, system, byId.mapValues { it.value.title }, open.associate { it.id to it.kind })
     }
 
-    /** thread.recent_task_ids: tasks linked to the last few messages of today, most recent first. */
+    /** Tasks linked to the last few messages of today, most recent first. */
     private suspend fun recentTaskIds(start: Instant, lastN: Int = 6): List<Long> {
         val out = mutableListOf<Long>()
         for (m in LlmContext.since(dao, start, lastN).asReversed()) for (i in m.taskIds) if (i !in out) out += i
@@ -191,17 +194,17 @@ class Agent(private val store: Store, private val llm: Llm, private val prompts:
     }
 
     /** ▶ Start 5 min · ✓ Done under a reply about exactly one open task (none once it's done). */
-    private fun replyChips(linked: List<Long>, ctx: ToolContext, openKinds: Map<Long, String>, text: String, titles: Map<Long, String>): List<Logic.ChipJson> {
+    private fun replyChips(linked: List<Long>, ctx: ToolContext, openKinds: Map<Long, String>, text: String, titles: Map<Long, String>): List<ChipRules.ChipJson> {
         if (linked.size != 1 || linked[0] in ctx.closed) return emptyList()
         val id = linked[0]
         if ((openKinds[id] ?: ctx.created[id]) != "task") return emptyList()
-        val lang = Logic.chipLang(text, titles[id])
-        return Logic.chipsJson(Logic.chipsFor("chat_task", null), lang, id)
+        val lang = ChipRules.chipLang(text, titles[id])
+        return ChipRules.chipsJson(ChipRules.chipsFor("chat_task", null), lang, id)
     }
 
     companion object {
         const val MAX_TOOL_ROUNDS = 6
-        /** One model call (the server's LLM_TIMEOUT_S). */
+        /** One model call (the Lambda allows up to LLM_TIMEOUT_S, 25 s by default). */
         const val LLM_TIMEOUT_S = 25.0
         /** A whole turn (several model calls and tools) stops after this, so "typing…" never hangs. */
         const val CHAT_TURN_TIMEOUT_MS = 90_000L
@@ -231,9 +234,9 @@ class Agent(private val store: Store, private val llm: Llm, private val prompts:
          * the latest assistant message (today's, else the last proactive one) carries that button and is about that task.
          */
         fun avoidReasonTap(text: String, history: List<MessageRow>, lastProactive: MessageRow?): Pair<String, Long>? {
-            val chip = Logic.chipIdForText(text) ?: return null
-            if (chip !in Logic.AVOID_CHIPS) return null
-            val asked = history.lastOrNull { it.role == "assistant" } ?: lastProactive ?: return null
+            val chip = ChipRules.chipIdForText(text) ?: return null
+            if (chip !in Coaching.AVOID_CHIPS) return null
+            val asked = history.lastOrNull { it.role == Role.ASSISTANT } ?: lastProactive ?: return null
             if (asked.taskIds.isNotEmpty() && Chips.decode(asked.chips).any { it.id == chip }) return chip to asked.taskIds[0]
             return null
         }

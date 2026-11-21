@@ -1,5 +1,7 @@
 package com.prominder.myapp.remind
 
+import com.prominder.myapp.logic.FocusSessions
+import com.prominder.myapp.logic.Loudness
 import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationManager
@@ -19,7 +21,6 @@ import com.prominder.myapp.data.Store
 import com.prominder.myapp.data.TaskRow
 import com.prominder.myapp.data.Times
 import com.prominder.myapp.diag.Diag
-import com.prominder.myapp.logic.Logic
 import com.prominder.myapp.notify.Channels
 import com.prominder.myapp.notify.Notifier
 import java.time.Instant
@@ -101,7 +102,7 @@ class RemindersTest {
 
     @Test fun `an alarm-level message is full-screen, rings for a minute and again every 2 minutes, for its window only`() {
         val start = System.currentTimeMillis()
-        Notifier.showNotice(app, Notice(5, "🚨 Taxes", "Taxes — overdue", Logic.ALARM, 1800, taskId = 9))
+        Notifier.showNotice(app, Notice(5, "🚨 Taxes", "Taxes — overdue", Loudness.ALARM, 1800, taskId = 9))
         val n = posted().single { it.channelId == Channels.ALARM }
         assertNotNull(n.fullScreenIntent)
         assertTrue(n.flags and Notification.FLAG_INSISTENT != 0)
@@ -132,7 +133,7 @@ class RemindersTest {
     }
 
     @Test fun `anything you write or tap stops a ringing alarm, Dismiss too`() = runBlocking {
-        Notifier.showNotice(app, Notice(5, "🚨 Taxes", "Taxes — overdue", Logic.ALARM, 1800))
+        Notifier.showNotice(app, Notice(5, "🚨 Taxes", "Taxes — overdue", Loudness.ALARM, 1800))
         assertNotNull(AlarmRings.current(app))
         assertEquals(listOf("Dismiss"), posted().single { it.channelId == Channels.ALARM }.actions.map { it.title.toString() })
         val t = addDue("Taxes")
@@ -141,11 +142,11 @@ class RemindersTest {
         assertNull(shadowOf(notifications).getNotification(Notifier.ID_ALARM))
         assertTrue(shadowOf(alarms).scheduledAlarms.none { shadowOf(it.operation).savedIntent.action == AlarmReceiver.ACTION_ALARM_RING })
 
-        Notifier.showNotice(app, Notice(6, "🚨 Taxes", "again", Logic.ALARM, 1800))
+        Notifier.showNotice(app, Notice(6, "🚨 Taxes", "again", Loudness.ALARM, 1800))
         AlarmReceiver().onReceive(app, Intent(app, AlarmReceiver::class.java).setAction(AlarmReceiver.ACTION_DISMISS))
         assertNull(AlarmRings.current(app))
         // The tick's own writes don't count: only your messages and taps.
-        Notifier.showNotice(app, Notice(7, "🚨 Taxes", "again", Logic.ALARM, 1800))
+        Notifier.showNotice(app, Notice(7, "🚨 Taxes", "again", Loudness.ALARM, 1800))
         app.store.addMessageNow("assistant", "A check-in", "nudge")
         assertNotNull(AlarmRings.current(app))
         AlarmRings.stop(app, "test")
@@ -158,7 +159,7 @@ class RemindersTest {
         val n = shadowOf(notifications).getNotification(Notifier.ID_SESSION)!!
         assertEquals(Channels.SESSION, n.channelId)
         assertTrue(n.flags and Notification.FLAG_ONGOING_EVENT != 0)
-        assertEquals(Logic.sessionEndAt(s).toEpochMilli(), n.`when`)
+        assertEquals(FocusSessions.sessionEndAt(s).toEpochMilli(), n.`when`)
         assertTrue(n.extras.getBoolean(Notification.EXTRA_CHRONOMETER_COUNT_DOWN))
         assertEquals(listOf("✓ Done", "Stop"), n.actions.map { it.title.toString() })
         assertEquals("⏱ Write the report", n.extras.getString(Notification.EXTRA_TITLE))
@@ -175,15 +176,15 @@ class RemindersTest {
     }
 
     @Test fun `a session's end has Done and Another round, Another round opens the timer`() {
-        Notifier.showNotice(app, Notice(8, "⏱ Taxes", "⏱ Time's up: Open the form.", Logic.URGENT, taskId = 4, actions = Notice.SESSION_END_ACTIONS))
+        Notifier.showNotice(app, Notice(8, "⏱ Taxes", "⏱ Time's up: Open the form.", Loudness.URGENT, taskId = 4, actions = Notice.SESSION_END_ACTIONS))
         val n = posted().single { it.extras.getString(Notification.EXTRA_TITLE) == "⏱ Taxes" }
         assertEquals(listOf("✓ Done", "▶ Another round", "Reply"), n.actions.map { it.title.toString() })
         assertEquals(com.prominder.myapp.MainActivity.ACTION_ANOTHER_ROUND, shadowOf(n.actions[1].actionIntent).savedIntent.action)
     }
 
     @Test fun `Hebrew buttons for a Hebrew check-in, only Reply for a group`() {
-        Notifier.showNotice(app, Notice(6, "לשלם ארנונה", "x", Logic.NORMAL, taskId = 3, lang = "he"))
-        Notifier.showNotice(app, Notice(7, "A (+1)", "y", Logic.NORMAL))
+        Notifier.showNotice(app, Notice(6, "לשלם ארנונה", "x", Loudness.NORMAL, taskId = 3, lang = "he"))
+        Notifier.showNotice(app, Notice(7, "A (+1)", "y", Loudness.NORMAL))
         val byTitle = posted().associateBy { it.extras.getString(Notification.EXTRA_TITLE) }
         assertEquals(listOf("▶ להתחיל 5 דק׳", "✓ בוצע", "לענות"), byTitle.getValue("לשלם ארנונה").actions.map { it.title.toString() })
         assertEquals(listOf("Reply"), byTitle.getValue("A (+1)").actions.map { it.title.toString() })
@@ -204,7 +205,7 @@ class RemindersTest {
 
     @Test fun `a reply typed into a notification goes to the assistant, and its answer comes as a notification`() {
         WorkManagerTestInitHelper.initializeTestWorkManager(app, Configuration.Builder().setExecutor(SynchronousExecutor()).build())
-        Notifier.showNotice(app, Notice(8, "Taxes", "Taxes — time to do this.", Logic.NORMAL, taskId = 3))
+        Notifier.showNotice(app, Notice(8, "Taxes", "Taxes — time to do this.", Loudness.NORMAL, taskId = 3))
         val id = shadowOf(notifications).activeNotifications.single { it.notification.extras.getString(Notification.EXTRA_TITLE) == "Taxes" }.id
         val intent = Intent(app, AlarmReceiver::class.java).setAction(AlarmReceiver.ACTION_REPLY).putExtra(AlarmReceiver.EXTRA_NOTIFICATION_ID, id)
         RemoteInput.addResultsToIntent(arrayOf(RemoteInput.Builder(AlarmReceiver.EXTRA_REPLY).build()), intent,

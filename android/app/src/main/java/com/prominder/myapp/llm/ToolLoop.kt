@@ -21,7 +21,7 @@ sealed interface LoopEvent {
 data class LoopResult(val text: String, val models: List<String>)
 
 /**
- * The tool-calling loop shared by the chat agent and the coach, ported from backend/app/llm_loop.py. Robust for a
+ * The tool-calling loop shared by the chat agent and the coach. Robust for a
  * mid-size free model:
  * - tool calls run one after another (never relies on parallel calls);
  * - malformed arguments go back to the model as a clear error, with ONE retry per turn;

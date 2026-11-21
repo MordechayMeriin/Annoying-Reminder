@@ -137,3 +137,19 @@ def test_two_silent_days_send_one_email_a_day(table):
 def test_alert_address_can_be_set(table, monkeypatch):
     monkeypatch.setenv("ALERT_EMAIL", "Me@Example.com")
     assert alive.alert_address() == "me@example.com"
+
+
+def test_a_large_answer_is_gzipped_through_the_function_url(lam, table):
+    """The phone asks for gzip; Mangum sends the compressed body base64-encoded, as function URLs expect."""
+    import base64
+    import gzip
+    messages = [{"id": i, "role": "user", "content": "hello " * 50, "kind": "chat", "task_ids": [],
+                 "created_at": "2026-11-18T09:00:00.000000Z"} for i in range(1, 101)]
+    assert call(lam, "POST", "/sync/upload", {"tables": {"messages": messages}}, owner_token())[0] == 200
+    event = url_event("POST", "/sync/restore", {"paged": True}, owner_token())
+    event["headers"]["accept-encoding"] = "gzip"
+    r = lam.handler(event, None)
+    assert r["statusCode"] == 200 and r["isBase64Encoded"] and r["headers"]["content-encoding"] == "gzip"
+    body = gzip.decompress(base64.b64decode(r["body"]))
+    assert len(json.loads(body)["tables"]["messages"]) == 100
+    assert len(r["body"]) < len(body) / 3

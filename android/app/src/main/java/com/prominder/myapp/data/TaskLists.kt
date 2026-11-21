@@ -3,7 +3,7 @@ package com.prominder.myapp.data
 import java.time.Duration
 import java.time.Instant
 
-/** The task lists the screens show, ported from tasks.list_tasks (pure functions over the open tasks). */
+/** The task lists the screens show (pure functions over the open tasks). */
 object TaskLists {
     private val FAR = "9999"
 
@@ -27,7 +27,7 @@ object TaskLists {
 
     fun overdue(task: TaskRow, now: Instant): Boolean = task.dueAt != null && task.dueAt < Times.format(now)
 
-    /** tasks.focus_today: today's pick (open or done, not cancelled), in its order. */
+    /** Today's pick (open or done, not cancelled), in its order. */
     fun focus(rows: List<TaskRow>, day: String): List<TaskRow> =
         rows.filter { it.focusDate == day && it.status != CANCELLED }
             .sortedWith(compareBy<TaskRow>({ it.focusRank == null }, { it.focusRank ?: 0 }, { it.id }))

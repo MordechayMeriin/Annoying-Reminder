@@ -1,8 +1,9 @@
 package com.prominder.myapp.data
 
+import com.prominder.myapp.logic.FocusSessions
+import com.prominder.myapp.logic.Schedule
 import androidx.test.core.app.ApplicationProvider
-import com.prominder.myapp.logic.Logic
-import com.prominder.myapp.logic.Logic.URGENT
+import com.prominder.myapp.logic.Loudness.URGENT
 import com.prominder.myapp.remind.Notice
 import com.prominder.myapp.remind.Ticker
 import java.time.Duration
@@ -28,8 +29,8 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 /**
- * Focus sessions end to end on a real (in-memory) database: Sessions.kt (actions.py) and the tick's end check-in
- * (scheduler.plan_sessions), ported from backend/tests/test_phase2_flow.py. Monday 9 Nov 2026, Israel, from 10:00.
+ * Focus sessions end to end on a real (in-memory) database: Sessions.kt and the tick's end check-in, with the
+ * cases of test_phase2_flow.py (the Python server's tests, removed in b09e82e). Monday 9 Nov 2026, Israel, from 10:00.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [29])
@@ -47,7 +48,7 @@ class SessionsTest {
     private fun local(d: Int, h: Int, mi: Int = 0): Instant = ZonedDateTime.of(2026, 11, d, h, mi, 0, 0, tz).toInstant()
     private fun t(i: Instant?) = i?.let(Times::format)
     private fun advance(minutes: Long) { now = now.plus(Duration.ofMinutes(minutes)) }
-    private fun focusDay() = Logic.focusDay(now.atZone(tz), LocalTime.of(4, 0)).toString()
+    private fun focusDay() = Schedule.focusDay(now.atZone(tz), LocalTime.of(4, 0)).toString()
 
     @After
     fun tearDown() = db.close()
@@ -84,7 +85,7 @@ class SessionsTest {
         val t = add("Taxes", nextAction = "Open the form", focus = true)
         val s = runBlocking { store.startSession(t.id, 5) }!!
         assertEquals(5, s.plannedMin)
-        assertEquals(local(9, 10, 5), Logic.sessionEndAt(s))
+        assertEquals(local(9, 10, 5), FocusSessions.sessionEndAt(s))
         assertEquals("[▶ 5 min: Open the form (Taxes)]", lastMessage().content)
         assertEquals("event", lastMessage().kind)
         assertEquals(1, userActivity)
@@ -173,7 +174,7 @@ class SessionsTest {
 
     @Test fun `another round is as long as the last one, from the timer or after it went silent`() {
         val t = add("Taxes", nextAction = "Open the form", focus = true)
-        val first = runBlocking { store.startSession(t.id, Logic.START_MIN_APP) }!!
+        val first = runBlocking { store.startSession(t.id, FocusSessions.START_MIN_APP) }!!
         advance(27)
         val next = runBlocking { store.endSession(first.id, "another") }!!
         assertEquals(25, next.plannedMin)
@@ -196,12 +197,12 @@ class SessionsTest {
         runBlocking { store.endSession(s.id, "stopped") }
         assertEquals("[Stopped after 12 min: Taxes]", lastMessage().content)
         val latest = runBlocking { dao.latestSession() }
-        assertTrue(Logic.wantsBreadcrumb(latest, now))
+        assertTrue(FocusSessions.wantsBreadcrumb(latest, now))
 
         runBlocking { store.saveBreadcrumb(s.id, "row 40") }
         assertEquals("row 40", task(t.id).resumeNote)
         assertEquals("[Where I stopped: row 40]", lastMessage().content)
-        assertFalse(Logic.wantsBreadcrumb(runBlocking { dao.latestSession() }, now))
+        assertFalse(FocusSessions.wantsBreadcrumb(runBlocking { dao.latestSession() }, now))
 
         // Used by the next check-in's template too.
         runBlocking { dao.upsertTasks(listOf(task(t.id).copy(remindAt = t(now.plus(Duration.ofMinutes(30))), remindRequested = true))) }
@@ -214,9 +215,9 @@ class SessionsTest {
         val s = runBlocking { store.startSession(t.id, 5) }!!
         advance(30)
         tick() // silence → paused
-        assertTrue(Logic.wantsBreadcrumb(runBlocking { dao.latestSession() }, now))
+        assertTrue(FocusSessions.wantsBreadcrumb(runBlocking { dao.latestSession() }, now))
         advance(3 * 60)
-        assertFalse(Logic.wantsBreadcrumb(runBlocking { dao.latestSession() }, now)) // gone by itself
+        assertFalse(FocusSessions.wantsBreadcrumb(runBlocking { dao.latestSession() }, now)) // gone by itself
         runBlocking { store.saveBreadcrumb(s.id, null) } // Skip is fine too
         assertNull(task(t.id).resumeNote)
     }

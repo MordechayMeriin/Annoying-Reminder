@@ -14,7 +14,7 @@ import androidx.lifecycle.lifecycleScope
 import com.prominder.myapp.alarm.AlarmReceiver
 import com.prominder.myapp.data.startSession
 import com.prominder.myapp.diag.Diag
-import com.prominder.myapp.logic.Logic
+import com.prominder.myapp.logic.FocusSessions
 import com.prominder.myapp.notify.Notifier
 import com.prominder.myapp.sync.SyncScheduler
 import kotlinx.coroutines.launch
@@ -71,7 +71,7 @@ class MainActivity : ComponentActivity() {
                 val another = intent.action == ACTION_ANOTHER_ROUND
                 Notifier.cancel(this, intent.getIntExtra(AlarmReceiver.EXTRA_NOTIFICATION_ID, 0))
                 app.scope.launch {
-                    val started = app.store.startSession(taskId, if (another) null else Logic.START_MIN_NOTIFICATION, another = another)
+                    val started = app.store.startSession(taskId, if (another) null else FocusSessions.START_MIN_NOTIFICATION, another = another)
                     Diag.log("notify", (if (another) "▶ Another round" else "▶ Start") + " from a notification: " +
                         if (started != null) "${started.plannedMin} min on task #$taskId" else "task #$taskId isn't open")
                     if (started != null) app.openSession.value += 1

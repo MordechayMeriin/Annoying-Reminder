@@ -53,6 +53,18 @@ class ChatTest {
         assertEquals(listOf("gym at 6", "Saved: gym.", "dentist tomorrow", "Saved: dentist."), texts)
     }
 
+    @Test fun `a turn waited for gets its own reason for no reply`() {
+        llm = ScriptedLlm(listOf(Fails(LlmUnavailable("Daily LLM limit reached."))))
+        val outcome = runBlocking { chat.sendAndWait("dentist tomorrow") }
+        assertNull(outcome.result)
+        assertEquals("Daily LLM limit reached.", outcome.error)
+
+        llm = ScriptedLlm(listOf(says("Saved: gym.")))
+        val ok = runBlocking { chat.sendAndWait("gym at 6") }
+        assertEquals("Saved: gym.", ok.result?.reply)
+        assertNull(ok.error)
+    }
+
     @Test fun `empty text isn't sent`() {
         assertFalse(chat.send("   "))
         assertFalse(chat.retry())

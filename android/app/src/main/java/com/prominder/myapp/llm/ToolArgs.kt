@@ -15,7 +15,7 @@ import kotlinx.serialization.json.jsonObject
 class ToolArgError(message: String) : Exception(message)
 
 /**
- * Checking and recovering tool calls, ported from backend/app/tools.py: forgiving validation (numbers as strings,
+ * Checking and recovering tool calls: forgiving validation (numbers as strings,
  * empty optional strings, unknown keys), and a parser for tool calls the model wrote as text instead of tool_calls.
  * Validated arguments are plain Kotlin values: Long, Boolean, String, or a List of those.
  */

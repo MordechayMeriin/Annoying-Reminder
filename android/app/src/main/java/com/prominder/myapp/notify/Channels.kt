@@ -8,7 +8,7 @@ import android.media.RingtoneManager
 import com.prominder.myapp.R
 
 /**
- * The notification channels: the same three levels as the web app (Pushover normal / urgent / emergency),
+ * The notification channels: three levels (once Pushover's normal / urgent / emergency),
  * plus the focus timer's silent countdown. You control each one in system settings: sound, vibration, Do Not Disturb.
  *
  * A channel's sound and importance can't be changed by the app once it exists (only by you), so the

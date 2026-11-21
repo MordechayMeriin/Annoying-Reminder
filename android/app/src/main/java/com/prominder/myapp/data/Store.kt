@@ -1,5 +1,6 @@
 package com.prominder.myapp.data
 
+import com.prominder.myapp.logic.FocusSessions
 import androidx.room.withTransaction
 import java.security.SecureRandom
 import java.time.Instant
@@ -7,6 +8,9 @@ import java.time.LocalDate
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import kotlin.coroutines.AbstractCoroutineContextElement
+import kotlin.coroutines.CoroutineContext
+import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.json.JsonPrimitive
@@ -24,11 +28,10 @@ data class TaskForm(
 )
 
 /**
- * Every change to your data goes through here. The rules are ported from backend/app/tasks.py and
- * actions.py (create, update, done, later, cancel, Today's 3), so the phone does what the server did.
+ * Every change to your data goes through here: create, edit, done, later, cancel, Today's 3, settings.
  *
- * Each change is one transaction that stamps the rows it writes with a new change number ([TaskRow.seq] etc.),
- * then calls [onChange] (which re-plans the next tick; the backup picks the change up by its seq).
+ * Each change is one transaction ([write]) that stamps the rows it writes with a new change number ([TaskRow.seq]
+ * etc.), then calls [onChange] (which re-plans the next tick; the backup picks the change up by its seq).
  */
 class Store(
     private val db: AppDatabase,
@@ -59,7 +62,7 @@ class Store(
         val s = settings()
         check(form)
         val due = form.dueAt?.let(Times::format)
-        val remind = form.dueAt?.let { if (form.kind == "meeting") it.minusSeconds(60L * s.meetingLeadMin) else it }?.let(Times::format)
+        val remind = form.dueAt?.let { if (form.kind == TaskKind.MEETING) it.minusSeconds(60L * s.meetingLeadMin) else it }?.let(Times::format)
         val row = TaskRow(
             id = nextId(META_TASK_COUNTER, dao.maxTaskId()),
             parentId = parentId,
@@ -79,7 +82,7 @@ class Store(
         row
     }
 
-    /** tasks.update for the fields the form edits. A new time resets the nagging and counts as a requested reminder. */
+    /** The fields the form edits. A new time resets the nagging and counts as a requested reminder. */
     suspend fun edit(id: Long, form: TaskForm): TaskRow? = write {
         val t = dao.task(id) ?: return@write null
         check(form)
@@ -94,7 +97,7 @@ class Store(
         )
         val due = form.dueAt?.let(Times::format)
         if (due != t.dueAt || form.kind != t.kind) {
-            val remind = form.dueAt?.let { if (form.kind == "meeting") it.minusSeconds(60L * s.meetingLeadMin) else it }
+            val remind = form.dueAt?.let { if (form.kind == TaskKind.MEETING) it.minusSeconds(60L * s.meetingLeadMin) else it }
             new = new.copy(dueAt = due, remindAt = remind?.let(Times::format), remindRequested = remind != null,
                 nagCount = 0, escalated = false, parkedUntil = null)
         }
@@ -113,13 +116,13 @@ class Store(
     }
 
     /**
-     * ✓ Done (actions.apply "done" + tasks.complete). A recurring task rolls on to its next time instead of
+     * ✓ Done. A recurring task rolls on to its next time instead of
      * closing; an open task's open steps are done with it. A hard stop can't be "done", only cancelled.
      * [chatEvent]: write "[Marked done: …]" in the chat (a tap); the assistant's own tool call doesn't.
      */
     suspend fun complete(id: Long, chatEvent: Boolean = true): TaskRow? = write {
         val t = dao.task(id) ?: return@write null
-        if (t.status != OPEN || t.kind == "fence") return@write t
+        if (t.status != OPEN || t.kind == TaskKind.FENCE) return@write t
         closeSessions(id, "done")
         addEvent(id, "done")
         val now = clock()
@@ -141,10 +144,10 @@ class Store(
         new
     }
 
-    /** ⏰ Later: the time is decided by code (logic.later_time), so you never have to pick one. Returns it. */
+    /** ⏰ Later: the time is decided by code, so you never have to pick one. Returns it. */
     suspend fun later(id: Long): Instant? = write {
         val t = dao.task(id) ?: return@write null
-        if (t.status != OPEN || t.kind == "fence") return@write null
+        if (t.status != OPEN || t.kind == TaskKind.FENCE) return@write null
         val s = settings()
         val whenLocal = DayMath.laterTime(clock().atZone(s.zone), s.morningTime)
         putTask(t.copy(remindAt = Times.format(whenLocal.toInstant()), remindRequested = true, nagCount = 0, escalated = false,
@@ -170,7 +173,7 @@ class Store(
 
     // ------------------------------------------------------------ Today's 3
 
-    /** tasks.set_focus: these (at most 3, open, not meetings) become Today's 3, in this order. */
+    /** These (at most 3, open, not meetings) become Today's 3, in this order. */
     suspend fun setFocus(ids: List<Long>, day: LocalDate): List<TaskRow> = write { setFocusIn(ids, day) }
 
     /** ☆ / ★ on a task: add it to Today's 3 (if there's room) or take it out. False when it's full. */
@@ -199,8 +202,11 @@ class Store(
                 dao.deleteSetting(key)
                 tombstone("settings", JsonPrimitive(key))
             } else {
-                dirty = true
-                dao.upsertSettings(listOf(SettingRow(key, value, nowText(), seq)))
+                // A row and a tombstone for the same key must never travel together: the backup would refuse both.
+                dao.deleteTombstone("settings", JsonPrimitive(key).toString())
+                val tx = tx()
+                tx.dirty = true
+                dao.upsertSettings(listOf(SettingRow(key, value, nowText(), tx.seq)))
             }
         }
     }
@@ -215,72 +221,84 @@ class Store(
     // ------------------------------------------------------------ the write machinery
 
     /**
-     * The change number every row written in the current transaction gets. Safe as a field: Room runs one
-     * write transaction at a time, so no other change can start while this one uses it.
+     * The change in progress: the change number its rows get, and what it did. It lives in the coroutine context of
+     * the transaction, not on the Store, so two changes can never mix their state, and a [write] inside a [write]
+     * simply joins the outer change.
      */
-    private var seq: Long = 0
+    private class Tx(val seq: Long) : AbstractCoroutineContextElement(Tx) {
+        /** It wrote a row (a change that wrote nothing gets no change number and doesn't re-plan or back up). */
+        var dirty = false
 
-    /** Whether the current transaction wrote a row (a tick that changed nothing doesn't schedule a backup). */
-    private var dirty = false
+        /** It saved a message of yours (typed, or a tap's chat event). */
+        var userActed = false
 
-    /** Whether the current transaction saved a message of yours (typed, or a tap's chat event). */
-    private var userActed = false
+        companion object Key : CoroutineContext.Key<Tx>
+    }
+
+    private suspend fun tx(): Tx = coroutineContext[Tx] ?: error("Store: a row was written outside write { }")
 
     /** One change: a transaction whose rows all get the same new change number. The tick (remind/) uses it too. */
     internal suspend fun <T> write(block: suspend () -> T): T {
-        val (result, flags) = db.withTransaction {
-            seq = (dao.meta(META_SEQ)?.toLongOrNull() ?: 0) + 1
-            dirty = false
-            userActed = false
-            dao.setMeta(MetaRow(META_SEQ, seq.toString()))
-            block() to (dirty to userActed)
+        if (coroutineContext[Tx] != null) return block()   // already inside a change: part of it
+        val (result, tx) = db.withTransaction {
+            val tx = Tx((dao.meta(META_SEQ)?.toLongOrNull() ?: 0) + 1)
+            val result = kotlinx.coroutines.withContext(tx) { block() }
+            // Only a change that wrote something uses up its number, so "nothing new since the last backup" stays true.
+            if (tx.dirty) dao.setMeta(MetaRow(META_SEQ, tx.seq.toString()))
+            result to tx
         }
-        if (flags.second) onUserActivity()
-        if (flags.first) onChange()
+        if (tx.userActed) onUserActivity()
+        if (tx.dirty) onChange()
         return result
     }
 
     internal suspend fun putTask(row: TaskRow) {
-        dirty = true
-        dao.upsertTasks(listOf(row.copy(seq = seq)))
+        val tx = tx()
+        tx.dirty = true
+        dao.upsertTasks(listOf(row.copy(seq = tx.seq)))
     }
 
     internal suspend fun putSession(row: SessionRow) {
-        dirty = true
-        dao.upsertSessions(listOf(row.copy(seq = seq)))
+        val tx = tx()
+        tx.dirty = true
+        dao.upsertSessions(listOf(row.copy(seq = tx.seq)))
     }
 
     internal suspend fun addEvent(taskId: Long, kind: String, note: String? = null, avoidReason: String? = null) {
-        dirty = true
-        dao.upsertEvents(listOf(EventRow(taskId, kind, note?.take(500)?.ifEmpty { null }, avoidReason, nowText(), rid(), seq)))
+        val tx = tx()
+        tx.dirty = true
+        dao.upsertEvents(listOf(EventRow(taskId, kind, note?.take(500)?.ifEmpty { null }, avoidReason, nowText(), rid(), tx.seq)))
     }
 
     internal suspend fun putPreference(row: PreferenceRow) {
-        dirty = true
-        dao.upsertPreferences(listOf(row.copy(seq = seq)))
+        val tx = tx()
+        tx.dirty = true
+        dao.upsertPreferences(listOf(row.copy(seq = tx.seq)))
     }
 
     internal suspend fun putMessage(row: MessageRow) {
-        dirty = true
-        dao.upsertMessages(listOf(row.copy(seq = seq)))
+        val tx = tx()
+        tx.dirty = true
+        dao.upsertMessages(listOf(row.copy(seq = tx.seq)))
+        dao.linkMessage(row)
     }
 
-    /** thread.add: a message in the chat. Chips as JSON text (Chips.encode). Public for the assistant (llm/). */
+    /** A message in the chat. Chips as JSON text (Chips.encode). Public for the assistant (llm/). */
     suspend fun addMessageNow(role: String, content: String, kind: String, taskIds: List<Long> = emptyList(),
                               chips: String = "[]", model: String? = null): MessageRow = write { addMessage(role, content, kind, taskIds, chips, model) }
 
     internal suspend fun addMessage(role: String, content: String, kind: String, taskIds: List<Long> = emptyList(),
                                     chips: String = "[]", model: String? = null): MessageRow {
-        dirty = true
-        if (role == "user") userActed = true
+        val tx = tx()
+        if (role == Role.USER) tx.userActed = true
         val ids = taskIds.distinct()
         val row = MessageRow(nextId(META_MESSAGE_COUNTER, dao.maxMessageId()), role, content, kind, ids.firstOrNull(), ids,
-            chips, model, nowText(), seq)
-        dao.upsertMessages(listOf(row))
+            chips, model, nowText())
+        putMessage(row)
         return row
     }
 
-    /** thread.add_event: something you did outside the chat, written as your own message so the assistant reads it. */
+    /** Something you did outside the chat, written as your own message so the assistant reads it. */
     internal suspend fun addChatEvent(text: String, taskIds: List<Long>) {
         addMessage("user", text, "event", taskIds)
     }
@@ -289,13 +307,13 @@ class Store(
         if (!old.description.isNullOrEmpty() && old.description != newText) addEvent(old.id, "description_changed", old.description)
     }
 
-    /** actions.close_task_sessions: the task is done, cancelled or parked, so its open session ends with it. */
+    /** The task is done, cancelled or parked, so its open session ends with it. */
     internal suspend fun closeSessions(taskId: Long, outcome: String) {
         dao.openSessions(taskId).forEach { closeSession(it, outcome) }
     }
 
     /**
-     * actions.close_session: records an outcome (done | another | stopped | paused) with a session_ended event (paused:
+     * Records an outcome (done | another | stopped | paused) with a session_ended event (paused:
      * a paused event), "stopped, 7 of 25 min". Null if it was already closed (a second tap).
      */
     internal suspend fun closeSession(s: SessionRow, outcome: String, endedAt: Instant = clock()): SessionRow? {
@@ -303,7 +321,7 @@ class Store(
         val closed = cur.copy(endedAt = Times.format(endedAt), outcome = outcome)
         putSession(closed)
         addEvent(closed.taskId, if (outcome == "paused") "paused" else "session_ended",
-            "$outcome, ${com.prominder.myapp.logic.Logic.actualMinutes(closed, clock())} of ${closed.plannedMin} min")
+            "$outcome, ${FocusSessions.actualMinutes(closed, clock())} of ${closed.plannedMin} min")
         return closed
     }
 
@@ -316,22 +334,24 @@ class Store(
         val out = mutableListOf<TaskRow>()
         for ((index, id) in wanted.withIndex()) {
             val t = dao.task(id) ?: continue
-            if (t.status != OPEN || t.kind != "task") continue
+            if (t.status != OPEN || t.kind != TaskKind.TASK) continue
             val new = t.copy(focusDate = date, focusRank = index + 1)
             putTask(new)
             out += new
         }
-        dirty = true
-        dao.upsertFocus(listOf(FocusRow(date, out.map { it.id }, seq)))
+        val tx = tx()
+        tx.dirty = true
+        dao.upsertFocus(listOf(FocusRow(date, out.map { it.id }, tx.seq)))
         return out
     }
 
     private suspend fun tombstone(table: String, key: kotlinx.serialization.json.JsonElement) {
-        dirty = true
-        dao.insertTombstone(Tombstone(table, key.toString(), seq))
+        val tx = tx()
+        tx.dirty = true
+        dao.insertTombstone(Tombstone(table, key.toString(), tx.seq))
     }
 
-    /** The next id: after both the backup's counter and the highest id here (as db.next_id did on the server). */
+    /** The next id: after both the backup's counter and the highest id here, so a restored phone never reuses one. */
     internal suspend fun nextId(counter: String, maxId: Long): Long {
         val id = maxOf(dao.meta(counter)?.toLongOrNull() ?: 0, maxId) + 1
         dao.setMeta(MetaRow(counter, id.toString()))
@@ -353,7 +373,7 @@ class Store(
         const val TITLE_MAX = 200
         const val DESCRIPTION_MAX = 800
         const val NEXT_ACTION_MAX = 200
-        val KINDS = listOf("task", "meeting", "fence")
+        val KINDS = TaskKind.ALL
         val RECURRENCES = listOf("daily", "weekdays", "weekly", "monthly")
 
         const val META_SEQ = "seq"
@@ -370,10 +390,10 @@ class Store(
         private val DAY_TIME = DateTimeFormatter.ofPattern("EEE HH:mm", Locale.ENGLISH)
         private val random = SecureRandom()
 
-        /** db.rand(): 8 hex characters. */
+        /** An event's random suffix: 8 hex characters. */
         fun rid(): String = "%08x".format(random.nextInt())
 
-        /** tasks._clip: trimmed, cut with "…" when too long, null when empty. */
+        /** Trimmed, cut with "…" when too long, null when empty. */
         fun clip(text: String?, limit: Int): String? {
             val t = text?.trim() ?: return null
             if (t.isEmpty()) return null

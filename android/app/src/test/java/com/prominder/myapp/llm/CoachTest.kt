@@ -1,5 +1,6 @@
 package com.prominder.myapp.llm
 
+import com.prominder.myapp.logic.Schedule
 import androidx.test.core.app.ApplicationProvider
 import com.prominder.myapp.data.AppDatabase
 import com.prominder.myapp.data.Chips
@@ -7,7 +8,6 @@ import com.prominder.myapp.data.MessageRow
 import com.prominder.myapp.data.Store
 import com.prominder.myapp.data.TaskRow
 import com.prominder.myapp.data.Times
-import com.prominder.myapp.logic.Logic
 import com.prominder.myapp.remind.Ticker
 import java.time.Duration
 import java.time.Instant
@@ -25,8 +25,9 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 /**
- * The coach writing the tick's messages (backend/tests/test_model_tag.py, the LLM paths of test_tick_flow.py and
- * test_phase*_flow.py): the LLM's words when it answers, the template when it doesn't, code's facts either way.
+ * The coach writing the tick's messages: the LLM's words when it answers, the template when it doesn't, code's facts
+ * either way. The cases of test_model_tag.py and the LLM paths of test_tick_flow.py and test_phase*_flow.py (the
+ * Python server's tests, removed in b09e82e).
  * Mon 9 Nov 2026, Israel.
  */
 @RunWith(RobolectricTestRunner::class)
@@ -50,7 +51,7 @@ class CoachTest {
                     requested: Boolean = false, nextAction: String? = null, priority: Int = 1): TaskRow = runBlocking {
         val row = TaskRow(++nextId, title = title, kind = kind, priority = priority, dueAt = t(due), remindAt = t(remind), remindRequested = requested,
             nextAction = nextAction, createdAt = t(now)!!,
-            focusDate = if (focus) Logic.focusDay(now.atZone(tz), LocalTime.of(4, 0)).toString() else null)
+            focusDate = if (focus) Schedule.focusDay(now.atZone(tz), LocalTime.of(4, 0)).toString() else null)
         dao.upsertTasks(listOf(row))
         row
     }
@@ -82,6 +83,38 @@ class CoachTest {
         val second = sent().last()
         assertTrue(second.content.contains("Pay the bill"))
         assertNull(second.model)
+    }
+
+    @Test fun `a check-in whose task was finished while it was written doesn't mention it`() {
+        val report = add("Write the report", focus = true, remind = now)
+        add("Call the bank", focus = true, remind = now)
+        // While the model writes about both, the report is marked done (a tap on the phone).
+        val llm = Llm { _, _, _, _ ->
+            store.complete(report.id, chatEvent = false)
+            LlmReply("Report and bank: which one first?", emptyList(), "test/model", message("assistant", "Report and bank: which one first?"))
+        }
+        val r = tick(llm)
+        val m = sent().singleOrNull() ?: error(r.lines.joinToString("\n"))
+        assertEquals(listOf(2L), m.taskIds)
+        assertTrue(m.content, "Call the bank" in m.content && "report" !in m.content.lowercase())
+        assertNull(m.model)   // rewritten from the template for the one still open
+        assertTrue(r.lines.any { it.startsWith("Check-in rewritten: #1") })
+    }
+
+    @Test fun `messages that fall in one tick are written side by side`() {
+        add("Write the report", focus = true, remind = local(9, 8, 0))
+        now = local(9, 8, 0)   // the morning plan and a check-in together
+        var running = 0
+        var most = 0
+        val llm = Llm { _, _, _, _ ->
+            running++
+            most = maxOf(most, running)
+            kotlinx.coroutines.delay(200)
+            running--
+            LlmReply("Written.", emptyList(), "test/model", message("assistant", "Written."))
+        }
+        tick(llm, jobs = true)
+        assertEquals(2, most)
     }
 
     @Test fun `meeting lines come from code, the LLM only adds around them`() {

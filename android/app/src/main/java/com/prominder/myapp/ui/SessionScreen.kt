@@ -37,7 +37,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.prominder.myapp.logic.Logic
+import com.prominder.myapp.logic.ChipRules
+import com.prominder.myapp.logic.FocusSessions
 import com.prominder.myapp.ui.theme.Palette
 import kotlinx.coroutines.delay
 
@@ -84,7 +85,7 @@ internal fun rememberTicker(fixed: Long? = null): Long {
 }
 
 /**
- * The focus timer, full screen (the web app's session screen): a ring that empties as time runs, the next action,
+ * The focus timer, full screen: a ring that empties as time runs, the next action,
  * where you stopped last time, one tap for 5 / 15 / 25 / 45 minutes, and ✓ Done · +5 · Stop. When the time is up the
  * ring closes in green (a finished round, not a failure) and the buttons become ✓ Done · ▶ Another round · Stop.
  * ✕ only hides it: the session keeps running (the countdown notification and the bar above the chat show it).
@@ -133,7 +134,7 @@ fun SessionScreen(
         if (!over) {
             val elapsed = now - ui.startedAt
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                for (m in Logic.SESSION_CHOICES) {
+                for (m in FocusSessions.SESSION_CHOICES) {
                     val active = m == ui.plannedMin
                     val enabled = !busy && (active || m * 60_000L > elapsed)
                     Box(
@@ -150,8 +151,8 @@ fun SessionScreen(
             }
         }
         Spacer(Modifier.weight(1f))
-        val done = Logic.chipLabel("done", ui.lang)
-        val stop = Logic.chipLabel("stop", ui.lang)
+        val done = ChipRules.chipLabel("done", ui.lang)
+        val stop = ChipRules.chipLabel("stop", ui.lang)
         Button(onClick = onDone, enabled = !busy, modifier = Modifier.fillMaxWidth().height(56.dp),
             colors = ButtonDefaults.buttonColors(containerColor = Palette.Ok, contentColor = Palette.Bg)) {
             Text(done, fontSize = 18.sp, fontWeight = FontWeight.Bold)
@@ -160,10 +161,10 @@ fun SessionScreen(
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             if (over) {
                 Button(onClick = onAnother, enabled = !busy, modifier = Modifier.weight(1f).height(52.dp)) {
-                    Text(Logic.chipLabel("another", ui.lang), fontSize = 16.sp)
+                    Text(ChipRules.chipLabel("another", ui.lang), fontSize = 16.sp)
                 }
             } else {
-                OutlinedButton(onClick = { onLength(minOf(ui.plannedMin + 5, Logic.SESSION_MAX_MIN)) }, enabled = !busy && ui.plannedMin < Logic.SESSION_MAX_MIN,
+                OutlinedButton(onClick = { onLength(minOf(ui.plannedMin + 5, FocusSessions.SESSION_MAX_MIN)) }, enabled = !busy && ui.plannedMin < FocusSessions.SESSION_MAX_MIN,
                     modifier = Modifier.weight(1f).height(52.dp)) { Text("+5", fontSize = 16.sp) }
             }
             OutlinedButton(onClick = onStop, enabled = !busy, modifier = Modifier.weight(1f).height(52.dp)) { Text(stop, fontSize = 16.sp) }

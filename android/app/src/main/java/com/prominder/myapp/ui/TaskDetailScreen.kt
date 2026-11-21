@@ -1,5 +1,6 @@
 package com.prominder.myapp.ui
 
+import com.prominder.myapp.data.TaskKind
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
@@ -86,12 +87,12 @@ fun TaskDetailScreen(
         if (open) {
             Spacer(Modifier.height(16.dp))
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (state.kind != "fence") {
+                if (state.kind != TaskKind.FENCE) {
                     Button(onClick = onDone, colors = ButtonDefaults.buttonColors(containerColor = Palette.Ok)) { Text("✓ Done") }
                     OutlinedButton(onClick = onLater) { Text("⏰ Later") }
                 }
-                if (state.kind == "task") OutlinedButton(onClick = onStart) { Text("▶ Start") }
-                if (state.kind == "task") OutlinedButton(onClick = onToggleFocus) { Text(if (state.inFocus) "★ In Today's 3" else "☆ Today's 3") }
+                if (state.kind == TaskKind.TASK) OutlinedButton(onClick = onStart) { Text("▶ Start") }
+                if (state.kind == TaskKind.TASK) OutlinedButton(onClick = onToggleFocus) { Text(if (state.inFocus) "★ In Today's 3" else "☆ Today's 3") }
                 TextButton(onClick = { confirmCancel = true }) { Text("Cancel task", color = Palette.Muted) }
             }
         }

@@ -11,6 +11,8 @@ import androidx.room.RoomDatabase
 import androidx.room.TypeConverter
 import androidx.room.TypeConverters
 import androidx.room.Upsert
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.json.Json
 
@@ -20,8 +22,8 @@ import kotlinx.serialization.json.Json
  */
 @Database(
     entities = [TaskRow::class, EventRow::class, MessageRow::class, SessionRow::class, PreferenceRow::class,
-        SettingRow::class, FocusRow::class, Tombstone::class, MetaRow::class],
-    version = 1,
+        SettingRow::class, FocusRow::class, Tombstone::class, MetaRow::class, MessageTask::class],
+    version = 2,
     exportSchema = true,
 )
 @TypeConverters(Converters::class)
@@ -30,11 +32,42 @@ abstract class AppDatabase : RoomDatabase() {
 
     companion object {
         fun open(context: Context): AppDatabase =
-            Room.databaseBuilder(context, AppDatabase::class.java, "prominder.db").build()
+            Room.databaseBuilder(context, AppDatabase::class.java, "prominder.db").addMigrations(*MIGRATIONS).build()
 
         /** For tests: a database in memory. */
         fun inMemory(context: Context): AppDatabase =
             Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).allowMainThreadQueries().build()
+
+        val MIGRATIONS = arrayOf(MIGRATION_1_2)
+    }
+}
+
+/**
+ * 1 → 2: indexes for the queries that read growing tables (seq on every table: what to back up; messages by time:
+ * the guardrails' counts), the message ↔ task links, filled from each message's task_ids, and no tombstone left for a
+ * setting that has a row (a setting set, reset and set again kept one, which stopped every backup).
+ */
+val MIGRATION_1_2 = object : Migration(1, 2) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        for (table in listOf("tasks", "events", "messages", "sessions", "preferences", "settings", "focus", "tombstones")) {
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_${table}_seq` ON `$table` (`seq`)")
+        }
+        db.execSQL("CREATE INDEX IF NOT EXISTS `index_messages_created_at` ON `messages` (`created_at`)")
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `message_tasks` (`task_id` INTEGER NOT NULL, `message_id` INTEGER NOT NULL, " +
+                "PRIMARY KEY(`task_id`, `message_id`))",
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS `index_message_tasks_message_id` ON `message_tasks` (`message_id`)")
+        val converters = Converters()
+        db.query("SELECT id, task_ids FROM messages").use { c ->
+            while (c.moveToNext()) {
+                val id = c.getLong(0)
+                for (taskId in converters.textToIds(c.getString(1)).distinct()) {
+                    db.execSQL("INSERT OR IGNORE INTO message_tasks (task_id, message_id) VALUES (?, ?)", arrayOf<Any>(taskId, id))
+                }
+            }
+        }
+        db.execSQL("DELETE FROM tombstones WHERE table_name = 'settings' AND row_key IN (SELECT '\"' || `key` || '\"' FROM settings)")
     }
 }
 
@@ -122,15 +155,18 @@ interface AppDao {
     @Query("SELECT * FROM messages WHERE id = :id")
     fun watchMessage(id: Long): Flow<MessageRow?>
 
-    /**
-     * The latest messages linked to a task (thread.for_tasks), newest first. The ids are stored as JSON text
-     * ("[12,5]"), so the match is on ",5," inside ",12,5,".
-     */
+    /** The latest messages about a task, newest first (through the message ↔ task links). */
     @Query(
-        "SELECT * FROM messages WHERE (',' || replace(replace(replace(task_ids, '[', ''), ']', ''), ' ', '') || ',')" +
-            " LIKE '%,' || :taskId || ',%' ORDER BY id DESC LIMIT :limit",
+        "SELECT messages.* FROM message_tasks JOIN messages ON messages.id = message_tasks.message_id" +
+            " WHERE message_tasks.task_id = :taskId ORDER BY messages.id DESC LIMIT :limit",
     )
     suspend fun messagesForTask(taskId: Long, limit: Int): List<MessageRow>
+
+    @Query("DELETE FROM message_tasks WHERE message_id = :messageId")
+    suspend fun unlinkMessage(messageId: Long)
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertMessageTasks(rows: List<MessageTask>)
 
     /** The latest messages, newest first. */
     @Query("SELECT * FROM messages ORDER BY id DESC LIMIT :limit")
@@ -258,6 +294,9 @@ interface AppDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertTombstone(row: Tombstone)
 
+    @Query("DELETE FROM tombstones WHERE table_name = :table AND row_key = :key")
+    suspend fun deleteTombstone(table: String, key: String)
+
     @Query("DELETE FROM tombstones WHERE seq <= :upTo")
     suspend fun dropTombstones(upTo: Long)
 
@@ -271,4 +310,10 @@ interface AppDao {
 
     @Upsert
     suspend fun setMeta(row: MetaRow)
+}
+
+/** Keeps a message's ↔ task links in step with its task_ids (a write or a restore). */
+suspend fun AppDao.linkMessage(row: MessageRow) {
+    unlinkMessage(row.id)
+    insertMessageTasks(row.taskIds.distinct().map { MessageTask(it, row.id) })
 }

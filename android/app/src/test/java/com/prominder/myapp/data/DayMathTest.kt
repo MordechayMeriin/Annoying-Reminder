@@ -7,7 +7,7 @@ import java.time.ZonedDateTime
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
-/** Ported from backend/tests/test_logic.py and test_logic_adhd.py: the same cases must give the same answers. */
+/** The date rules, with the cases of test_logic.py and test_logic_adhd.py (the Python server's tests, removed in b09e82e). */
 class DayMathTest {
     private val tz = ZoneId.of("Asia/Jerusalem")
     private fun local(y: Int, mo: Int, d: Int, h: Int, mi: Int = 0) = ZonedDateTime.of(y, mo, d, h, mi, 0, 0, tz)

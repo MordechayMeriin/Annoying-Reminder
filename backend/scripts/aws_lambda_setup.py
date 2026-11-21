@@ -11,7 +11,9 @@ boto3 and your login:
     # not shown). Run again, it only asks for what the function doesn't have yet.
 
 What it creates (all inside the always-free limits for one user):
-  1. The DynamoDB table (the phone's backup), if it isn't there yet.
+  1. The DynamoDB table (the phone's backup), if it isn't there yet. A table made before layout 2 (db.py) is
+     brought up to date: its data moved (sync.migrate), its two unused indexes dropped, and their capacity given
+     back to the table.
   2. Your email address in SES, for the alive check's email (AWS sends a link to click, once).
   3. A role for the function "prominder-api": this table only, sending email from your address, its own logs.
   4. The function itself (Python 3.12), with a stand-in until GitHub Actions deploys the real code, and its
@@ -51,7 +53,9 @@ RULE = "prominder-alive-check"
 BUDGET_NAME = "prominder-free-tier-guard"
 SCHEDULE = "cron(0 6 * * ? *)"   # 06:00 UTC: 08:00 in Israel's winter, 09:00 in summer
 GITHUB_OIDC = "token.actions.githubusercontent.com"
-TIMEOUT_S = 60   # one model call takes up to LLM_TIMEOUT_S (25 s), plus a cold start
+# One model call takes up to LLM_TIMEOUT_S (25 s), plus a cold start. A throttled upload gives up after 40 s
+# (sync.WRITE_SECONDS) and the phone sends it again later, so nothing needs longer than this.
+TIMEOUT_S = 60
 
 # Until the first deploy: answers 503, so the app says "the server isn't ready" instead of something stranger.
 STAND_IN = (
@@ -99,10 +103,43 @@ def ses_identity(ses, email: str) -> bool:
     return False
 
 
-def dynamodb_table(ddb, name: str) -> str:
+def _wait_active(ddb, name: str) -> dict:
+    """UpdateTable works one change at a time: wait until the table and its indexes are ACTIVE again."""
+    while True:
+        t = ddb.describe_table(TableName=name)["Table"]
+        if t["TableStatus"] == "ACTIVE" and all(g["IndexStatus"] == "ACTIVE" for g in t.get("GlobalSecondaryIndexes", [])):
+            return t
+        time.sleep(10)
+
+
+def upgrade_table(ddb, name: str, region: str) -> None:
+    """A table from before layout 2: move the data, drop the indexes nothing reads, give the table their capacity."""
+    os.environ["DYNAMODB_TABLE"], os.environ["AWS_REGION"] = name, region
+    from app import sync  # here: it reads the table's name and region from the environment set just above
+
+    if not sync.migrated():
+        print("Moving the data to layout 2 (events in one partition; unused items deleted)…")
+        sync.migrate()
+        print("Moved.")
+    t = _wait_active(ddb, name)
+    for index in [g["IndexName"] for g in t.get("GlobalSecondaryIndexes", [])]:
+        print(f"Dropping index {index} (nothing reads it)…")
+        ddb.update_table(TableName=name, GlobalSecondaryIndexUpdates=[{"Delete": {"IndexName": index}}])
+        t = _wait_active(ddb, name)
+    want = table_spec(name)["ProvisionedThroughput"]
+    have = {k: t["ProvisionedThroughput"][k] for k in want}
+    if have != want:
+        ddb.update_table(TableName=name, ProvisionedThroughput=want)
+        _wait_active(ddb, name)
+        print(f"Capacity: {have['ReadCapacityUnits']}/{have['WriteCapacityUnits']} → "
+              f"{want['ReadCapacityUnits']}/{want['WriteCapacityUnits']} read/write units.")
+
+
+def dynamodb_table(ddb, name: str, region: str) -> str:
     try:
         r = ddb.describe_table(TableName=name)
         print(f"Table {name} exists ({r['Table']['TableStatus']}).")
+        upgrade_table(ddb, name, region)
         return r["Table"]["TableArn"]
     except ddb.exceptions.ResourceNotFoundException:
         pass
@@ -315,7 +352,7 @@ def main() -> None:
     alert = (a.alert_email or have.get("ALERT_EMAIL") or owner).lower()
 
     step(f"The table ({a.region})")
-    table_arn = dynamodb_table(session.client("dynamodb"), a.table)
+    table_arn = dynamodb_table(session.client("dynamodb"), a.table, a.region)
 
     step("The address the alive check emails from and to")
     if not ses_identity(session.client("sesv2"), alert):

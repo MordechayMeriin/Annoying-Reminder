@@ -9,7 +9,7 @@ import java.time.LocalTime
 import java.time.ZoneId
 import java.time.ZonedDateTime
 
-/** The Python tests' helpers: local times in Israel, tasks and sessions built like their dicts. */
+/** Test helpers: local times in Israel, tasks and sessions with only the fields a case needs. */
 val TZ: ZoneId = ZoneId.of("Asia/Jerusalem")
 
 fun local(y: Int, mo: Int, d: Int, h: Int, mi: Int = 0): ZonedDateTime = ZonedDateTime.of(y, mo, d, h, mi, 0, 0, TZ)

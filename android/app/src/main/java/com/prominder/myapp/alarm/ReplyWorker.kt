@@ -8,7 +8,7 @@ import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import com.prominder.myapp.ReminderApp
 import com.prominder.myapp.diag.Diag
-import com.prominder.myapp.logic.Logic
+import com.prominder.myapp.logic.ChipRules
 import com.prominder.myapp.notify.Notifier
 
 /**
@@ -21,11 +21,11 @@ class ReplyWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
         val app = applicationContext as ReminderApp
         val text = inputData.getString(KEY_TEXT)?.trim().orEmpty()
         if (text.isEmpty() || !app.store.hasData()) return Result.success()
-        val result = app.chat.sendAndWait(text)
+        val (result, error) = app.chat.sendAndWait(text)
         if (!app.visible) {
-            val lang = Logic.chipLang(text)
+            val lang = ChipRules.chipLang(text)
             if (result != null) Notifier.showReply(app, result.reply, result.replyMessageId, lang)
-            else Notifier.showReply(app, app.chat.turn.value.error ?: "No reply: the assistant is unavailable. Your message is saved in the chat.",
+            else Notifier.showReply(app, error ?: "No reply: the assistant is unavailable. Your message is saved in the chat.",
                 System.currentTimeMillis(), lang)
         }
         return Result.success()

@@ -7,7 +7,7 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
-/** How times read on screen, like the web app's fmtTime / fmtDay. */
+/** How times read on screen: "Today 15:00", "Wed 09:30", "in 2 h". */
 object Format {
     private val HM = DateTimeFormatter.ofPattern("HH:mm", Locale.ENGLISH)
     private val DAY = DateTimeFormatter.ofPattern("EEE d MMM", Locale.ENGLISH)

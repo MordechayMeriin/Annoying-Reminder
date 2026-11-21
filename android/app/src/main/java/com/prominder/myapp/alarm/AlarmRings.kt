@@ -14,7 +14,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
 /**
- * The alarm's repeat rules, as Pushover's emergency priority did on the web app: an alarm-level message rings (full
+ * The alarm's repeat rules (once Pushover's emergency priority): an alarm-level message rings (full
  * screen, on the alarm volume) for up to [RING_MS], then rings again every "Alarm repeats every" minutes (⚙, default
  * 2) until you answer it, for at most its window: an hour, and never into quiet hours or Shabbat (the tick worked the
  * window out, Notice.alarmSeconds).

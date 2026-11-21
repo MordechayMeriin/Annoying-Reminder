@@ -1,5 +1,7 @@
 package com.prominder.myapp.llm
 
+import com.prominder.myapp.data.EventKind
+import com.prominder.myapp.data.TaskKind
 import com.prominder.myapp.data.OPEN
 import com.prominder.myapp.data.SettingException
 import com.prominder.myapp.data.SettingSpecs
@@ -16,7 +18,10 @@ import com.prominder.myapp.data.setFollowup
 import com.prominder.myapp.data.taskEvent
 import com.prominder.myapp.data.unblock
 import com.prominder.myapp.data.updateTask
-import com.prominder.myapp.logic.Logic
+import com.prominder.myapp.logic.Coaching
+import com.prominder.myapp.logic.Contacts
+import com.prominder.myapp.logic.Focus
+import com.prominder.myapp.logic.Schedule
 import com.prominder.myapp.remind.Ticker
 import java.time.Duration
 import java.time.Instant
@@ -31,7 +36,7 @@ import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 
-/** What one LLM turn did with its tools (tools.ToolContext). */
+/** What one LLM turn did with its tools. */
 class ToolContext(
     /** chat | coach (check-ins) | morning (the morning plan) */
     val mode: String,
@@ -55,8 +60,7 @@ class ToolContext(
 }
 
 /**
- * The tools the LLM can call, ported from backend/app/tools.py (definitions and behaviour), now writing to the phone's
- * database. Flat parameters and enums, for a mid-size open model.
+ * The tools the LLM can call (definitions and behaviour), writing to the phone's database. Flat parameters and enums, for a mid-size open model.
  */
 object ToolDefs {
     private const val ISO = "Local ISO datetime, e.g. 2026-11-09T14:00"
@@ -165,7 +169,7 @@ object ToolDefs {
             "kind" to str(enum = listOf("postponed", "committed", "progress", "stuck")),
             "note" to str("Short, in the user's words"),
             "avoid_reason" to str("Optional: why they keep putting this task off, when they say so or it's clear from what they wrote",
-                Logic.AVOID_REASONS),
+                Coaching.AVOID_REASONS),
         ), listOf("task_id", "kind", "note")),
         fn("mark_blocked", "The task can't move until something external happens (waiting for someone/something).", listOf(
             "task_id" to ID,
@@ -202,7 +206,7 @@ object ToolDefs {
     val MODE_TOOLS = mapOf("coach" to setOf("schedule_followup"), "morning" to setOf("set_focus", "list_tasks"))
 }
 
-/** Runs tool calls against the phone's database (tools.execute and its handlers). */
+/** Runs tool calls against the phone's database. */
 class Tools(private val store: Store) {
     private val dao = store.dao
 
@@ -238,7 +242,7 @@ class Tools(private val store: Store) {
     private suspend fun dt(value: String?, key: String): Instant? {
         value ?: return null
         return try {
-            Logic.parseLocalDateTime(value, zone())
+            Schedule.parseLocalDateTime(value, zone())
         } catch (e: Exception) {
             throw ToolArgError("'$key' must be a local ISO datetime like 2026-11-09T14:00, got '$value'.")
         }
@@ -252,7 +256,7 @@ class Tools(private val store: Store) {
         return est
     }
 
-    /** tools.brief: the task as the model sees it, times in local ISO. */
+    /** The task as the model sees it, times in local ISO. */
     suspend fun brief(t: TaskRow): JsonObject {
         val zone = zone()
         fun local(text: String?) = Times.parseOrNull(text)?.atZone(zone)?.format(LOCAL_ISO)
@@ -288,11 +292,11 @@ class Tools(private val store: Store) {
         ctx.touched(t.id)
         ctx.changed = true
         var out = brief(t)
-        if (kind == "fence") {
+        if (kind == TaskKind.FENCE) {
             out = out.with("note", if (t.dueAt == null) "Saved without a time, so it can't interrupt. Call update_task with due_at: the moment to stop."
             else "Saved as a hard stop: the app interrupts at that time, even during a focus session.")
         }
-        if (kind == "task" && t.nextAction.isNullOrEmpty()) {
+        if (kind == TaskKind.TASK && t.nextAction.isNullOrEmpty()) {
             // Saved anyway (never lose what the user said), but every task needs its first step.
             out = out.with("note", "Saved without a next_action. Now call update_task with next_action: the very first physical step, verb " +
                 "first, 15 minutes or less. Infer it; don't ask the user.")
@@ -324,7 +328,7 @@ class Tools(private val store: Store) {
 
     private suspend fun completeTask(a: Map<String, Any>, ctx: ToolContext): JsonElement {
         val id = a.long("id")!!
-        if (task(id).kind == "fence") throw ToolArgError("A hard stop isn't completed: it fires at its time. Use cancel_task to remove it.")
+        if (task(id).kind == TaskKind.FENCE) throw ToolArgError("A hard stop isn't completed: it fires at its time. Use cancel_task to remove it.")
         ctx.touched(id)
         ctx.closed += id
         ctx.changed = true
@@ -344,16 +348,16 @@ class Tools(private val store: Store) {
         @Suppress("UNCHECKED_CAST")
         val ids = (a["task_ids"] as List<Long>).distinct()
         if (ids.isEmpty()) throw ToolArgError("Give 1 to 3 task ids.")
-        if (ids.size > Logic.FOCUS_MAX) throw ToolArgError("At most ${Logic.FOCUS_MAX} tasks: pick the most important ones.")
+        if (ids.size > Focus.FOCUS_MAX) throw ToolArgError("At most ${Focus.FOCUS_MAX} tasks: pick the most important ones.")
         val found = dao.tasks(ids).associateBy { it.id }
-        val bad = ids.filter { i -> found[i].let { it == null || it.status != OPEN || it.kind != "task" || it.parentId != null } }
+        val bad = ids.filter { i -> found[i].let { it == null || it.status != OPEN || it.kind != TaskKind.TASK || it.parentId != null } }
         if (bad.isNotEmpty()) {
             throw ToolArgError("Not open top-level tasks (meetings can't be focus tasks): ${bad.joinToString(", ", "[", "]")}. " +
                 "Use list_tasks to find the right ids.")
         }
-        for (i in ids) if (Logic.isParked(found.getValue(i), ctx.now)) store.resetAvoidance(i) // chosen for today: the park is over
+        for (i in ids) if (Focus.isParked(found.getValue(i), ctx.now)) store.resetAvoidance(i) // chosen for today: the park is over
         val s = store.settings()
-        val rows = store.setFocus(ids, Logic.focusDay(ctx.now.atZone(s.zone), s.dayResetTime))
+        val rows = store.setFocus(ids, Schedule.focusDay(ctx.now.atZone(s.zone), s.dayResetTime))
         ctx.focus = rows.map { it.id }
         rows.forEach { ctx.touched(it.id) }
         ctx.changed = true
@@ -362,7 +366,7 @@ class Tools(private val store: Store) {
 
     private suspend fun scheduleFollowup(a: Map<String, Any>, ctx: ToolContext): JsonElement {
         val t = task(a.long("task_id")!!)
-        if (t.kind == "meeting" || t.kind == "fence") {
+        if (t.kind == TaskKind.MEETING || t.kind == TaskKind.FENCE) {
             throw ToolArgError("Meetings and hard stops are scheduled automatically; use update_task to change the time.")
         }
         if (t.status != OPEN) throw ToolArgError("Task ${t.id} is ${t.status}.")
@@ -383,11 +387,11 @@ class Tools(private val store: Store) {
         }
     }
 
-    /** tools.resolve_followup: the arguments → a clamped time, and whether it was clamped. */
+    /** The arguments → a clamped time, and whether it was clamped. */
     suspend fun resolveFollowup(now: Instant, minutes: Long?, atIso: String?): Pair<Instant, Boolean> {
         if ((minutes == null) == (atIso == null)) throw ToolArgError("Give exactly one of minutes_from_now or at_local_iso.")
         val wanted = if (minutes != null) now.plus(Duration.ofMinutes(minutes)) else dt(atIso, "at_local_iso")!!
-        val at = Logic.clampFollowup(now, wanted, Ticker.guardrails(store.settings()))
+        val at = Contacts.clampFollowup(now, wanted, Ticker.guardrails(store.settings()))
         return at to (at != wanted)
     }
 
@@ -405,7 +409,7 @@ class Tools(private val store: Store) {
         val reason = a.str("avoid_reason")
         val kind = a.str("kind")!!
         store.taskEvent(id, kind, a.str("note"), reason)
-        if (reason != null || kind == "progress" || kind == "committed") store.resetAvoidance(id) // moving again, or we know why not
+        if (reason != null || kind == EventKind.PROGRESS || kind == EventKind.COMMITTED) store.resetAvoidance(id) // moving again, or we know why not
         ctx.touched(id)
         return buildJsonObject { put("ok", true) }
     }
@@ -454,7 +458,7 @@ class Tools(private val store: Store) {
     }
 
     companion object {
-        /** Python's isoformat(timespec="minutes") of a local time: 2026-11-09T14:00+02:00. */
+        /** A local time to the minute, with its offset: 2026-11-09T14:00+02:00 (how the model sees times). */
         val LOCAL_ISO: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mmxxx")
     }
 }

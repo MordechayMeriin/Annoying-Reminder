@@ -16,7 +16,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
-/** The assistant's changes and the multi-task reply buttons (tasks.py, actions.py) on a real database. */
+/** The assistant's changes and the multi-task reply buttons (StoreAssistant.kt) on a real database. */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [29])
 class StoreAssistantTest {

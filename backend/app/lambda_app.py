@@ -5,7 +5,8 @@ The backend: one AWS Lambda function, everything the phone still needs from a se
     POST /auth/google                                       Google sign-in → the app's own login token (auth.py)
     GET  /sync/status, POST /sync/restore, POST /sync/upload  the phone's backup (sync.py)
     POST /llm, GET /prompts                                 the assistant: one model call, the prompt files (llm_proxy.py)
-    (EventBridge, once a day)                               "is the phone still alive?" (alive.py)
+    (EventBridge, once a day)                               "is the phone still alive?" (alive.py), and the
+                                                            backup's one-off move to layout 2 (sync.migrate)
 
 A small FastAPI app behind a Lambda function URL (Mangum turns the URL's events into ASGI requests). The phone
 does everything else itself: it keeps the data, reminds you, and runs the assistant, coming here only for the
@@ -24,18 +25,29 @@ import time
 from collections import deque
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from mangum import Mangum
 from pydantic import BaseModel, Field
 
-from . import alive, auth, llm_proxy, sync
+from . import alive, auth, db, llm_proxy, sync
 from .auth import require_owner
 
 logging.getLogger().setLevel(logging.INFO)
 log = logging.getLogger("lambda")
 
 app = FastAPI(title="ProMinder", docs_url=None, redoc_url=None, openapi_url=None)
+# The phone's HTTP client asks for gzip and unpacks it by itself. JSON shrinks several times, which keeps a restore
+# page far from the function URL's 6 MB limit (Mangum sends the compressed body base64-encoded).
+app.add_middleware(GZipMiddleware, minimum_size=2000)
+
+
+@app.exception_handler(db.Busy)
+async def busy(_: Request, e: db.Busy):
+    """DynamoDB throttled past the request's deadline: the phone treats a 503 as "try again later"."""
+    log.warning("Busy: %s", e)
+    return JSONResponse(status_code=503, content={"detail": str(e), "code": "busy"})
 
 
 @app.get("/health")
@@ -47,6 +59,8 @@ class GoogleSignInIn(BaseModel):
     idToken: str = Field(min_length=1, max_length=8192)
 
 
+# A brake on guessing, counted per Lambda instance (in memory): two instances running at once count separately, so
+# the real limit can be a small multiple of this. That's fine for a brake; a login still needs the owner's Google token.
 _login_times: deque[float] = deque()
 _LOGINS_PER_MINUTE = 10
 
@@ -69,6 +83,9 @@ async def auth_google(body: GoogleSignInIn):
 class RestoreIn(BaseModel):
     handover: bool = False
     device: str = Field(default="", max_length=200)
+    # paged: one page per request, continued with the `next` cursor of the previous answer (sync.restore)
+    paged: bool = False
+    cursor: str | None = Field(default=None, max_length=1000)
 
 
 class UploadIn(BaseModel):
@@ -84,8 +101,11 @@ def sync_status():
 
 @app.post("/sync/restore", dependencies=[Depends(require_owner)])
 def sync_restore(body: RestoreIn):
-    """Everything the phone keeps, for an empty phone. handover=true: from now on the phone owns the data."""
-    return sync.restore(handover=body.handover, device=body.device)
+    """Everything the phone keeps, for an empty phone, in pages. handover=true: from now on the phone owns the data."""
+    try:
+        return sync.restore(handover=body.handover, device=body.device, paged=body.paged, cursor=body.cursor)
+    except sync.SyncError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from None
 
 
 @app.post("/sync/upload", dependencies=[Depends(require_owner)])
@@ -133,5 +153,9 @@ def handler(event: dict, context=None):
     if is_schedule(event):
         result = alive.check()
         log.info("Alive check: %s", json.dumps(result))
+        try:   # a few seconds a day until the backup is on layout 2, then one read
+            result["layout"] = "2" if sync.migrate(deadline=time.monotonic() + 40) else "moving"
+        except Exception:   # never let it hide the alive check's result
+            log.exception("Moving the backup to layout 2 failed; the next run continues")
         return result
     return _http(event, context)

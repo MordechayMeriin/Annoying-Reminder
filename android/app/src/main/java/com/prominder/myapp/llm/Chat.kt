@@ -1,5 +1,6 @@
 package com.prominder.myapp.llm
 
+import com.prominder.myapp.data.TaskKind
 import com.prominder.myapp.diag.Diag
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -11,7 +12,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
-/** What the chat shows about the turn in progress (the web app's status area and delivery line). */
+/** What the chat shows about the turn in progress (the status under the chat and the delivery line). */
 data class ChatTurn(
     /** The text being sent; null when nothing is. */
     val sending: String? = null,
@@ -28,6 +29,9 @@ data class ChatTurn(
 ) {
     val busy: Boolean get() = sending != null
 }
+
+/** How a turn that was waited for ended: the reply, or why there's none (this turn's own reason, never another's). */
+data class ChatOutcome(val result: ChatResult?, val error: String?)
 
 /**
  * Runs chat turns for the screen, a shared text and a reply typed into a notification. It lives in the app, not the
@@ -58,16 +62,16 @@ class Chat(private val scope: CoroutineScope, private val agent: () -> Agent) {
         return true
     }
 
-    /** Send and wait for the reply (a notification reply, a share). Returns it, or null when there was none. */
-    suspend fun sendAndWait(text: String): ChatResult? {
+    /** Send and wait for the reply (a notification reply, a share): the reply, or why this turn got none. */
+    suspend fun sendAndWait(text: String): ChatOutcome {
         val t = text.trim()
-        if (t.isEmpty()) return null
+        if (t.isEmpty()) return ChatOutcome(null, null)
         return run(t, retryOf = null)
     }
 
     fun dismissError() = _turn.update { if (it.busy) it else ChatTurn() }
 
-    private suspend fun run(text: String, retryOf: Long?): ChatResult? = lock.withLock {
+    private suspend fun run(text: String, retryOf: Long?): ChatOutcome = lock.withLock {
         _turn.value = ChatTurn(sending = text, sentId = retryOf)
         var saved: Long? = retryOf
         try {
@@ -82,25 +86,28 @@ class Chat(private val scope: CoroutineScope, private val agent: () -> Agent) {
                 }
             }
             _turn.value = ChatTurn()
-            result
+            ChatOutcome(result, null)
         } catch (e: CancellationException) {
             throw e
         } catch (e: LlmUnavailable) {
             Diag.log("llm", "Chat: no reply (${e.message?.lineSequence()?.firstOrNull()})")
-            _turn.value = ChatTurn(error = e.message ?: "The assistant is unavailable right now.", failedId = saved, failedText = text)
-            null
+            failed(e.message ?: "The assistant is unavailable right now.", saved, text)
         } catch (e: Exception) {
             Diag.log("llm", "Chat turn failed: ${e::class.java.simpleName}: ${e.message}")
-            _turn.value = ChatTurn(error = "Something went wrong. Try again.", failedId = saved, failedText = text)
-            null
+            failed("Something went wrong. Try again.", saved, text)
         }
     }
 
+    private fun failed(error: String, saved: Long?, text: String): ChatOutcome {
+        _turn.value = ChatTurn(error = error, failedId = saved, failedText = text)
+        return ChatOutcome(null, error)
+    }
+
     companion object {
-        /** The status line for a tool call (the web app's TOOL_LABEL). */
+        /** The status line for a tool call. */
         fun toolLabel(t: ToolStatus): String {
             val (what, which) = when (t.name) {
-                "add_task" -> (if (t.kind == "meeting") "📅 Saving a new meeting" else "📝 Writing a new task") to t.title
+                "add_task" -> (if (t.kind == TaskKind.MEETING) "📅 Saving a new meeting" else "📝 Writing a new task") to t.title
                 "update_setting" -> "⚙️ Changing a setting" to null
                 "remember_preference" -> "🧠 Remembering that" to null
                 "list_tasks" -> "🔎 Checking your tasks" to null

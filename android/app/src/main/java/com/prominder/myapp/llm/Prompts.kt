@@ -7,7 +7,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
 /**
- * The prompts, ported from backend/app/prompting.py. They're the same Markdown files (backend/app/prompts/), shipped
+ * The prompts: the Markdown files in backend/app/prompts/ (the Lambda serves them too), shipped
  * inside the app (assets/prompts/, copied at build time) so the assistant works offline-first. A newer set downloaded
  * from the backend at the daily backup ([PromptFiles]) takes precedence, so a prompt can change without a new app.
  *
@@ -44,12 +44,12 @@ class Prompts(private val source: (String) -> String?) {
         private val PLACEHOLDER = Regex("""\{(\w+)\}""")
         private val BLANK_LINES = Regex("\n{3,}")
 
-        /** Every file the app needs (prompting.check_all). */
+        /** Every file the app needs. */
         val NAMES = listOf("system", "core", "checkin", "daily_morning", "daily_checkin", "daily_evening", "daily_reentry")
 
         fun chipsText(labels: List<String>): String = if (labels.isEmpty()) "(none)" else labels.joinToString(" · ")
 
-        /** preferences.prompt_text: the block for {preferences}, empty when there are none. */
+        /** The block for {preferences}, empty when there are none. */
         fun preferencesText(lines: List<String>): String =
             if (lines.isEmpty()) "" else "# What the user asked of you (always follow these)\n" + lines.joinToString("\n") { "- $it" }
     }

@@ -1,5 +1,12 @@
 package com.prominder.myapp.llm
 
+import com.prominder.myapp.data.CANCELLED
+import com.prominder.myapp.data.DONE
+import com.prominder.myapp.data.EventKind
+import com.prominder.myapp.data.MessageKind
+import com.prominder.myapp.data.OPEN
+import com.prominder.myapp.data.Role
+import com.prominder.myapp.data.TaskKind
 import com.prominder.myapp.data.AppDao
 import com.prominder.myapp.data.EventRow
 import com.prominder.myapp.data.MessageRow
@@ -16,7 +23,7 @@ import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
 import java.util.Locale
 
-/** Subtasks, recent events and 7-day event counts per task (context.Facts). */
+/** Subtasks, recent events and 7-day event counts per task. */
 data class Facts(
     val subtasks: Map<Long, List<TaskRow>> = emptyMap(),
     val events: Map<Long, List<EventRow>> = emptyMap(),
@@ -25,12 +32,12 @@ data class Facts(
     /** A stuck event on one of these tasks since [start] (the stuck playbook). */
     fun stuckSince(ids: List<Long>, start: Instant): Boolean {
         val from = Times.format(start)
-        return ids.any { id -> events[id].orEmpty().any { it.kind == "stuck" && it.createdAt >= from } }
+        return ids.any { id -> events[id].orEmpty().any { it.kind == EventKind.STUCK && it.createdAt >= from } }
     }
 }
 
 /**
- * Compact, plain-text context for the LLM, ported from backend/app/context.py (easier for a mid-size model than
+ * Compact, plain-text context for the LLM (easier for a mid-size model than
  * JSON dumps). The format functions are pure; the suspend ones read what they need from the database.
  */
 object LlmContext {
@@ -58,32 +65,32 @@ object LlmContext {
         counts: Map<String, Int> = emptyMap(), contactsToday: Int = 0, today: LocalDate? = null,
     ): String {
         val head = mutableListOf("#${task.id} \"${task.title}\"")
-        if (task.kind == "meeting") head += "meeting"
+        if (task.kind == TaskKind.MEETING) head += "meeting"
         if (today != null && task.focusDate == today.toString()) head += "in Today's 3 (#${task.focusRank ?: "?"})"
         PRIORITY[task.priority]?.let { head += it }
         task.due?.let { due ->
-            val overdue = due < nowLocal.toInstant() && task.kind != "meeting"
+            val overdue = due < nowLocal.toInstant() && task.kind != TaskKind.MEETING
             head += (if (overdue) "OVERDUE since " else "due ") + fmtWhen(due, nowLocal)
         }
         task.recurrence?.let { head += "repeats $it" }
-        if (task.status != "open") head += task.status
+        if (task.status != OPEN) head += task.status
         if (contactsToday > 0) head += "checked in ${contactsToday}x today"
         val lines = mutableListOf(head.joinToString(" · "))
         if (!task.nextAction.isNullOrEmpty()) {
             val est = task.estimateMin?.let { " (whole task ~$it min)" }.orEmpty()
             lines += "  Next action: ${task.nextAction}$est"
-        } else if (task.kind == "task") {
+        } else if (task.kind == TaskKind.TASK) {
             lines += "  Next action: (none yet: infer one and save it with update_task)"
         }
         if (!task.resumeNote.isNullOrEmpty()) lines += "  Where they stopped last time: ${task.resumeNote}"
         if (!task.description.isNullOrEmpty()) lines += "  Description: ${task.description}"
         if (!task.blockedReason.isNullOrEmpty()) lines += "  Blocked: ${task.blockedReason} (check again ${fmtWhen(task.blocked, nowLocal)})"
         if (subtasks.isNotEmpty()) {
-            lines += "  Steps: " + subtasks.joinToString("; ") { "[${if (it.status == "done") "x" else " "}] #${it.id} ${it.title}" }
+            lines += "  Steps: " + subtasks.joinToString("; ") { "[${if (it.status == DONE) "x" else " "}] #${it.id} ${it.title}" }
         }
         if (events.isNotEmpty()) {
             lines += "  History (newest first): " + events.joinToString("; ") { e ->
-                "${fmtWhen(e.createdAt, nowLocal)} ${e.kind}" + if (!e.note.isNullOrEmpty() && e.kind != "description_changed") " (${e.note})" else ""
+                "${fmtWhen(e.createdAt, nowLocal)} ${e.kind}" + if (!e.note.isNullOrEmpty() && e.kind != EventKind.DESCRIPTION_CHANGED) " (${e.note})" else ""
             }
         }
         val shown = counts.filterKeys { it in COUNTED }
@@ -95,7 +102,7 @@ object LlmContext {
 
     fun formatMessages(messages: List<MessageRow>, nowLocal: ZonedDateTime, maxChars: Int = 300): String =
         messages.joinToString("\n") { m ->
-            val who = if (m.kind == "event") "Event" else if (m.role == "user") "User" else "You"
+            val who = if (m.kind == MessageKind.EVENT) "Event" else if (m.role == Role.USER) "User" else "You"
             var text = m.content.replace("\n", " ")
             if (text.length > maxChars) text = text.take(maxChars - 1) + "…"
             "[${fmtWhen(m.createdAt, nowLocal)}] $who: $text"
@@ -122,13 +129,13 @@ object LlmContext {
         if (items.isEmpty()) return Facts()
         val ids = items.map { it.id }
         return Facts(
-            subtasks = ids.associateWith { id -> dao.children(id).filter { it.status != "cancelled" }.sortedWith(compareBy({ it.createdAt }, { it.id })) },
+            subtasks = ids.associateWith { id -> dao.children(id).filter { it.status != CANCELLED }.sortedWith(compareBy({ it.createdAt }, { it.id })) },
             events = ids.associateWith { id -> dao.eventsSince(id, "").take(8) },
             counts = eventCounts(dao, items, now, 7),
         )
     }
 
-    /** tasks.event_counts_many: events per kind in the last [days], counted from the task's last fresh start. */
+    /** Events per kind in the last [days], counted from the task's last fresh start. */
     suspend fun eventCounts(dao: AppDao, items: List<TaskRow>, now: Instant, days: Long): Map<Long, Map<String, Int>> {
         val cutoff = now.minus(Duration.ofDays(days))
         return items.associate { t ->
@@ -138,7 +145,7 @@ object LlmContext {
         }
     }
 
-    /** thread.for_tasks: the latest [limit] messages about any of these tasks (any day), oldest first. */
+    /** The latest [limit] messages about any of these tasks (any day), oldest first. */
     suspend fun forTasks(dao: AppDao, ids: List<Long>, limit: Int): List<MessageRow> {
         if (ids.isEmpty()) return emptyList()
         val byId = LinkedHashMap<Long, MessageRow>()
@@ -151,7 +158,7 @@ object LlmContext {
         return if (msgs.isEmpty()) "(no earlier messages about this)" else formatMessages(msgs, nowLocal)
     }
 
-    /** thread.since: the current chat day, oldest first, capped for very busy days. */
+    /** The current chat day, oldest first, capped for very busy days. */
     suspend fun since(dao: AppDao, start: Instant, limit: Int): List<MessageRow> =
         dao.messagesSince(Times.format(start)).take(limit).reversed()
 }

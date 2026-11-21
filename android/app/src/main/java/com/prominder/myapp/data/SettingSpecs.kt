@@ -5,8 +5,8 @@ import java.time.LocalTime
 import java.time.ZoneId
 
 /**
- * The settings you can change (⚙), ported from backend/app/config.py's SPECS: same keys, defaults, checks and
- * stored text, so a value set on the web app means the same here. Pushover's account, sounds and browser push
+ * The settings you can change (⚙): their keys, defaults, checks and stored text (the same as the web app's, removed
+ * in b09e82e, so a value restored from the backup means the same here). Pushover's account, sounds and browser push
  * aren't here (the phone has its own notification channels); its three loudness settings are ("How loud").
  */
 data class SettingSpec(
@@ -74,7 +74,7 @@ object SettingSpecs {
         SettingSpec("followup_max_days", "int", "7", "Latest follow-up the assistant may pick (days)", NAG, min = 1.0, max = 60.0),
         SettingSpec("reply_link_hours", "float", "3", "A reply refers to the last check-in for (hours)", NAG, min = 0.0, max = 48.0),
 
-        // The web app's Pushover levels, same keys, now the phone's channels: normal → urgent → alarm.
+        // The notification levels (the keys are from the Pushover days): normal → urgent → alarm.
         SettingSpec("pushover_urgent_after", "int", "1", "Urgent after this many ignored check-ins", LOUD,
             "Check-ins about a task you keep ignoring get louder. Only reminders you asked for and near deadlines.", 0.0, 20.0),
         SettingSpec("pushover_alarm_for", "choice", "important", "Alarm for", LOUD,
@@ -142,7 +142,7 @@ object SettingSpecs {
 
     private fun fmt(t: LocalTime) = "%02d:%02d".format(t.hour, t.minute)
 
-    /** Python's f"{v:g}" for the values settings use: 32.0956 → "32.0956", 60.0 → "60". */
+    /** A number as settings store it, shortest form: 32.0956 → "32.0956", 60.0 → "60". */
     fun general(v: Double): String =
         if (v == Math.rint(v) && kotlin.math.abs(v) < 1e15) v.toLong().toString()
         else java.math.BigDecimal(v).round(java.math.MathContext(6)).stripTrailingZeros().toPlainString()
@@ -152,7 +152,7 @@ object SettingSpecs {
 
 /** The current settings: your changes on top of the defaults. */
 class AppSettings(stored: Map<String, String>) {
-    /** Only valid stored values count (as on the server: an invalid one is ignored). */
+    /** Only valid stored values count (an invalid one is ignored: the default applies). */
     val overrides: Map<String, String> = stored.mapNotNull { (k, v) ->
         val spec = SettingSpecs.BY_KEY[k] ?: return@mapNotNull null
         runCatching { k to SettingSpecs.canonical(spec, v) }.getOrNull()
@@ -160,8 +160,9 @@ class AppSettings(stored: Map<String, String>) {
 
     fun raw(key: String): String = overrides[key] ?: SettingSpecs.canonical(SettingSpecs.BY_KEY.getValue(key), SettingSpecs.BY_KEY.getValue(key).default)
 
-    fun time(key: String): LocalTime = LocalTime.parse(raw(key))
-    fun int(key: String): Int = raw(key).toInt()
+    // Read through the typed properties below: a key exists in one place, so a typo doesn't compile.
+    private fun time(key: String): LocalTime = LocalTime.parse(raw(key))
+    private fun int(key: String): Int = raw(key).toInt()
 
     val zone: ZoneId get() = ZoneId.of(raw("timezone"))
     val morningTime: LocalTime get() = time("morning_time")
@@ -173,13 +174,35 @@ class AppSettings(stored: Map<String, String>) {
     val checkinTimes: List<LocalTime> get() = raw("checkin_times").split(",").filter { it.isNotBlank() }.map { LocalTime.parse(it.trim()) }
     val weekStartDay: DayOfWeek get() = SettingSpecs.weekday(raw("week_start_day"))
     /** null = off */
-    fun timeOrOff(key: String): LocalTime? = raw(key).takeIf { it != "off" }?.let(LocalTime::parse)
+    private fun timeOrOff(key: String): LocalTime? = raw(key).takeIf { it != "off" }?.let(LocalTime::parse)
     val weekMeetingsTime: LocalTime? get() = timeOrOff("week_meetings_time")
     val meetingsEveTime: LocalTime? get() = timeOrOff("meetings_eve_time")
-    fun bool(key: String): Boolean = raw(key) == "true"
-    fun double(key: String): Double = raw(key).toDouble()
+    private fun bool(key: String): Boolean = raw(key) == "true"
+    private fun double(key: String): Double = raw(key).toDouble()
     val nagIntervalMin: Int get() = int("nag_interval_min")
     val maxNags: Int get() = int("max_nags")
+    val minGapMin: Int get() = int("min_gap_min")
+    val maxProactivePerDay: Int get() = int("max_proactive_per_day")
+    val maxPerTaskPerDay: Int get() = int("max_per_task_per_day")
+    val followupMinMin: Int get() = int("followup_min_min")
+    val followupMaxDays: Int get() = int("followup_max_days")
+    /** How loud, by how many check-ins went unanswered (the keys are from the Pushover days). */
+    val urgentAfter: Int get() = int("pushover_urgent_after")
+    val alarmAfter: Int get() = int("pushover_alarm_after")
+    val alarmFor: String get() = raw("pushover_alarm_for")
+    /** An alarm rings again this often until it's answered. */
+    val alarmRepeatMin: Int get() = int("pushover_alarm_retry_min")
+    val shabbatMode: Boolean get() = bool("shabbat_mode")
+    val diaspora: Boolean get() = bool("diaspora")
+    val latitude: Double get() = double("latitude")
+    val longitude: Double get() = double("longitude")
+    val altitude: Double get() = double("altitude")
+    val candleLightingMin: Int get() = int("candle_lighting_min")
+    val havdalahMin: Int get() = int("havdalah_min")
+    val shabbatBeforeMin: Int get() = int("shabbat_before_min")
+    val shabbatAfterMin: Int get() = int("shabbat_after_min")
+    val replyLinkHours: Double get() = double("reply_link_hours")
+    val showModel: Boolean get() = bool("show_model")
 
     companion object {
         val DEFAULTS = AppSettings(emptyMap())

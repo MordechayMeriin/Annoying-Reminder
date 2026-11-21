@@ -1,5 +1,7 @@
 package com.prominder.myapp.remind
 
+import com.prominder.myapp.logic.Loudness
+import com.prominder.myapp.logic.Schedule
 import androidx.test.core.app.ApplicationProvider
 import com.prominder.myapp.data.AppDatabase
 import com.prominder.myapp.data.EventRow
@@ -8,9 +10,8 @@ import com.prominder.myapp.data.SessionRow
 import com.prominder.myapp.data.Store
 import com.prominder.myapp.data.TaskRow
 import com.prominder.myapp.data.Times
-import com.prominder.myapp.logic.Logic
-import com.prominder.myapp.logic.Logic.NORMAL
-import com.prominder.myapp.logic.Logic.URGENT
+import com.prominder.myapp.logic.Loudness.NORMAL
+import com.prominder.myapp.logic.Loudness.URGENT
 import java.time.Duration
 import java.time.Instant
 import java.time.ZoneId
@@ -32,8 +33,8 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 /**
- * The tick end to end on a real (in-memory) Room database, ported from backend/tests/test_tick_flow.py,
- * test_phase3_flow.py, test_shabbat.py and test_meeting_digests.py (their template paths: the LLM is Phase D).
+ * The tick end to end on a real (in-memory) Room database, with the template paths of test_tick_flow.py,
+ * test_phase3_flow.py, test_shabbat.py and test_meeting_digests.py (the Python server's tests, removed in b09e82e); the LLM paths are in CoachTest.
  * Sun 8 Nov 2026 … Sat 14 Nov 2026, Israel.
  */
 @RunWith(RobolectricTestRunner::class)
@@ -63,7 +64,7 @@ class TickerTest {
     ): TaskRow = runBlocking {
         val row = TaskRow(++nextId, title = title, kind = kind, priority = priority, dueAt = t(due), remindAt = t(remind),
             remindRequested = requested, nextAction = nextAction, recurrence = recurrence, createdAt = t(created)!!, status = status,
-            focusDate = if (focus) Logic.focusDay(now.atZone(tz), java.time.LocalTime.of(4, 0)).toString() else null,
+            focusDate = if (focus) Schedule.focusDay(now.atZone(tz), java.time.LocalTime.of(4, 0)).toString() else null,
             avoidAsks = avoidAsks, avoidAskedAt = if (avoidAsks > 0) t(now) else null)
         dao.upsertTasks(listOf(row))
         row
@@ -86,7 +87,7 @@ class TickerTest {
 
     private fun chipIds(m: MessageRow) = Json.parseToJsonElement(m.chips ?: "[]").jsonArray.map { it.jsonObject["id"]!!.jsonPrimitive.content }
 
-    /** A tick's task check-ins only (the Python tests' tick()): returns the ids of the message's tasks. */
+    /** A tick's task check-ins only (no daily jobs): returns the ids of the message's tasks. */
     private fun tick(jobs: Boolean = false): List<Long> = runBlocking {
         val before = sent().size
         val report = if (jobs) ticker.tick() else ticker.tickTasksOnly()
@@ -293,7 +294,7 @@ class TickerTest {
             tick()
             advance(30)
         }
-        assertEquals(listOf(URGENT, URGENT, Logic.ALARM), notices.map { it.level })
+        assertEquals(listOf(URGENT, URGENT, Loudness.ALARM), notices.map { it.level })
         assertEquals(3600L, notices.last().alarmSeconds)
     }
 

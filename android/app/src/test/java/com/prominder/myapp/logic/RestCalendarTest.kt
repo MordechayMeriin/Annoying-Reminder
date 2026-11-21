@@ -1,7 +1,7 @@
 package com.prominder.myapp.logic
 
-import com.prominder.myapp.logic.Logic.ContactState
-import com.prominder.myapp.logic.Logic.Guardrails
+import com.prominder.myapp.logic.Contacts.ContactState
+import com.prominder.myapp.logic.Contacts.Guardrails
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
@@ -12,8 +12,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * backend/tests/test_shabbat.py (Rosh HaAyin, candles 20 min, havdalah at nightfall, ±60 min), plus a table of
- * the server's own answers (hdate), so KosherJava gives the same minute for every period in a year.
+ * The cases of test_shabbat.py (the Python server's tests, removed in b09e82e): Rosh HaAyin, candles 20 min, havdalah at nightfall, ±60 min; plus
+ * a table of the hdate library's answers, so KosherJava gives the same minute for every period in a year.
  */
 class RestCalendarTest {
     private val CFG = RestConfig(TZ, 32.0956, 34.9566, 60.0)
@@ -66,8 +66,8 @@ class RestCalendarTest {
     @Test fun guardrailHoldsEvenMeetingsUntilAfterShabbat() {
         val g = Guardrails(quietStart = hm(23), quietEnd = hm(7), restUntil = { RestCalendar.restUntil(it.toInstant(), CFG) })
         val meeting = task(1, kind = "meeting", priority = 3)
-        assertEquals(at(2026, 11, 14, 18, 20).i, Logic.contactDecision(meeting, ContactState(), at(2026, 11, 14, 10), g))
-        assertNull(Logic.contactDecision(meeting, ContactState(), at(2026, 11, 15, 10), g))
+        assertEquals(at(2026, 11, 14, 18, 20).i, Contacts.contactDecision(meeting, ContactState(), at(2026, 11, 14, 10), g))
+        assertNull(Contacts.contactDecision(meeting, ContactState(), at(2026, 11, 15, 10), g))
     }
 
     @Test fun summerShabbatEndsLate() {

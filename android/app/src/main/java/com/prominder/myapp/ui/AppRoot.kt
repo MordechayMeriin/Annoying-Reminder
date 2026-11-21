@@ -41,7 +41,9 @@ import java.time.Instant
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** Logged out → the login screen; logged in → home, the checklist and Diagnostics. */
 @Composable
@@ -144,8 +146,6 @@ private fun MainRoutes(app: ReminderApp, auth: AuthRepository, session: Session)
     var facts by remember { mutableStateOf(DeviceSetup.facts(context)) }
     var notice by remember { mutableStateOf<String?>(null) }
     var testNotice by remember { mutableStateOf<String?>(null) }
-    // The log changes whenever something happens (an alarm rings, a backup runs): reload then.
-    val logVersion by Diag.log.version.collectAsStateWithLifecycle()
     // The "New task" shortcut (long-press on the app icon): the chat, ready to type or dictate.
     val focusInput by app.newTask.collectAsStateWithLifecycle()
     // Shared from another app: the assistant saves the to-do in it. Nothing to type.
@@ -224,7 +224,11 @@ private fun MainRoutes(app: ReminderApp, auth: AuthRepository, session: Session)
             onBack = ::back,
         )
         Route.Diagnostics -> {
-            val lines = remember(logVersion) { Diag.log.lines() }
+            // The log changes whenever something happens (an alarm rings, a backup runs), dozens of lines a tick:
+            // reload at most every 2 seconds, and read the file and the database off the main thread.
+            @OptIn(kotlinx.coroutines.FlowPreview::class)
+            val logVersion by remember { Diag.log.version.sample(2_000) }.collectAsStateWithLifecycle(0)
+            val lines by produceState(emptyList<String>(), logVersion) { value = withContext(Dispatchers.IO) { Diag.log.lines() } }
             val syncFacts by produceState(emptyList<Pair<String, String>>(), logVersion) { value = syncFacts(app) }
             val summary = diagnosticsFacts(context, session, facts, logVersion) + syncFacts
             val pending = remember(logVersion) { TestAlarm.pending(context) }
