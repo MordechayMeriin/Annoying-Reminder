@@ -59,7 +59,7 @@ private fun ChecklistRow(item: CheckItem, onOpen: (CheckId) -> Unit, onConfirm: 
     AppCard {
         Row(verticalAlignment = Alignment.Top) {
             StatusDot(item.done)
-            Spacer(Modifier.width(4.dp))
+            Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
                 Text(stringResource(item.title), fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(2.dp))

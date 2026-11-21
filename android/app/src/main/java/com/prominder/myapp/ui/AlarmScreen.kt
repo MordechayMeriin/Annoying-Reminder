@@ -25,7 +25,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.prominder.myapp.ui.theme.Palette
 import java.time.Instant
 import java.time.ZoneId
@@ -63,9 +62,9 @@ fun AlarmScreen(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        Text("🔔", fontSize = 64.sp)
+        Text("🔔", style = MaterialTheme.typography.displayLarge)
         Spacer(Modifier.height(16.dp))
-        Text(time, fontSize = 72.sp, fontWeight = FontWeight.Bold, color = Palette.Accent)
+        Text(time, style = MaterialTheme.typography.displayLarge.copy(fontSize = MaterialTheme.typography.displayLarge.fontSize * 1.25f), fontWeight = FontWeight.Bold, color = Palette.Accent)
         if (ui.rings > 1) Muted(pluralStringResource(R.plurals.alarm_rang, ui.rings, ui.rings))
         Spacer(Modifier.height(8.dp))
         Text(ui.title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
@@ -74,26 +73,26 @@ fun AlarmScreen(
         Spacer(Modifier.height(40.dp))
         if (ui.doneLabel != null) {
             Button(onClick = onDone, modifier = Modifier.fillMaxWidth().height(64.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Palette.Ok, contentColor = Palette.Bg)) {
-                Text(ui.doneLabel, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                colors = ButtonDefaults.buttonColors(containerColor = Palette.Ok, contentColor = Palette.OnAccent)) {
+                Text(ui.doneLabel, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
             }
             Spacer(Modifier.height(12.dp))
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             if (ui.laterLabel != null) {
-                OutlinedButton(onClick = onLater, modifier = Modifier.weight(1f).height(56.dp)) { Text("⏰ ${ui.laterLabel}", fontSize = 18.sp) }
+                OutlinedButton(onClick = onLater, modifier = Modifier.weight(1f).height(56.dp)) { Text("⏰ ${ui.laterLabel}", style = MaterialTheme.typography.titleMedium, color = Palette.Text) }
             }
             if (ui.canOpen) {
-                OutlinedButton(onClick = onOpen, modifier = Modifier.weight(1f).height(56.dp)) { Text(stringResource(R.string.action_open), fontSize = 18.sp) }
+                OutlinedButton(onClick = onOpen, modifier = Modifier.weight(1f).height(56.dp)) { Text(stringResource(R.string.action_open), style = MaterialTheme.typography.titleMedium, color = Palette.Text) }
             }
         }
         if (ui.doneLabel == null && !ui.canOpen) {
             Button(onClick = onDismiss, modifier = Modifier.fillMaxWidth().height(64.dp)) {
-                Text(stringResource(R.string.action_dismiss), fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Text(stringResource(R.string.action_dismiss), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
             }
         } else {
             Spacer(Modifier.height(8.dp))
-            TextButton(onClick = onDismiss) { Text(stringResource(R.string.action_dismiss), color = Palette.Muted, fontSize = 16.sp) }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.action_dismiss), color = Palette.Muted, style = MaterialTheme.typography.bodyLarge) }
         }
     }
 }

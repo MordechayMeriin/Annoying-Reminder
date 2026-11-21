@@ -1,34 +1,62 @@
 package com.prominder.myapp.ui
 
-import androidx.compose.foundation.layout.PaddingValues
-import com.prominder.myapp.R
-import androidx.compose.ui.res.pluralStringResource
-import androidx.compose.ui.res.stringResource
-import com.prominder.myapp.data.MessageKind
-import com.prominder.myapp.data.Role
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -41,27 +69,32 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
+import com.prominder.myapp.R
+import com.prominder.myapp.data.MessageKind
+import com.prominder.myapp.data.Role
 import com.prominder.myapp.logic.ChipRules.ChipJson
 import com.prominder.myapp.ui.theme.Palette
 
@@ -100,8 +133,8 @@ data class HomeState(
     val openCount: Int = 0,
     val setupDone: Int = 0,
     val setupTotal: Int = 0,
-    /** A short answer to the last tap ("Later: next check-in Wed 14:00"). */
-    val notice: String? = null,
+    /** Notifications are off: nothing can reach you, so it's a banner and not only a dot on ⋮. */
+    val setupUrgent: Boolean = false,
     val chat: ChatUi = ChatUi(),
     /** Dictation is possible on this phone (the 🎤 button). */
     val canDictate: Boolean = false,
@@ -113,14 +146,18 @@ data class HomeState(
     val breadcrumbDraft: String = "",
     /** Focus sessions started today (the wins: "⏱ 2"). */
     val sessionsToday: Int = 0,
+    /** Today's 3 opens as the full card (it starts as the one-line strip, so the chat gets the room). */
+    val focusExpanded: Boolean = false,
     /** Screenshot tests: a fixed clock for the session bar (epoch ms); null = the real one. */
     val fixedNow: Long? = null,
 )
 
 /**
- * The main screen: Today's 3 on top, the chat with the assistant below (Phase D). The reply
- * buttons sit under the latest message; while the assistant works, its steps and the typing dots show under the chat.
+ * The main screen: the chat with the assistant, Today's 3 as a one-line strip above it (tap it for the full card), and
+ * the message field. The reply buttons sit under the latest message; while the assistant works, its steps and the
+ * typing dots show under the chat.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun HomeScreen(
     state: HomeState,
@@ -150,21 +187,30 @@ fun HomeScreen(
     onBreadcrumb: (String?) -> Unit = {},
     onBreadcrumbMic: () -> Unit = {},
 ) {
+    val listState = rememberLazyListState()
+    var focusOpen by rememberSaveable { mutableStateOf(state.focusExpanded) }
+    // The full card folds back to the strip while you type, and when you scroll the chat: the chat comes first.
+    val typing = WindowInsets.isImeVisible
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress }.collect { if (it) focusOpen = false }
+    }
+
     Column(Modifier.fillMaxSize()) {
         var menu by remember { mutableStateOf(false) }
+        val setupLeft = state.setupTotal > 0 && state.setupDone < state.setupTotal
         TopBar(stringResource(R.string.app_title)) {
             val tasks = if (state.openCount > 0) stringResource(R.string.home_tasks_count, state.openCount) else stringResource(R.string.home_tasks)
             // Compact, so the title keeps its room (Hebrew words are wider, and the phone's font may be larger).
-            TextButton(onClick = onOpenTasks, contentPadding = PaddingValues(horizontal = 8.dp)) { Text(tasks, color = Palette.Text, maxLines = 1) }
-            TextButton(onClick = onOpenSettings, modifier = Modifier.size(40.dp), contentPadding = PaddingValues(0.dp)) {
-                Text("⚙", color = Palette.Text, fontSize = 18.sp)
-            }
+            LinkButton(tasks, onOpenTasks)
+            AppIconButton(Icons.Filled.Settings, stringResource(R.string.cd_settings), onOpenSettings)
             Box {
-                TextButton(onClick = { menu = true }, modifier = Modifier.size(40.dp), contentPadding = PaddingValues(0.dp)) {
-                    Text("⋮", color = Palette.Text, fontSize = 18.sp)
-                }
+                AppIconButton(Icons.Filled.MoreVert, stringResource(R.string.cd_more), { menu = true }, badge = setupLeft)
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                    DropdownMenuItem(text = { Text(stringResource(R.string.menu_setup, state.setupDone, state.setupTotal)) }, onClick = { menu = false; onOpenChecklist() })
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.menu_setup, state.setupDone, state.setupTotal)) },
+                        onClick = { menu = false; onOpenChecklist() },
+                        trailingIcon = if (setupLeft) { { Box(Modifier.size(9.dp).clip(CircleShape).background(Palette.Accent)) } } else null,
+                    )
                     DropdownMenuItem(text = { Text(stringResource(R.string.menu_diagnostics)) }, onClick = { menu = false; onOpenDiagnostics() })
                     DropdownMenuItem(text = { Text(stringResource(R.string.log_out)) }, onClick = { menu = false; onLogout() })
                 }
@@ -172,15 +218,16 @@ fun HomeScreen(
         }
 
         Column(Modifier.padding(horizontal = 12.dp)) {
-            if (state.setupTotal > 0 && state.setupDone < state.setupTotal) {
+            if (state.setupUrgent) {
                 Row(
                     Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(Palette.Card2).clickable(onClick = onOpenChecklist)
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("! ", color = Palette.Accent, fontWeight = FontWeight.Bold)
-                    Text(stringResource(R.string.setup_banner, state.setupDone, state.setupTotal), modifier = Modifier.weight(1f), fontSize = 14.sp)
-                    Text("›", color = Palette.Muted)
+                    Icon(Icons.Filled.Warning, contentDescription = null, tint = Palette.Accent, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(stringResource(R.string.setup_banner_urgent), modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = Palette.Muted)
                 }
                 Spacer(Modifier.height(8.dp))
             }
@@ -188,7 +235,8 @@ fun HomeScreen(
                 SessionBar(bar, rememberTicker(state.fixedNow), onOpenSession)
                 Spacer(Modifier.height(8.dp))
             }
-            FocusCard(state.focus, state.sessionsToday, onOpenTask, onDone, onPickFocus, onStart)
+            FocusCard(state.focus, state.sessionsToday, expanded = focusOpen && !typing, onToggle = { focusOpen = !focusOpen },
+                onOpenTask, onDone, onPickFocus, onStart)
         }
 
         Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -201,12 +249,12 @@ fun HomeScreen(
                 Muted(stringResource(R.string.chat_empty), Modifier.align(Alignment.Center).padding(24.dp))
             } else {
                 // Newest at the bottom, opening at the bottom.
-                LazyColumn(Modifier.fillMaxSize().padding(horizontal = 12.dp), reverseLayout = true) {
+                LazyColumn(Modifier.fillMaxSize().padding(horizontal = 12.dp), state = listState, reverseLayout = true) {
                     item(key = "status") { ChatStatus(chat, chat.sending != null && chat.sentId == null, onRetry) }
                     items(state.messages.asReversed(), key = { it.id }) { m ->
                         Column {
                             m.day?.let {
-                                Text(it, color = Palette.Muted, fontSize = 12.sp, textAlign = TextAlign.Center,
+                                Text(it, color = Palette.Muted, style = MaterialTheme.typography.bodySmall, textAlign = TextAlign.Center,
                                     modifier = Modifier.fillMaxWidth().padding(top = 14.dp, bottom = 6.dp))
                             }
                             ChatLine(m, delivery = if (m.id == chat.sentId) stringResource(R.string.chat_sent) else null, model = m.model.takeIf { m.id == modelFor })
@@ -217,18 +265,17 @@ fun HomeScreen(
             }
         }
 
-        Column(Modifier.fillMaxWidth().background(Palette.Card).padding(horizontal = 8.dp, vertical = 6.dp)) {
-            state.notice?.let {
-                Text(it, color = Palette.Accent, fontSize = 14.sp, modifier = Modifier.padding(horizontal = 4.dp))
-                Spacer(Modifier.height(4.dp))
-            }
+        Column(Modifier.fillMaxWidth().background(Palette.Card).padding(horizontal = 4.dp, vertical = 6.dp)) {
             state.breadcrumb?.let { Breadcrumb(it, state.breadcrumbDraft, state.canDictate, onBreadcrumbDraft, onBreadcrumb, onBreadcrumbMic) }
             Composer(state.canDictate, state.chat.sending == null, draft, onDraft, onSend, onMic, onNewTask, focusInput)
         }
     }
 }
 
-/** The message field with ＋ (a task by hand), 🎤 (dictation) and Send. */
+/**
+ * The message field with the task form (the list-with-＋ icon), and one round button: 🎤 dictation while the field is
+ * empty, Send once there's text (so the field gets the width the two used to take).
+ */
 @Composable
 private fun Composer(
     canDictate: Boolean, idle: Boolean, draft: () -> String, onDraft: (String) -> Unit, onSend: () -> Unit, onMic: () -> Unit,
@@ -243,21 +290,36 @@ private fun Composer(
         }
     }
     Row(verticalAlignment = Alignment.CenterVertically) {
-        TextButton(onClick = onNewTask, modifier = Modifier.size(44.dp)) { Text("＋", fontSize = 20.sp, color = Palette.Muted) }
+        AppIconButton(AppIcons.AddTask, stringResource(R.string.cd_new_task_form), onNewTask, tint = Palette.Muted)
         val text = draft()
         OutlinedTextField(
             value = text,
             onValueChange = onDraft,
             modifier = Modifier.weight(1f).focusRequester(focus),
             placeholder = { Text(stringResource(R.string.chat_placeholder), color = Palette.Muted) },
+            shape = RoundedCornerShape(24.dp),
             maxLines = 5,
         )
-        if (canDictate) {
-            TextButton(onClick = onMic, modifier = Modifier.size(44.dp)) { Text("🎤", fontSize = 18.sp) }
+        Spacer(Modifier.width(6.dp))
+        if (text.isBlank() && canDictate) {
+            RoundAction(AppIcons.Mic, stringResource(R.string.cd_dictate), onMic)
+        } else {
+            RoundAction(Icons.AutoMirrored.Filled.Send, stringResource(R.string.chat_send), onSend, enabled = text.isNotBlank() && idle)
         }
-        val canSend = text.isNotBlank() && idle
-        Button(onClick = onSend, enabled = canSend, modifier = Modifier.padding(start = 4.dp)) { Text(stringResource(R.string.chat_send)) }
+        Spacer(Modifier.width(4.dp))
     }
+}
+
+/** The composer's round amber button (Send or 🎤). */
+@Composable
+private fun RoundAction(icon: ImageVector, label: String, onClick: () -> Unit, enabled: Boolean = true) {
+    FilledIconButton(
+        onClick = onClick, enabled = enabled, modifier = Modifier.size(48.dp),
+        colors = IconButtonDefaults.filledIconButtonColors(
+            containerColor = Palette.Accent, contentColor = Palette.OnAccent,
+            disabledContainerColor = Palette.Card2, disabledContentColor = Palette.Muted,
+        ),
+    ) { Icon(icon, contentDescription = label) }
 }
 
 /** Under the chat: the message being sent, this turn's tool steps, the typing dots, or why there's no reply. */
@@ -269,13 +331,25 @@ private fun ChatStatus(chat: ChatUi, showSending: Boolean, onRetry: () -> Unit) 
         }
         chat.steps.forEachIndexed { i, step ->
             val running = i == chat.steps.lastIndex && !chat.typing
-            Text(step, color = if (running) Palette.Text else Palette.Muted, fontSize = 13.sp, modifier = Modifier.padding(vertical = 2.dp))
+            Text(step, color = if (running) Palette.Text else Palette.Muted, style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.padding(vertical = 2.dp))
         }
         if (chat.typing) TypingDots()
+        // A passing problem (no network, the model busy), not a failure of yours: a calm card with ⟳ Try again.
         chat.error?.let {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
-                Text(it, color = Palette.Danger, fontSize = 13.sp, modifier = Modifier.weight(1f))
-                if (chat.canRetry) TextButton(onClick = onRetry) { Text(stringResource(R.string.chat_retry)) }
+            Row(
+                Modifier.padding(top = 6.dp).fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Palette.Card)
+                    .border(1.dp, Palette.Line, RoundedCornerShape(12.dp)).padding(start = 12.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(it, color = Palette.Text, style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f).padding(vertical = 8.dp))
+                if (chat.canRetry) {
+                    TextButton(onClick = onRetry) {
+                        Icon(Icons.Filled.Refresh, contentDescription = null, tint = Palette.Text, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(stringResource(R.string.chat_retry), color = Palette.Text, fontWeight = FontWeight.SemiBold)
+                    }
+                }
             }
         }
     }
@@ -285,7 +359,11 @@ private fun ChatStatus(chat: ChatUi, showSending: Boolean, onRetry: () -> Unit) 
 @Composable
 private fun TypingDots() {
     val transition = rememberInfiniteTransition(label = "typing")
-    Row(Modifier.padding(vertical = 6.dp).clip(RoundedCornerShape(14.dp)).background(Palette.Card).padding(horizontal = 12.dp, vertical = 10.dp)) {
+    val label = stringResource(R.string.cd_typing)
+    Row(
+        Modifier.padding(vertical = 6.dp).clip(RoundedCornerShape(14.dp)).background(Palette.Card).padding(horizontal = 12.dp, vertical = 10.dp)
+            .semantics { contentDescription = label },
+    ) {
         repeat(3) { i ->
             val a by transition.animateFloat(0.25f, 1f, infiniteRepeatable(tween(500, delayMillis = i * 160), RepeatMode.Reverse), label = "dot$i")
             Box(Modifier.padding(horizontal = 3.dp).size(7.dp).alpha(a).clip(CircleShape).background(Palette.Muted))
@@ -301,9 +379,9 @@ private fun ChipRow(chips: List<ChipJson>, onChip: (ChipJson) -> Unit) {
         chips.forEachIndexed { i, c ->
             val primary = i == 0 && c.action != null
             if (primary) {
-                Button(onClick = { onChip(c) }, modifier = Modifier.padding(end = 6.dp, bottom = 4.dp)) { Text(c.label, fontSize = 14.sp) }
+                Button(onClick = { onChip(c) }, modifier = Modifier.padding(end = 6.dp, bottom = 4.dp)) { Text(c.label) }
             } else {
-                OutlinedButton(onClick = { onChip(c) }, modifier = Modifier.padding(end = 6.dp, bottom = 4.dp)) { Text(c.label, fontSize = 14.sp) }
+                OutlinedButton(onClick = { onChip(c) }, modifier = Modifier.padding(end = 6.dp, bottom = 4.dp)) { Text(c.label, color = Palette.Text) }
             }
         }
     }
@@ -315,79 +393,197 @@ private fun ChipRow(chips: List<ChipJson>, onChip: (ChipJson) -> Unit) {
  */
 @Composable
 private fun Breadcrumb(b: BreadcrumbUi, draft: String, canDictate: Boolean, onDraft: (String) -> Unit, onDone: (String?) -> Unit, onMic: () -> Unit) {
-    Column(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp)) {
-        Text(stringResource(R.string.breadcrumb_question, b.title), color = Palette.Muted, fontSize = 13.sp)
+    Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)) {
+        Text(stringResource(R.string.breadcrumb_question, b.title), color = Palette.Muted, style = MaterialTheme.typography.labelMedium)
         Row(verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(value = draft, onValueChange = onDraft, modifier = Modifier.weight(1f), singleLine = true,
                 placeholder = { Text(stringResource(R.string.breadcrumb_hint), color = Palette.Muted) })
-            if (canDictate) TextButton(onClick = onMic, modifier = Modifier.size(44.dp)) { Text("🎤", fontSize = 18.sp) }
-            TextButton(onClick = { onDone(draft.trim().ifEmpty { null }) }) { Text(stringResource(R.string.save)) }
-            TextButton(onClick = { onDone(null) }) { Text(stringResource(R.string.skip), color = Palette.Muted) }
+            if (canDictate) AppIconButton(AppIcons.Mic, stringResource(R.string.cd_dictate), onMic, tint = Palette.Muted)
+            LinkButton(stringResource(R.string.save), { onDone(draft.trim().ifEmpty { null }) })
+            LinkButton(stringResource(R.string.skip), { onDone(null) }, color = Palette.Muted)
         }
     }
 }
 
+/**
+ * Today's 3. Folded (the usual), one line: how many are done, the next one and ▶ to start it. Unfolded (tap the line),
+ * the full card: each task with its ✓, its time and ▶, and Change.
+ */
 @Composable
-private fun FocusCard(items: List<FocusItem>, sessions: Int, onOpen: (Long) -> Unit, onDone: (Long) -> Unit, onPick: () -> Unit, onStart: (Long) -> Unit) {
-    AppCard {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(stringResource(R.string.todays_3).uppercase(), color = Palette.Muted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-            // The day's wins: no streaks, no zeros.
-            val wins = listOfNotNull(
-                if (items.isNotEmpty()) stringResource(R.string.focus_done_count, items.count { it.done }, items.size) else null,
-                if (sessions > 0) pluralStringResource(R.plurals.focus_sessions, sessions, sessions) else null,
-            )
-            if (wins.isNotEmpty()) Text(wins.joinToString(" · "), color = Palette.Muted, fontSize = 12.sp)
-            TextButton(onClick = onPick) { Text(stringResource(if (items.isEmpty()) R.string.focus_pick else R.string.focus_change)) }
-        }
-        if (items.isEmpty()) {
-            Muted(stringResource(R.string.focus_empty))
-        }
-        items.forEachIndexed { i, item ->
-            Row(Modifier.fillMaxWidth().clickable { onOpen(item.id) }.padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                DoneCircle(item.done) { if (!item.done) onDone(item.id) }
-                Column(Modifier.weight(1f).padding(start = 10.dp)) {
-                    Text("${i + 1}. ${item.title}", maxLines = 2, overflow = TextOverflow.Ellipsis,
-                        textDecoration = if (item.done) TextDecoration.LineThrough else null,
-                        color = if (item.done) Palette.Muted else Palette.Text)
-                    if (item.meta.isNotEmpty()) Text(item.meta, color = Palette.Muted, fontSize = 12.sp)
+private fun FocusCard(
+    items: List<FocusItem>, sessions: Int, expanded: Boolean, onToggle: () -> Unit,
+    onOpen: (Long) -> Unit, onDone: (Long) -> Unit, onPick: () -> Unit, onStart: (Long) -> Unit,
+) {
+    val allDone = items.isNotEmpty() && items.all { it.done }
+    val progress = when {
+        items.isEmpty() -> null
+        allDone -> stringResource(R.string.focus_all_done)
+        else -> stringResource(R.string.focus_done_count, items.count { it.done }, items.size)
+    }
+    AnimatedContent(expanded, transitionSpec = { fadeIn(tween(150)) togetherWith fadeOut(tween(100)) }, label = "focus") { open ->
+        if (!open) {
+            FocusStrip(items, progress, onToggle, onPick, onStart)
+        } else {
+            AppCard(padding = PaddingValues(start = 12.dp, end = 4.dp, top = 4.dp, bottom = 8.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(stringResource(R.string.todays_3).uppercase(), color = Palette.Muted, style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 4.dp).weight(1f))
+                    // The day's wins: no streaks, no zeros.
+                    val wins = listOfNotNull(progress, if (sessions > 0) pluralStringResource(R.plurals.focus_sessions, sessions, sessions) else null)
+                    if (wins.isNotEmpty()) Text(wins.joinToString(" · "), color = if (allDone) Palette.Ok else Palette.Muted, style = MaterialTheme.typography.bodySmall)
+                    LinkButton(stringResource(if (items.isEmpty()) R.string.focus_pick else R.string.focus_change), onPick)
+                    AppIconButton(Icons.Filled.KeyboardArrowUp, stringResource(R.string.cd_collapse), onToggle, tint = Palette.Muted)
                 }
-                if (!item.done) {
-                    TextButton(onClick = { onStart(item.id) }, modifier = Modifier.size(44.dp)) { Text("▶", color = Palette.Accent, fontSize = 18.sp) }
+                if (items.isEmpty()) {
+                    Muted(stringResource(R.string.focus_empty), Modifier.padding(start = 4.dp, end = 12.dp, bottom = 8.dp))
+                }
+                items.forEachIndexed { i, item ->
+                    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable { onOpen(item.id) }, verticalAlignment = Alignment.CenterVertically) {
+                        DoneCircle(item.done) { onDone(item.id) }
+                        Column(Modifier.weight(1f).padding(start = 4.dp, top = 4.dp, bottom = 4.dp)) {
+                            Text("${i + 1}. ${item.title}", maxLines = 2, overflow = TextOverflow.Ellipsis,
+                                textDecoration = if (item.done) TextDecoration.LineThrough else null,
+                                color = if (item.done) Palette.Muted else Palette.Text)
+                            if (item.meta.isNotEmpty()) Text(item.meta, color = Palette.Muted, style = MaterialTheme.typography.bodySmall)
+                        }
+                        if (!item.done) {
+                            AppIconButton(Icons.Filled.PlayArrow, stringResource(R.string.cd_start_task, item.title), { onStart(item.id) }, tint = Palette.Accent)
+                        } else {
+                            Spacer(Modifier.width(48.dp))
+                        }
+                    }
                 }
             }
         }
     }
 }
 
-/** The round ✓ button in lists. */
+/** Today's 3 folded: "TODAY'S 3 · 1/3 · Write the report ▶ ⌄". */
+@Composable
+private fun FocusStrip(items: List<FocusItem>, progress: String?, onExpand: () -> Unit, onPick: () -> Unit, onStart: (Long) -> Unit) {
+    val expandLabel = stringResource(R.string.cd_expand)
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 52.dp).clip(RoundedCornerShape(14.dp)).background(Palette.Card)
+            .clickable(onClickLabel = expandLabel, onClick = onExpand).padding(start = 16.dp, end = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(stringResource(R.string.todays_3).uppercase(), color = Palette.Muted, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.width(10.dp))
+        val next = items.firstOrNull { !it.done }
+        when {
+            items.isEmpty() -> {
+                Text(stringResource(R.string.focus_empty_short), color = Palette.Muted, style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                LinkButton(stringResource(R.string.focus_pick), onPick)
+            }
+            next == null -> Text(progress.orEmpty(), color = Palette.Ok, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f))
+            else -> {
+                Text(progress.orEmpty(), color = Palette.Muted, style = MaterialTheme.typography.bodySmall)
+                Spacer(Modifier.width(10.dp))
+                Text(next.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                AppIconButton(Icons.Filled.PlayArrow, stringResource(R.string.cd_start_task, next.title), { onStart(next.id) }, tint = Palette.Accent)
+            }
+        }
+        Icon(Icons.Filled.KeyboardArrowDown, contentDescription = null, tint = Palette.Muted, modifier = Modifier.padding(horizontal = 8.dp))
+    }
+}
+
+/**
+ * The round ✓ in lists: an empty ring while the task is open (a ✓ inside would read as "already done"), filled green
+ * with a ✓ once done, with a little bounce and a tap you can feel. 48dp to touch, though it looks smaller.
+ */
 @Composable
 fun DoneCircle(done: Boolean, onClick: () -> Unit) {
+    val haptic = LocalHapticFeedback.current
+    val scale = remember { Animatable(1f) }
+    var wasDone by remember { mutableStateOf(done) }
+    LaunchedEffect(done) {
+        if (done && !wasDone) {
+            scale.animateTo(1.35f, tween(110))
+            scale.animateTo(1f, spring(dampingRatio = 0.35f, stiffness = Spring.StiffnessMediumLow))
+        }
+        wasDone = done
+    }
+    val label = stringResource(if (done) R.string.cd_done else R.string.cd_mark_done)
     Box(
-        Modifier.size(28.dp).clip(CircleShape).background(if (done) Palette.Ok else Palette.Card2).clickable(onClick = onClick),
+        Modifier.size(48.dp).clip(CircleShape)
+            .clickable(enabled = !done, onClickLabel = label) {
+                haptic.performHapticFeedback(HapticFeedbackType.Confirm)
+                onClick()
+            }
+            .semantics { contentDescription = label },
         contentAlignment = Alignment.Center,
     ) {
-        Text("✓", color = if (done) Palette.Bg else Palette.Muted, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+        Box(
+            Modifier.size(26.dp).graphicsLayer { scaleX = scale.value; scaleY = scale.value }
+                .then(if (done) Modifier.background(Palette.Ok, CircleShape) else Modifier.border(2.dp, Palette.Muted, CircleShape)),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (done) Icon(Icons.Filled.Check, contentDescription = null, tint = Palette.Bg, modifier = Modifier.size(18.dp))
+        }
+    }
+}
+
+/** What a proactive message is, shown small at its top ("Check-in"), so a ping reads differently from an answer. */
+@Composable
+private fun proactiveLabel(kind: String): String? = when (kind) {
+    MessageKind.MORNING -> stringResource(R.string.msg_kind_morning)
+    MessageKind.CHECKIN, MessageKind.NUDGE -> stringResource(R.string.msg_kind_checkin)
+    MessageKind.EVENING -> stringResource(R.string.msg_kind_evening)
+    MessageKind.REMINDER -> stringResource(R.string.msg_kind_reminder)
+    MessageKind.MEETING -> stringResource(R.string.msg_kind_meeting)
+    MessageKind.SESSION -> stringResource(R.string.msg_kind_session)
+    MessageKind.REENTRY -> stringResource(R.string.msg_kind_reentry)
+    else -> null
+}
+
+/** A tap's line in the chat, as stored ("[Marked done: Taxes]"; the assistant reads it so), without the brackets. */
+internal fun eventText(content: String): String = content.trim().removePrefix("[").removeSuffix("]")
+
+/**
+ * One chat line. Yours: blue, on the end side, its tail at the top end. The assistant's: the card colour with a thin
+ * border, on the start side. A tap's event: a small pill in the middle.
+ */
+@Composable
+private fun ChatLine(m: ChatItem, delivery: String? = null, model: String? = null) {
+    if (m.kind == MessageKind.EVENT) {
+        EventPill(m)
+        return
+    }
+    val mine = m.role == Role.USER
+    val shape = if (mine) RoundedCornerShape(16.dp, 4.dp, 16.dp, 16.dp) else RoundedCornerShape(4.dp, 16.dp, 16.dp, 16.dp)
+    val meta = if (mine) Palette.OnUserBubbleMuted else Palette.Muted
+    Row(Modifier.fillMaxWidth().padding(vertical = 3.dp), horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start) {
+        Column(
+            Modifier.widthIn(max = 320.dp).clip(shape)
+                .then(if (mine) Modifier.background(Palette.UserBubble) else Modifier.background(Palette.Card).border(1.dp, Palette.Line, shape))
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+        ) {
+            val top = if (mine) null else listOfNotNull(proactiveLabel(m.kind), model?.substringAfterLast('/')).joinToString(" · ").ifEmpty { null }
+            top?.let { Text(it, color = meta, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold) }
+            Text(m.content, style = MaterialTheme.typography.bodyMedium, color = if (mine) Palette.OnUserBubble else Palette.Text)
+            Text(listOfNotNull(m.time.ifEmpty { null }, delivery).joinToString(" · "), color = meta, style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.align(Alignment.End))
+        }
     }
 }
 
 @Composable
-private fun ChatLine(m: ChatItem, delivery: String? = null, model: String? = null) {
-    if (m.kind == MessageKind.EVENT) {
-        Text("${m.content}  ${m.time}", color = Palette.Muted, fontSize = 12.sp, textAlign = TextAlign.Center,
-            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp))
-        return
-    }
-    val mine = m.role == Role.USER
-    Row(Modifier.fillMaxWidth().padding(vertical = 3.dp), horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start) {
-        Column(
-            Modifier.widthIn(max = 320.dp).clip(RoundedCornerShape(14.dp)).background(if (mine) Palette.Card2 else Palette.Card)
-                .padding(horizontal = 12.dp, vertical = 8.dp),
+private fun EventPill(m: ChatItem) {
+    val done = m.content.trimStart().startsWith("[Marked done")
+    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.Center) {
+        Row(
+            Modifier.clip(RoundedCornerShape(12.dp)).background(Palette.Card).padding(horizontal = 10.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            model?.let { Text(it.substringAfterLast('/'), color = Palette.Muted, fontSize = 11.sp) }
-            Text(m.content, style = MaterialTheme.typography.bodyMedium)
-            Text(listOfNotNull(m.time.ifEmpty { null }, delivery).joinToString(" · "), color = Palette.Muted, fontSize = 11.sp,
-                modifier = Modifier.align(Alignment.End))
+            if (done) {
+                Icon(Icons.Filled.Check, contentDescription = null, tint = Palette.Ok, modifier = Modifier.size(14.dp))
+                Spacer(Modifier.width(4.dp))
+            }
+            Text(eventText(m.content), color = Palette.Muted, style = MaterialTheme.typography.bodySmall, maxLines = 2,
+                overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+            if (m.time.isNotEmpty()) Text("  ${m.time}", color = Palette.Muted, style = MaterialTheme.typography.labelSmall)
         }
     }
 }

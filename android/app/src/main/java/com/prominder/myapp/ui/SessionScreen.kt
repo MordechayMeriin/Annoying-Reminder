@@ -20,7 +20,11 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -38,7 +42,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.prominder.myapp.logic.FocusSessions
 import com.prominder.myapp.ui.theme.Palette
 import kotlinx.coroutines.delay
@@ -103,45 +106,45 @@ fun SessionScreen(
     val total = ui.plannedMin * 60_000L
     Column(Modifier.fillMaxSize().background(Palette.Bg).padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(ui.title, color = Palette.Muted, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-            TextButton(onClick = onClose) { Text("✕", color = Palette.Muted, fontSize = 20.sp) }
+            // ⌄ hides the timer (it keeps running, in the bar above the chat): not ✕, which reads as "stop".
+            AppIconButton(Icons.Filled.KeyboardArrowDown, stringResource(R.string.cd_hide_timer), onClose, tint = Palette.Muted)
+            Text(ui.title, color = Palette.Muted, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f))
         }
         Spacer(Modifier.weight(0.5f))
         Box(Modifier.size(260.dp), contentAlignment = Alignment.Center) {
             val fraction = if (over) 1f else (left.toFloat() / total).coerceIn(0f, 1f)
+            val track = Palette.Line
+            val arc = if (over) Palette.Ok else Palette.Accent
             Canvas(Modifier.fillMaxSize().padding(10.dp)) {
                 val stroke = 14.dp.toPx()
                 val arcSize = Size(size.width - stroke, size.height - stroke)
                 val topLeft = Offset(stroke / 2, stroke / 2)
-                drawArc(Palette.Line, 0f, 360f, false, topLeft, arcSize, style = Stroke(stroke))
-                drawArc(if (over) Palette.Ok else Palette.Accent, -90f, 360f * fraction, false, topLeft, arcSize,
+                drawArc(track, 0f, 360f, false, topLeft, arcSize, style = Stroke(stroke))
+                drawArc(arc, -90f, 360f * fraction, false, topLeft, arcSize,
                     style = Stroke(stroke, cap = StrokeCap.Round))
             }
-            Text(if (over) stringResource(R.string.session_times_up) else clockText(left), fontSize = if (over) 34.sp else 60.sp, fontWeight = FontWeight.Bold,
+            Text(if (over) stringResource(R.string.session_times_up) else clockText(left), style = if (over) MaterialTheme.typography.headlineLarge else MaterialTheme.typography.displayLarge, fontWeight = FontWeight.Bold,
                 color = if (over) Palette.Ok else Palette.Text)
         }
         Spacer(Modifier.height(20.dp))
-        Text("▶ ${ui.step}", fontSize = 22.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
+        Text("▶ ${ui.step}", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
         ui.resumeNote?.let {
             Spacer(Modifier.height(8.dp))
-            Text(stringResource(R.string.session_stopped_at, it), color = Palette.Muted, fontSize = 15.sp, textAlign = TextAlign.Center)
+            Text(stringResource(R.string.session_stopped_at, it), color = Palette.Muted, style = MaterialTheme.typography.bodyLarge, textAlign = TextAlign.Center)
         }
         Spacer(Modifier.height(20.dp))
         if (!over) {
             val elapsed = now - ui.startedAt
+            // Only the lengths still possible: one already passed would end the session at once, so it isn't offered.
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                for (m in FocusSessions.SESSION_CHOICES) {
+                for (m in FocusSessions.SESSION_CHOICES.filter { it == ui.plannedMin || it * 60_000L > elapsed }) {
                     val active = m == ui.plannedMin
-                    val enabled = !busy && (active || m * 60_000L > elapsed)
                     Box(
                         Modifier.clip(RoundedCornerShape(18.dp)).background(if (active) Palette.Accent else Palette.Card2)
-                            .clickable(enabled = enabled && !active) { onLength(m) }.padding(horizontal = 16.dp, vertical = 8.dp),
+                            .clickable(enabled = !busy && !active) { onLength(m) }.padding(horizontal = 14.dp, vertical = 10.dp),
                     ) {
-                        Text("$m", color = when {
-                            active -> Palette.Bg
-                            enabled -> Palette.Text
-                            else -> Palette.Line
-                        }, fontWeight = FontWeight.SemiBold)
+                        Text(stringResource(R.string.session_minutes, m), color = if (active) Palette.OnAccent else Palette.Text, fontWeight = FontWeight.SemiBold)
                     }
                 }
             }
@@ -150,20 +153,20 @@ fun SessionScreen(
         val done = stringResource(R.string.action_done)
         val stop = stringResource(R.string.action_stop)
         Button(onClick = onDone, enabled = !busy, modifier = Modifier.fillMaxWidth().height(56.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = Palette.Ok, contentColor = Palette.Bg)) {
-            Text(done, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            colors = ButtonDefaults.buttonColors(containerColor = Palette.Ok, contentColor = Palette.OnAccent)) {
+            Text(done, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         }
         Spacer(Modifier.height(10.dp))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             if (over) {
                 Button(onClick = onAnother, enabled = !busy, modifier = Modifier.weight(1f).height(52.dp)) {
-                    Text(stringResource(R.string.action_another), fontSize = 16.sp)
+                    Text(stringResource(R.string.action_another), style = MaterialTheme.typography.bodyLarge)
                 }
             } else {
                 OutlinedButton(onClick = { onLength(minOf(ui.plannedMin + 5, FocusSessions.SESSION_MAX_MIN)) }, enabled = !busy && ui.plannedMin < FocusSessions.SESSION_MAX_MIN,
-                    modifier = Modifier.weight(1f).height(52.dp)) { Text("+5", fontSize = 16.sp) }
+                    modifier = Modifier.weight(1f).height(52.dp)) { Text("+5", style = MaterialTheme.typography.bodyLarge) }
             }
-            OutlinedButton(onClick = onStop, enabled = !busy, modifier = Modifier.weight(1f).height(52.dp)) { Text(stop, fontSize = 16.sp) }
+            OutlinedButton(onClick = onStop, enabled = !busy, modifier = Modifier.weight(1f).height(52.dp)) { Text(stop, style = MaterialTheme.typography.bodyLarge) }
         }
     }
 }
@@ -180,6 +183,6 @@ fun SessionBar(bar: SessionBarUi, now: Long, onOpen: () -> Unit) {
         Text("⏱ " + (if (left > 0) clockText(left) else stringResource(R.string.session_times_up)), color = if (left > 0) Palette.Accent else Palette.Ok,
             fontWeight = FontWeight.Bold)
         Text(" · ${bar.title}", maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-        Text("›", color = Palette.Muted)
+        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = Palette.Muted)
     }
 }

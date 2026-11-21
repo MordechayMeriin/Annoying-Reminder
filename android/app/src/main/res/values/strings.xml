@@ -25,7 +25,7 @@
     <string name="share_label">Add to ProMinder</string>
 
     <!-- Shared -->
-    <string name="back">‹ Back</string>
+    <string name="back">Back</string>
     <string name="save">Save</string>
     <string name="cancel">Cancel</string>
     <string name="ok">OK</string>
@@ -68,7 +68,6 @@
     <string name="home_tasks_count">☑ Tasks %1$d</string>
     <string name="menu_setup" tools:ignore="PluralsCandidate">Phone setup (%1$d/%2$d)</string>
     <string name="menu_diagnostics">Diagnostics</string>
-    <string name="setup_banner" tools:ignore="PluralsCandidate">Phone setup: %1$d of %2$d done</string>
     <string name="chat_empty">No messages yet. Write anything: a task, a question, how it\'s going.</string>
     <string name="chat_sent">✓ Sent</string>
     <string name="chat_sending">Sending…</string>
@@ -345,4 +344,31 @@
     <string name="setting_error_max">Must be at most %1$s.</string>
     <string name="setting_error_time">Use HH:MM, e.g. 07:30.</string>
     <string name="setting_error_unknown">Unknown setting.</string>
+
+    <!-- What TalkBack reads for icons, and the newer labels -->
+    <string name="cd_settings">Settings</string>
+    <string name="cd_more">More options</string>
+    <string name="cd_new_task_form">New task (form)</string>
+    <string name="cd_dictate">Dictate</string>
+    <string name="cd_typing">The assistant is writing</string>
+    <string name="cd_expand">Show Today\'s 3</string>
+    <string name="cd_collapse">Fold Today\'s 3</string>
+    <string name="cd_start_task">Start: %1$s</string>
+    <string name="cd_done">Done</string>
+    <string name="cd_mark_done">Mark as done</string>
+    <string name="cd_not_done">Not done yet</string>
+    <string name="cd_hide_timer">Hide the timer (it keeps running)</string>
+    <string name="cd_remove_preference">Remove: %1$s</string>
+    <string name="setup_banner_urgent">Notifications are off, so reminders can\'t reach you. Tap to fix.</string>
+    <string name="focus_all_done">All done 🎉</string>
+    <string name="focus_empty_short">Nothing picked yet</string>
+    <string name="msg_kind_morning">Morning plan</string>
+    <string name="msg_kind_checkin">Check-in</string>
+    <string name="msg_kind_evening">Evening review</string>
+    <string name="msg_kind_reminder">Reminder</string>
+    <string name="msg_kind_meeting">Meeting</string>
+    <string name="msg_kind_session">Session end</string>
+    <string name="msg_kind_reentry">Welcome back</string>
+    <string name="session_minutes">%1$d min</string>
+    <string name="settings_changed">Changed</string>
 </resources>

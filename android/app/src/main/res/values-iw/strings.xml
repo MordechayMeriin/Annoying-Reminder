@@ -14,7 +14,7 @@
     <string name="shortcut_new_task_long">משימה חדשה: להקליד או להכתיב</string>
     <string name="share_label">הוספה ל-ProMinder</string>
 
-    <string name="back">‹ חזרה</string>
+    <string name="back">חזרה</string>
     <string name="save">שמירה</string>
     <string name="cancel">ביטול</string>
     <string name="ok">אישור</string>
@@ -54,7 +54,6 @@
     <string name="home_tasks_count">☑ משימות %1$d</string>
     <string name="menu_setup">הגדרת הטלפון (%1$d/%2$d)</string>
     <string name="menu_diagnostics">אבחון</string>
-    <string name="setup_banner">הגדרת הטלפון: %1$d מתוך %2$d בוצעו</string>
     <string name="chat_empty">אין עדיין הודעות. אפשר לכתוב כל דבר: משימה, שאלה, איך הולך.</string>
     <string name="chat_sent">✓ נשלח</string>
     <string name="chat_sending">שולח…</string>
@@ -318,4 +317,31 @@
     <string name="setting_error_max">צריך להיות לכל היותר %1$s.</string>
     <string name="setting_error_time">יש להשתמש ב-HH:MM, למשל 07:30.</string>
     <string name="setting_error_unknown">הגדרה לא מוכרת.</string>
+
+    <!-- What TalkBack reads for icons, and the newer labels -->
+    <string name="cd_settings">הגדרות</string>
+    <string name="cd_more">אפשרויות נוספות</string>
+    <string name="cd_new_task_form">משימה חדשה (טופס)</string>
+    <string name="cd_dictate">הכתבה</string>
+    <string name="cd_typing">העוזר כותב</string>
+    <string name="cd_expand">הצגת 3 של היום</string>
+    <string name="cd_collapse">קיפול 3 של היום</string>
+    <string name="cd_start_task">התחלה: %1$s</string>
+    <string name="cd_done">בוצע</string>
+    <string name="cd_mark_done">סימון כבוצע</string>
+    <string name="cd_not_done">עוד לא בוצע</string>
+    <string name="cd_hide_timer">הסתרת הטיימר (הוא ממשיך לרוץ)</string>
+    <string name="cd_remove_preference">הסרה: %1$s</string>
+    <string name="setup_banner_urgent">ההתראות כבויות, ולכן התזכורות לא יגיעו. להקיש כדי לתקן.</string>
+    <string name="focus_all_done">הכול בוצע 🎉</string>
+    <string name="focus_empty_short">עוד לא נבחר כלום</string>
+    <string name="msg_kind_morning">תוכנית בוקר</string>
+    <string name="msg_kind_checkin">בדיקת מצב</string>
+    <string name="msg_kind_evening">סיכום ערב</string>
+    <string name="msg_kind_reminder">תזכורת</string>
+    <string name="msg_kind_meeting">פגישה</string>
+    <string name="msg_kind_session">סוף סבב</string>
+    <string name="msg_kind_reentry">טוב שחזרת</string>
+    <string name="session_minutes">%1$d דק׳</string>
+    <string name="settings_changed">שונה</string>
 </resources>

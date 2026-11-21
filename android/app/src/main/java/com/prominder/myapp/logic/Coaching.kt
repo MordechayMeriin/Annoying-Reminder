@@ -84,7 +84,9 @@ object Coaching {
         if (chip in AVOID_CHIPS) out += "avoid_reason"
         if (chip == "pick_one") out += "reentry"
         if (now.toLocalTime() >= OVERWHELMED_FROM && focusOpen >= FOCUS_MAX) out += "overwhelmed"
-        if (sinceLastReply.any { (kind, content) -> kind == MessageKind.EVENT && content.startsWith("[Marked done") }) out += "completed"
+        // A ✓ Done taken back with Undo ("[Undone: …]") doesn't count.
+        val events = sinceLastReply.filter { (kind, _) -> kind == MessageKind.EVENT }.map { it.second }
+        if (events.count { it.startsWith("[Marked done") } > events.count { it.startsWith("[Undone") }) out += "completed"
         return out
     }
 }

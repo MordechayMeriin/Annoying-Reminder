@@ -22,7 +22,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import androidx.compose.material3.MaterialTheme
 import com.prominder.myapp.ui.theme.Palette
 
 /** Phase A's test buttons, kept here: notifications, the alarm, and the Doze test. */
@@ -62,8 +62,8 @@ fun DiagnosticsScreen(
             AppCard {
                 facts.forEach { (k, v) ->
                     Row(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
-                        Text(k, color = Palette.Muted, fontSize = 14.sp, modifier = Modifier.weight(0.45f))
-                        Text(v, fontSize = 14.sp, modifier = Modifier.weight(0.55f))
+                        Text(k, color = Palette.Muted, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(0.45f))
+                        Text(v, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(0.55f))
                     }
                 }
             }
@@ -88,7 +88,7 @@ fun DiagnosticsScreen(
         }
         items(logLines.asReversed()) { line ->
             Column(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(vertical = 2.dp, horizontal = 4.dp)) {
-                Text(line, fontFamily = FontFamily.Monospace, fontSize = 12.sp, softWrap = false,
+                Text(line, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall, softWrap = false,
                     fontWeight = if ("[crash]" in line) FontWeight.Bold else FontWeight.Normal,
                     color = if ("[crash]" in line) Palette.Danger else Palette.Text)
             }

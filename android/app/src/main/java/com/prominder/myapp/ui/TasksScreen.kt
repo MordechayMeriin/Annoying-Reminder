@@ -15,13 +15,17 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.prominder.myapp.ui.theme.Palette
 
 data class TaskItem(
@@ -53,7 +57,7 @@ fun TasksScreen(
     onBack: () -> Unit,
 ) {
     Column(Modifier.fillMaxSize()) {
-        TopBar(stringResource(R.string.tasks_title), onBack = onBack) { TextButton(onClick = onNew) { Text(stringResource(R.string.tasks_new)) } }
+        TopBar(stringResource(R.string.tasks_title), onBack = onBack) { LinkButton(stringResource(R.string.tasks_new), onNew) }
         TabRow(selectedTabIndex = state.tab, containerColor = Palette.Bg, contentColor = Palette.Text) {
             Tab(selected = state.tab == 0, onClick = { onTab(0) }, text = { Text(stringResource(R.string.tasks_tab_today)) })
             Tab(selected = state.tab == 1, onClick = { onTab(1) }, text = { Text(stringResource(R.string.tasks_tab_all, state.all.size)) })
@@ -78,13 +82,18 @@ fun TasksScreen(
 
 @Composable
 fun TaskLine(item: TaskItem, onOpen: (Long) -> Unit, onDone: (Long) -> Unit) {
-    Row(Modifier.fillMaxWidth().clickable { onOpen(item.id) }.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        if (item.canBeDone) DoneCircle(false) { onDone(item.id) } else Text("⛔", fontSize = 18.sp)
-        Column(Modifier.weight(1f).padding(start = 12.dp)) {
+    Row(Modifier.fillMaxWidth().clickable { onOpen(item.id) }.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+        // A hard stop can't be "done", only cancelled: a sign in the ring's place instead.
+        if (item.canBeDone) {
+            DoneCircle(false) { onDone(item.id) }
+        } else {
+            Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) { Text("⛔", style = MaterialTheme.typography.titleMedium) }
+        }
+        Column(Modifier.weight(1f).padding(start = 4.dp, top = 6.dp, bottom = 6.dp)) {
             Text((if (item.inFocus) "★ " else "") + item.title, maxLines = 2, overflow = TextOverflow.Ellipsis)
             val meta = listOfNotNull(item.parent, item.meta.takeIf { it.isNotEmpty() }).joinToString(" · ")
-            if (meta.isNotEmpty()) Text(meta, fontSize = 12.sp, color = if (item.overdue) Palette.Danger else Palette.Muted)
+            if (meta.isNotEmpty()) Text(meta, style = MaterialTheme.typography.bodySmall, color = if (item.overdue) Palette.Danger else Palette.Muted)
         }
-        Text("›", color = Palette.Muted)
+        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = Palette.Muted)
     }
 }

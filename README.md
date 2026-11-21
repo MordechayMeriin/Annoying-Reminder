@@ -75,8 +75,9 @@ and disappear once you reply.
 ### Today's 3
 Every morning the plan proposes up to three focus tasks (the LLM picks them with `set_focus`; if it
 can't, code picks: overdue, then due today, then priority) and **saves them right away: silence accepts
-the plan.** "Change it" / "swap 2 for the dentist" in the chat changes them. The **focus card** at the
-top of the chat shows them with their next action and ▶ Start; done ones get a tick.
+the plan.** "Change it" / "swap 2 for the dentist" in the chat changes them. Above the chat, Today's 3
+is a **one-line strip** (how many are done, the next one and ▶ Start); tap it for the full card, with each
+task's time, its ✓ ring and ▶. It folds back while you type or scroll the chat, so the chat keeps the room.
 
 Fewer messages: during the day, check-ins go only to Today's 3, tasks due within 48 hours, reminders
 you asked for and meetings. Undated tasks outside Today's 3 aren't nudged; they compete for tomorrow's
@@ -96,7 +97,7 @@ then priority, then age; when all of Today's 3 are done, it says so and offers o
 
 ### Focus sessions
 **▶ Start** turns a nudge into a timer: a full-screen ring with the next action, where you stopped last
-time, ✓ Done · Stop · +5, and one tap to switch between 5 / 15 / 25 / 45 minutes. ✕ hides it (a bar in
+time, ✓ Done · Stop · +5, and one tap to switch between 5 / 15 / 25 / 45 minutes. ⌄ hides it (a bar in
 the header keeps counting). From a notification, ▶ Start opens the running timer right away.
 - Meanwhile a silent countdown sits in the notification shade, with ✓ Done and Stop.
 - At the end, one check-in arrives on time (the phone wakes for it): a template, so it costs nothing and
@@ -119,7 +120,8 @@ screen and used by the next check-in ("You stopped at row 40"), and it's cleared
 ### Capture without typing
 - **Share** text from any app (WhatsApp, email, a link) to *ProMinder*: it goes into the chat and the
   assistant saves it as a task, with its first step.
-- **🎤** next to the reply box dictates, in Hebrew or English (the language of your latest message).
+- **🎤** at the end of the reply box (it turns into Send once you type) dictates, in Hebrew or English (the
+  language of your latest message).
 - Long-press the app icon → **New task** opens the chat ready to type or dictate.
 
 ### The chat is the product
@@ -132,7 +134,9 @@ screen and used by the next check-in ("You stopped at row 40"), and it's cleared
   goes through the Lambda.
 - Reply buttons appear under the latest message (see [Reply buttons](#reply-buttons-chips)). An action
   from a button, a notification or the task list also writes a short event into the chat
-  (`[Marked done: …]`).
+  (`[Marked done: …]`, shown as a small pill without the brackets).
+- **Undo:** ✓ Done, Later, Not now and Cancel answer with a snackbar for a few seconds, with **Undo**, which
+  puts the task back as it was and writes `[Undone: …]` into the chat (so a mistaken tap isn't counted as a win).
 - **Daily reset:** the assistant only sees today's chat (from `DAY_RESET_TIME`, default 04:00). Long-term
   memory lives on the tasks: each task's **description** is its current state (rewritten by the
   assistant whenever you tell it something new, editable on the task's page), and its **history**

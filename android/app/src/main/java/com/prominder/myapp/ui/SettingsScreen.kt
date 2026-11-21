@@ -38,7 +38,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.ui.draw.clip
+import java.time.Instant
+import java.time.ZoneId
+import kotlin.math.abs
 import com.prominder.myapp.ui.theme.Palette
 
 /** A setting as the screen shows it: its words already in the app's language (DataRoutes.settingItems). */
@@ -91,22 +103,19 @@ fun SettingsScreen(
         item { SectionTitle(stringResource(R.string.settings_language)) }
         item {
             AppCard {
-                Row(Modifier.fillMaxWidth().clickable { pickingLanguage = true }.padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text(stringResource(R.string.settings_language), fontSize = 15.sp)
-                        Text(stringResource(R.string.settings_language_help), fontSize = 12.sp, color = Palette.Muted)
-                    }
-                    Text(languageName(language), color = if (language == AppLanguage.SYSTEM) Palette.Muted else Palette.Accent,
-                        fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 12.dp))
-                }
+                RowShell(
+                    label = stringResource(R.string.settings_language),
+                    help = stringResource(R.string.settings_language_help),
+                    onClick = { pickingLanguage = true },
+                ) { ValueText(languageName(language), changed = language != AppLanguage.SYSTEM) }
             }
         }
         items.groupBy { it.group }.forEach { (group, rows) ->
             item(key = "g$group") { SectionTitle(group) }
             item(key = "c$group") {
-                AppCard {
+                AppCard(padding = PaddingValues(horizontal = 16.dp, vertical = 6.dp)) {
                     rows.forEachIndexed { i, s ->
-                        if (i > 0) Spacer(Modifier.height(4.dp))
+                        if (i > 0) HorizontalDivider(color = Palette.Line, modifier = Modifier.padding(vertical = 2.dp))
                         SettingLine(s, weekdays, onToggle = { onSave(s.key, if (s.value == "true") "false" else "true") }, onEdit = { editing = s.key })
                     }
                 }
@@ -119,7 +128,7 @@ fun SettingsScreen(
                 preferences.forEach { (id, text) ->
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(text, modifier = Modifier.weight(1f))
-                        TextButton(onClick = { onDeletePreference(id) }) { Text("✕", color = Palette.Muted) }
+                        AppIconButton(Icons.Filled.Close, stringResource(R.string.cd_remove_preference, text), { onDeletePreference(id) }, tint = Palette.Muted)
                     }
                 }
             }
@@ -165,24 +174,59 @@ private fun LanguageDialog(current: String, onPick: (String) -> Unit, onDismiss:
 
 @Composable
 private fun SettingLine(s: SettingItem, weekdays: Map<String, String>, onToggle: () -> Unit, onEdit: () -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().clickable(onClick = if (s.kind == "bool") onToggle else onEdit).padding(vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(Modifier.weight(1f)) {
-            Text(s.label, fontSize = 15.sp)
-            if (s.help.isNotEmpty()) Text(s.help, fontSize = 12.sp, color = Palette.Muted)
-        }
+    RowShell(s.label, s.help, onClick = if (s.kind == "bool") onToggle else onEdit, chevron = s.kind != "bool") {
         if (s.kind == "bool") {
             Switch(checked = s.value == "true", onCheckedChange = { onToggle() })
         } else {
             // Times and numbers read left-to-right in Hebrew too ("13:00, 17:00", not "17:00 ,13:00").
-            val dataValue = s.kind != "weekday" && s.kind != "choice" && !(s.kind == "time_off" && s.value == "off") && s.value.isNotEmpty()
-            Text(display(s, weekdays, LocalResources.current), color = if (s.isDefault) Palette.Muted else Palette.Accent, fontWeight = FontWeight.SemiBold,
-                style = LocalTextStyle.current.copy(textDirection = if (dataValue) TextDirection.Ltr else TextDirection.Content),
-                modifier = Modifier.padding(start = 12.dp))
+            val dataValue = s.kind != "weekday" && s.kind != "choice" && s.kind != "timezone" &&
+                !(s.kind == "time_off" && s.value == "off") && s.value.isNotEmpty()
+            ValueText(display(s, weekdays, LocalResources.current), changed = !s.isDefault, ltr = dataValue)
         }
     }
+}
+
+/**
+ * A settings row: the name and its value (with › when a tap opens a dialog) on one line, the help under them across
+ * the full width, so a long help never squeezes the value.
+ */
+@Composable
+private fun RowShell(label: String, help: String, onClick: () -> Unit, chevron: Boolean = true, value: @Composable () -> Unit) {
+    Column(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(label, modifier = Modifier.weight(1f).padding(end = 12.dp))
+            value()
+            if (chevron) Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = Palette.Muted)
+        }
+        if (help.isNotEmpty()) Text(help, style = MaterialTheme.typography.bodySmall, color = Palette.Muted, modifier = Modifier.padding(top = 2.dp))
+    }
+}
+
+/** A setting's value: plain text (it's tappable, not greyed out), with a small "Changed" tag when it isn't the default. */
+@Composable
+private fun ValueText(text: String, changed: Boolean, ltr: Boolean = false) {
+    Column(horizontalAlignment = Alignment.End) {
+        Text(text, color = Palette.Text, fontWeight = FontWeight.SemiBold, maxLines = 2,
+            style = LocalTextStyle.current.copy(textDirection = if (ltr) TextDirection.Ltr else TextDirection.Content))
+        if (changed) {
+            Text(stringResource(R.string.settings_changed), color = Palette.Muted, style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.clip(RoundedCornerShape(6.dp)).background(Palette.Card2).padding(horizontal = 6.dp, vertical = 1.dp))
+        }
+    }
+}
+
+/** "Jerusalem (GMT+2)" for "Asia/Jerusalem": the city people know and the offset now, not the database name. */
+internal fun zoneLabel(id: String, now: Instant = Instant.now()): String = try {
+    val zone = ZoneId.of(id)
+    val city = id.substringAfterLast('/').replace('_', ' ')
+    val seconds = zone.rules.getOffset(now).totalSeconds
+    val sign = if (seconds < 0) "-" else "+"
+    val h = abs(seconds) / 3600
+    val m = abs(seconds) % 3600 / 60
+    val offset = if (seconds == 0) "GMT" else "GMT$sign$h" + if (m != 0) ":" + m.toString().padStart(2, '0') else ""
+    "$city ($offset)"
+} catch (e: java.time.DateTimeException) {
+    id
 }
 
 /** The fixed answers a setting picks from (a radio list instead of typing), or null. */
@@ -196,6 +240,7 @@ private fun display(s: SettingItem, weekdays: Map<String, String>, res: Resource
     "weekday", "choice" -> choices(s, weekdays)?.get(s.value) ?: s.value
     "time_off" -> if (s.value == "off") res.getString(R.string.settings_off) else s.value
     "times" -> s.value.ifEmpty { res.getString(R.string.settings_none) }
+    "timezone" -> zoneLabel(s.value)
     else -> s.value
 }
 
