@@ -180,6 +180,19 @@ class ScreenshotTest {
         )
     }
 
+    /** Hebrew on a narrow screen with a large font (the phone's font size setting): the title stays on one line. */
+    @Test
+    @Config(qualifiers = "+iw-w360dp-h740dp", fontScale = 1.3f)
+    fun home_hebrew_large_font() = shot("4g_home_hebrew_large_font") {
+        HomeScreen(
+            HomeState(
+                messages = listOf(ChatItem(1, "user", "chat", "צריך להירשם לעבודה סמינריונית", "19:16", day = "היום")),
+                openCount = 2, setupDone = 4, setupTotal = 6,
+            ),
+            {}, {}, {}, {}, {}, {}, {}, {}, {},
+        )
+    }
+
     @Test
     fun handover() = shot("8_handover") {
         HandoverScreen(HandoverState(alreadyHandedOver = false), {}, {})

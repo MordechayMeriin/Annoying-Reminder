@@ -1,5 +1,6 @@
 package com.prominder.myapp.ui
 
+import androidx.compose.foundation.layout.PaddingValues
 import com.prominder.myapp.R
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
@@ -153,10 +154,15 @@ fun HomeScreen(
         var menu by remember { mutableStateOf(false) }
         TopBar(stringResource(R.string.app_title)) {
             val tasks = if (state.openCount > 0) stringResource(R.string.home_tasks_count, state.openCount) else stringResource(R.string.home_tasks)
-            TextButton(onClick = onOpenTasks) { Text(tasks, color = Palette.Text) }
-            TextButton(onClick = onOpenSettings) { Text("⚙", color = Palette.Text, fontSize = 18.sp) }
+            // Compact, so the title keeps its room (Hebrew words are wider, and the phone's font may be larger).
+            TextButton(onClick = onOpenTasks, contentPadding = PaddingValues(horizontal = 8.dp)) { Text(tasks, color = Palette.Text, maxLines = 1) }
+            TextButton(onClick = onOpenSettings, modifier = Modifier.size(40.dp), contentPadding = PaddingValues(0.dp)) {
+                Text("⚙", color = Palette.Text, fontSize = 18.sp)
+            }
             Box {
-                TextButton(onClick = { menu = true }) { Text("⋮", color = Palette.Text, fontSize = 18.sp) }
+                TextButton(onClick = { menu = true }, modifier = Modifier.size(40.dp), contentPadding = PaddingValues(0.dp)) {
+                    Text("⋮", color = Palette.Text, fontSize = 18.sp)
+                }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                     DropdownMenuItem(text = { Text(stringResource(R.string.menu_setup, state.setupDone, state.setupTotal)) }, onClick = { menu = false; onOpenChecklist() })
                     DropdownMenuItem(text = { Text(stringResource(R.string.menu_diagnostics)) }, onClick = { menu = false; onOpenDiagnostics() })

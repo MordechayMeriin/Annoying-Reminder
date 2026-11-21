@@ -1,5 +1,7 @@
 package com.prominder.myapp.ui
 
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.foundation.text.TextAutoSize
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
@@ -66,7 +68,12 @@ fun TopBar(title: String, onBack: (() -> Unit)? = null, actions: @Composable () 
         } else {
             Spacer(Modifier.width(8.dp))
         }
-        Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+        // One line, whatever the language and font size: smaller before it would wrap ("ProMinde / r").
+        val style = MaterialTheme.typography.titleLarge
+        Text(
+            title, style = style, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f), maxLines = 1, softWrap = false,
+            overflow = TextOverflow.Ellipsis, autoSize = TextAutoSize.StepBased(minFontSize = 14.sp, maxFontSize = style.fontSize),
+        )
         actions()
     }
 }
