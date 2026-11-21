@@ -6,6 +6,7 @@ import android.content.Context
 import android.media.AudioAttributes
 import android.media.RingtoneManager
 import com.prominder.myapp.R
+import com.prominder.myapp.i18n.AppLanguage
 
 /**
  * The notification channels: three levels (once Pushover's normal / urgent / emergency),
@@ -24,8 +25,10 @@ object Channels {
 
     val ALL = listOf(NORMAL, URGENT, ALARM, SESSION)
 
-    fun ensure(context: Context) {
-        val nm = context.getSystemService(NotificationManager::class.java)
+    /** Creates the channels, or renames them in [tag]'s words (a channel's name and description may change; its sound can't). */
+    fun ensure(app: Context, tag: String = AppLanguage.current(app)) {
+        val nm = app.getSystemService(NotificationManager::class.java)
+        val context = AppLanguage.localized(app, tag)
 
         val normal = NotificationChannel(NORMAL, context.getString(R.string.channel_normal), NotificationManager.IMPORTANCE_DEFAULT).apply {
             description = context.getString(R.string.channel_normal_desc)

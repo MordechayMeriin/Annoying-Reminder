@@ -1,5 +1,7 @@
 package com.prominder.myapp.ui
 
+import com.prominder.myapp.R
+import androidx.compose.ui.res.stringResource
 import com.prominder.myapp.data.TaskKind
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -74,63 +76,63 @@ fun TaskDetailScreen(
     var confirmCancel by rememberSaveable { mutableStateOf(false) }
     val open = state.status == OPEN
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
-        TopBar("Task", onBack = onBack) { if (open) TextButton(onClick = onEdit) { Text("Edit") } }
+        TopBar(stringResource(R.string.task_title), onBack = onBack) { if (open) TextButton(onClick = onEdit) { Text(stringResource(R.string.task_edit)) } }
         Text(state.title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-        val status = when (state.status) { "done" -> "✓ Done"; "cancelled" -> "Cancelled"; else -> null }
+        val status = when (state.status) { "done" -> stringResource(R.string.task_status_done); "cancelled" -> stringResource(R.string.task_status_cancelled); else -> null }
         val meta = listOfNotNull(status, state.parent, state.meta.takeIf { it.isNotEmpty() }).joinToString(" · ")
         if (meta.isNotEmpty()) Muted(meta, Modifier.padding(top = 4.dp))
 
-        state.nextAction?.let { Callout("Next step", it) }
-        state.resumeNote?.let { Callout("Where you stopped", it) }
-        state.blocked?.let { Callout("Waiting", it, Palette.Danger) }
+        state.nextAction?.let { Callout(stringResource(R.string.task_next_step), it) }
+        state.resumeNote?.let { Callout(stringResource(R.string.task_where_stopped), it) }
+        state.blocked?.let { Callout(stringResource(R.string.task_waiting), it, Palette.Danger) }
 
         if (open) {
             Spacer(Modifier.height(16.dp))
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (state.kind != TaskKind.FENCE) {
-                    Button(onClick = onDone, colors = ButtonDefaults.buttonColors(containerColor = Palette.Ok)) { Text("✓ Done") }
-                    OutlinedButton(onClick = onLater) { Text("⏰ Later") }
+                    Button(onClick = onDone, colors = ButtonDefaults.buttonColors(containerColor = Palette.Ok)) { Text(stringResource(R.string.action_done)) }
+                    OutlinedButton(onClick = onLater) { Text(stringResource(R.string.task_later)) }
                 }
-                if (state.kind == TaskKind.TASK) OutlinedButton(onClick = onStart) { Text("▶ Start") }
-                if (state.kind == TaskKind.TASK) OutlinedButton(onClick = onToggleFocus) { Text(if (state.inFocus) "★ In Today's 3" else "☆ Today's 3") }
-                TextButton(onClick = { confirmCancel = true }) { Text("Cancel task", color = Palette.Muted) }
+                if (state.kind == TaskKind.TASK) OutlinedButton(onClick = onStart) { Text(stringResource(R.string.action_start)) }
+                if (state.kind == TaskKind.TASK) OutlinedButton(onClick = onToggleFocus) { Text(stringResource(if (state.inFocus) R.string.task_in_focus else R.string.task_add_focus)) }
+                TextButton(onClick = { confirmCancel = true }) { Text(stringResource(R.string.task_cancel), color = Palette.Muted) }
             }
         }
 
-        SectionTitle("Description")
+        SectionTitle(stringResource(R.string.task_description))
         var text by rememberSaveable(state.id, state.description) { mutableStateOf(state.description) }
         OutlinedTextField(
             value = text, onValueChange = { text = it.take(800) }, modifier = Modifier.fillMaxWidth(), minLines = 3,
-            placeholder = { Text("Details, links, who it's for…") },
+            placeholder = { Text(stringResource(R.string.task_description_hint)) },
         )
         if (text != state.description) {
             Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.End) {
-                TextButton(onClick = { text = state.description }) { Text("Undo", color = Palette.Muted) }
-                Button(onClick = { onSaveDescription(text) }) { Text("Save") }
+                TextButton(onClick = { text = state.description }) { Text(stringResource(R.string.undo), color = Palette.Muted) }
+                Button(onClick = { onSaveDescription(text) }) { Text(stringResource(R.string.save)) }
             }
         }
 
         if (state.parent == null) {
-            SectionTitle("Steps")
+            SectionTitle(stringResource(R.string.task_steps))
             state.steps.forEach { TaskLine(it, onOpenStep, onDoneStep) }
             if (open) {
                 var step by rememberSaveable { mutableStateOf("") }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     OutlinedTextField(
                         value = step, onValueChange = { step = it.take(200) }, modifier = Modifier.weight(1f), singleLine = true,
-                        placeholder = { Text("Add a step") },
+                        placeholder = { Text(stringResource(R.string.task_add_step)) },
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                         keyboardActions = KeyboardActions(onDone = { if (step.isNotBlank()) { onAddStep(step); step = "" } }),
                     )
-                    TextButton(onClick = { onAddStep(step); step = "" }, enabled = step.isNotBlank()) { Text("Add") }
+                    TextButton(onClick = { onAddStep(step); step = "" }, enabled = step.isNotBlank()) { Text(stringResource(R.string.add)) }
                 }
             } else if (state.steps.isEmpty()) {
-                Muted("No steps.")
+                Muted(stringResource(R.string.task_no_steps))
             }
         }
 
         if (state.history.isNotEmpty()) {
-            SectionTitle("History")
+            SectionTitle(stringResource(R.string.task_history))
             state.history.forEach { h ->
                 Column(Modifier.padding(vertical = 4.dp)) {
                     Row {
@@ -147,10 +149,10 @@ fun TaskDetailScreen(
     if (confirmCancel) {
         AlertDialog(
             onDismissRequest = { confirmCancel = false },
-            title = { Text("Cancel this task?") },
-            text = { Text("\"${state.title}\"" + if (state.steps.any()) " and its open steps" else "") },
-            confirmButton = { TextButton(onClick = { confirmCancel = false; onCancelTask() }) { Text("Cancel task", color = Palette.Danger) } },
-            dismissButton = { TextButton(onClick = { confirmCancel = false }) { Text("Keep it") } },
+            title = { Text(stringResource(R.string.task_cancel_confirm)) },
+            text = { Text(stringResource(if (state.steps.any()) R.string.task_cancel_what_steps else R.string.task_cancel_what, state.title)) },
+            confirmButton = { TextButton(onClick = { confirmCancel = false; onCancelTask() }) { Text(stringResource(R.string.task_cancel), color = Palette.Danger) } },
+            dismissButton = { TextButton(onClick = { confirmCancel = false }) { Text(stringResource(R.string.task_keep)) } },
         )
     }
 }

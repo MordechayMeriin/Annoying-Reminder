@@ -43,7 +43,7 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
             <!-- Share text from another app (WhatsApp, an email, a link): the assistant saves the to-do in it. -->
-            <intent-filter android:label="Add to ProMinder">
+            <intent-filter android:label="@string/share_label">
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="text/plain" />

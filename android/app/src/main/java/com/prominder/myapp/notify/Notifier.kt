@@ -1,5 +1,6 @@
 package com.prominder.myapp.notify
 
+import com.prominder.myapp.i18n.AppLanguage
 import com.prominder.myapp.data.ChipAction
 import android.Manifest
 import android.app.Notification
@@ -17,12 +18,15 @@ import com.prominder.myapp.alarm.AlarmActivity
 import com.prominder.myapp.alarm.AlarmReceiver
 import com.prominder.myapp.alarm.AlarmRings
 import com.prominder.myapp.diag.Diag
-import com.prominder.myapp.logic.ChipRules
 import com.prominder.myapp.logic.Loudness
 import com.prominder.myapp.remind.Notice
 import java.time.format.DateTimeFormatter
 
-/** Shows notifications: the check-ins and daily messages the tick decides on, alarms, the focus timer, and Phase A's tests. */
+/**
+ * Shows notifications: the check-ins and daily messages the tick decides on, alarms, the focus timer, and Phase A's tests.
+ * The message is the assistant's (in the language you write in); the buttons and the rest are the app's own words, in
+ * the app's language (AppLanguage.localized: this often runs without a screen, from an alarm). The Diagnostics tests stay English.
+ */
 object Notifier {
     private const val ID_TEST_NORMAL = 1
     private const val ID_TEST_URGENT = 2
@@ -85,7 +89,7 @@ object Notifier {
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setFullScreenIntent(fullScreen, true)
             .setContentIntent(fullScreen)
-            .addAction(0, "Dismiss", dismiss)
+            .addAction(0, AppLanguage.localized(context).getString(R.string.action_dismiss), dismiss)
             .setOngoing(true)
             .setTimeoutAfter(ALARM_TIMEOUT_MS)
             .build()
@@ -129,9 +133,9 @@ object Notifier {
             .setCategory(if (urgent) NotificationCompat.CATEGORY_REMINDER else NotificationCompat.CATEGORY_MESSAGE)
             .setContentIntent(openApp(context))
             .setAutoCancel(true)
-        notice.taskId?.let { taskId -> for (a in notice.actions) b.addAction(taskButton(context, a, taskId, id, notice.lang)) }
+        notice.taskId?.let { taskId -> for (a in notice.actions) b.addAction(taskButton(context, a, taskId, id)) }
         // Reply from the notification: the text goes to the assistant as a chat message (Phase D).
-        b.addAction(replyAction(context, id, notice.lang))
+        b.addAction(replyAction(context, id))
         val shown = post(context, id, b.build())
         if (!shown) Diag.log("notify", "Couldn't show message #${notice.messageId}: notifications are off")
         return shown
@@ -160,10 +164,10 @@ object Notifier {
             .setOngoing(true)
             .setTimeoutAfter(ringMs)
         if (r.taskId != null) {
-            b.addAction(taskButton(context, "done", r.taskId, ID_ALARM, r.lang))
-            b.addAction(taskButton(context, "later", r.taskId, ID_ALARM, r.lang))
+            b.addAction(taskButton(context, "done", r.taskId, ID_ALARM))
+            b.addAction(taskButton(context, "later", r.taskId, ID_ALARM))
         }
-        b.addAction(0, "Dismiss", PendingIntent.getBroadcast(context, 1,
+        b.addAction(0, AppLanguage.localized(context).getString(R.string.action_dismiss), PendingIntent.getBroadcast(context, 1,
             Intent(context, AlarmReceiver::class.java).setAction(AlarmReceiver.ACTION_DISMISS),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
         val n = b.build()
@@ -171,8 +175,8 @@ object Notifier {
         if (!post(context, ID_ALARM, n)) Diag.log("alarm", "Couldn't show the alarm: notifications are off")
     }
 
-    /** What the countdown shows: the session, its task's next action and title, and the buttons' language. */
-    data class SessionInfo(val sessionId: Long, val step: String, val title: String, val endsAt: Long, val lang: String)
+    /** What the countdown shows: the session, its task's next action and title. */
+    data class SessionInfo(val sessionId: Long, val step: String, val title: String, val endsAt: Long)
 
     /**
      * The running focus session, counting down in the notification shade and on the lock screen: silent, can't be
@@ -180,10 +184,11 @@ object Notifier {
      */
     fun showSession(context: Context, info: SessionInfo, now: Long = System.currentTimeMillis()) {
         val until = DateTimeFormatter.ofPattern("HH:mm").format(java.time.Instant.ofEpochMilli(info.endsAt).atZone(java.time.ZoneId.systemDefault()))
+        val words = AppLanguage.localized(context)
         val n = NotificationCompat.Builder(context, Channels.SESSION)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle("⏱ ${info.step}")
-            .setContentText(if (info.step != info.title) "${info.title} · until $until" else "Until $until")
+            .setContentText(if (info.step != info.title) words.getString(R.string.notif_title_until, info.title, until) else words.getString(R.string.notif_until, until))
             .setWhen(info.endsAt)
             .setShowWhen(true)
             .setUsesChronometer(true)
@@ -195,8 +200,8 @@ object Notifier {
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setTimeoutAfter((info.endsAt - now).coerceAtLeast(1_000L))
             .setContentIntent(openSession(context))
-            .addAction(0, ChipRules.chipLabel("done", info.lang), sessionEnd(context, info.sessionId, "done"))
-            .addAction(0, ChipRules.chipLabel("stop", info.lang), sessionEnd(context, info.sessionId, "stopped"))
+            .addAction(0, words.getString(R.string.action_done), sessionEnd(context, info.sessionId, "done"))
+            .addAction(0, words.getString(R.string.action_stop), sessionEnd(context, info.sessionId, "stopped"))
             .build()
         post(context, ID_SESSION, n)
     }
@@ -204,7 +209,7 @@ object Notifier {
     fun cancelSession(context: Context) = cancel(context, ID_SESSION)
 
     /** The assistant's answer to a reply typed into a notification (when the app isn't open). */
-    fun showReply(context: Context, text: String, messageId: Long, lang: String) {
+    fun showReply(context: Context, text: String, messageId: Long) {
         val id = ID_MESSAGES + (messageId % 1_000_000).toInt()
         val n = NotificationCompat.Builder(context, Channels.NORMAL)
             .setSmallIcon(R.drawable.ic_notification)
@@ -214,7 +219,7 @@ object Notifier {
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setContentIntent(openApp(context))
             .setAutoCancel(true)
-            .addAction(replyAction(context, id, lang))
+            .addAction(replyAction(context, id))
             .build()
         post(context, id, n)
     }
@@ -224,7 +229,7 @@ object Notifier {
         val n = NotificationCompat.Builder(context, Channels.NORMAL)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle("💬 ProMinder")
-            .setContentText("Sent: $text")
+            .setContentText(AppLanguage.localized(context).getString(R.string.notif_sent, text))
             .setRemoteInputHistory(arrayOf<CharSequence>(text))
             .setContentIntent(openApp(context))
             .setOnlyAlertOnce(true)
@@ -235,8 +240,8 @@ object Notifier {
         post(context, notificationId, n)
     }
 
-    private fun replyAction(context: Context, notificationId: Int, lang: String): NotificationCompat.Action {
-        val label = if (lang == "he") "לענות" else "Reply"
+    private fun replyAction(context: Context, notificationId: Int): NotificationCompat.Action {
+        val label = AppLanguage.localized(context).getString(R.string.action_reply)
         val input = RemoteInput.Builder(AlarmReceiver.EXTRA_REPLY).setLabel(label).build()
         // Mutable: Android writes the typed text into this intent.
         val intent = PendingIntent.getBroadcast(
@@ -252,7 +257,7 @@ object Notifier {
      * A notification button about one task: done and later are handled in the background (AlarmReceiver); start and
      * another open the app straight on the timer (an activity, as Android 12+ requires for opening a screen).
      */
-    private fun taskButton(context: Context, action: String, taskId: Long, notificationId: Int, lang: String): NotificationCompat.Action {
+    private fun taskButton(context: Context, action: String, taskId: Long, notificationId: Int): NotificationCompat.Action {
         val code = notificationId * 8 + listOf("done", "later", "start", "another").indexOf(action).coerceAtLeast(0) + 4
         val intent = when (action) {
             "start", "another" -> PendingIntent.getActivity(
@@ -270,7 +275,12 @@ object Notifier {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
         }
-        val label = ChipRules.chipLabel(if (action == ChipAction.START) "start5" else action, lang)
+        val label = AppLanguage.localized(context).getString(when (action) {
+            ChipAction.START -> R.string.action_start5
+            ChipAction.ANOTHER -> R.string.action_another
+            ChipAction.LATER -> R.string.action_later
+            else -> R.string.action_done
+        })
         return NotificationCompat.Action.Builder(0, label, intent).build()
     }
 

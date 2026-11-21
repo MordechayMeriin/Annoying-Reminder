@@ -17,9 +17,11 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.prominder.myapp.R
 import com.prominder.myapp.ui.theme.Palette
 
 /** A rounded card. */
@@ -60,7 +62,7 @@ fun TopBar(title: String, onBack: (() -> Unit)? = null, actions: @Composable () 
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (onBack != null) {
-            TextButton(onClick = onBack) { Text("‹ Back", color = Palette.Muted) }
+            TextButton(onClick = onBack) { Text(stringResource(R.string.back), color = Palette.Muted) }
         } else {
             Spacer(Modifier.width(8.dp))
         }

@@ -1,5 +1,6 @@
 package com.prominder.myapp.ui
 
+import androidx.compose.ui.platform.LocalResources
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
@@ -155,23 +156,25 @@ class ScreenshotTest {
         HomeScreen(HomeState(setupDone = 4, setupTotal = 4, notice = "Later: next check-in Today 12:00"), {}, {}, {}, {}, {}, {}, {}, {}, {})
     }
 
-    /** A phone set to Hebrew: the layout stays left-to-right, Hebrew messages still read right-to-left. */
+    /** In Hebrew (the phone's language, or picked in ⚙ Settings): the app's words in Hebrew, laid out right-to-left. */
     @Test
     @Config(qualifiers = "+iw")
     fun handover_on_a_hebrew_phone() = shot("8c_handover_hebrew_phone") {
         HandoverScreen(HandoverState(alreadyHandedOver = false, message = "The server ran into a problem (HTTP 503). Try again in a minute."), {}, {})
     }
 
+    /** In Hebrew: right-to-left, and an English message in the chat still reads left-to-right. */
     @Test
     @Config(qualifiers = "+iw")
     fun home_on_a_hebrew_phone() = shot("4c_home_hebrew_phone") {
         HomeScreen(
             HomeState(
-                focus = listOf(FocusItem(1, "לשלם חשבון חשמל", "Today 15:00", done = false)),
+                focus = listOf(FocusItem(1, "לשלם חשבון חשמל", "היום 15:00 · חשובה", done = false)),
                 messages = listOf(
-                    ChatItem(1, "user", "chat", "תזכיר לי לשלם את החשבון מחר בבוקר.", "07:41", day = "Today"),
+                    ChatItem(1, "user", "chat", "תזכיר לי לשלם את החשבון מחר בבוקר.", "07:41", day = "היום"),
                     ChatItem(2, "assistant", "chat", "Done. I'll remind you tomorrow at 08:00.", "07:41"),
                 ),
+                openCount = 5, setupDone = 3, setupTotal = 4, sessionsToday = 2,
             ),
             {}, {}, {}, {}, {}, {}, {}, {}, {},
         )
@@ -235,12 +238,25 @@ class ScreenshotTest {
     @Test
     fun settings() = shot("12_settings") {
         val s = com.prominder.myapp.data.AppSettings(mapOf("morning_time" to "08:00"))
-        SettingsScreen(
-            com.prominder.myapp.data.SettingSpecs.ALL.map {
-                SettingItem(it.key, it.label, it.help, it.group, it.kind, s.raw(it.key), it.key !in s.overrides,
-                    com.prominder.myapp.data.SettingSpecs.canonical(it, it.default), it.options)
-            },
-            listOf(1L to "Shorter messages"), { _, _ -> null }, {}, {},
+        SettingsScreen(settingItems(LocalResources.current, s), listOf(1L to "Shorter messages"), { _, _ -> null }, {}, {})
+    }
+
+    /** ⚙ Settings with Hebrew picked: the settings' names, groups and weekday in Hebrew. */
+    @Test
+    @Config(qualifiers = "+iw")
+    fun settings_hebrew() = shot("12c_settings_hebrew") {
+        val s = com.prominder.myapp.data.AppSettings(mapOf("morning_time" to "08:00"))
+        SettingsScreen(settingItems(LocalResources.current, s), listOf(1L to "הודעות קצרות יותר"), { _, _ -> null }, {}, {}, language = "he")
+    }
+
+    /** The focus timer in Hebrew. */
+    @Test
+    @Config(qualifiers = "+iw")
+    fun session_hebrew() = shot("12d_session_hebrew") {
+        val start = 1_794_571_200_000
+        SessionScreen(
+            SessionUi("לכתוב את הדוח הרבעוני", "לפתוח את המסמך ולכתוב שלוש כותרות", "המבוא", 25, start, start + 25 * 60_000),
+            now = start + 18 * 60_000 + 25_000, onDone = {}, onStop = {}, onAnother = {}, onLength = {}, onClose = {},
         )
     }
 

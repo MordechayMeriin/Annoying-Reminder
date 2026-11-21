@@ -1,5 +1,7 @@
 package com.prominder.myapp.alarm
 
+import com.prominder.myapp.R
+import com.prominder.myapp.i18n.AppLanguage
 import android.content.Context
 import androidx.work.CoroutineWorker
 import androidx.work.OneTimeWorkRequestBuilder
@@ -8,7 +10,6 @@ import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import com.prominder.myapp.ReminderApp
 import com.prominder.myapp.diag.Diag
-import com.prominder.myapp.logic.ChipRules
 import com.prominder.myapp.notify.Notifier
 
 /**
@@ -23,10 +24,8 @@ class ReplyWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
         if (text.isEmpty() || !app.store.hasData()) return Result.success()
         val (result, error) = app.chat.sendAndWait(text)
         if (!app.visible) {
-            val lang = ChipRules.chipLang(text)
-            if (result != null) Notifier.showReply(app, result.reply, result.replyMessageId, lang)
-            else Notifier.showReply(app, error ?: "No reply: the assistant is unavailable. Your message is saved in the chat.",
-                System.currentTimeMillis(), lang)
+            if (result != null) Notifier.showReply(app, result.reply, result.replyMessageId)
+            else Notifier.showReply(app, error ?: AppLanguage.localized(app).getString(R.string.notif_no_reply), System.currentTimeMillis())
         }
         return Result.success()
     }

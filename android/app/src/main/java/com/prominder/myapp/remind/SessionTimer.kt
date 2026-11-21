@@ -1,6 +1,5 @@
 package com.prominder.myapp.remind
 
-import com.prominder.myapp.logic.ChipRules
 import com.prominder.myapp.logic.FocusSessions
 import android.content.Context
 import com.prominder.myapp.data.Store
@@ -23,7 +22,6 @@ object SessionTimer {
         val task = open.task
         val title = task?.title ?: "Focus session"
         val step = task?.nextAction?.takeIf { it.isNotEmpty() } ?: title
-        val lang = ChipRules.chipLang(store.dao.latestOfKindsBy(listOf("chat"), "user")?.content, title)
-        Notifier.showSession(context, Notifier.SessionInfo(open.session.id, step, title, end.toEpochMilli(), lang), now.toEpochMilli())
+        Notifier.showSession(context, Notifier.SessionInfo(open.session.id, step, title, end.toEpochMilli()), now.toEpochMilli())
     }
 }

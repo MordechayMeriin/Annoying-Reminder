@@ -1,5 +1,8 @@
 package com.prominder.myapp.ui
 
+import com.prominder.myapp.R
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
 import com.prominder.myapp.data.MessageKind
 import com.prominder.myapp.data.Role
 import androidx.compose.foundation.background
@@ -148,15 +151,16 @@ fun HomeScreen(
 ) {
     Column(Modifier.fillMaxSize()) {
         var menu by remember { mutableStateOf(false) }
-        TopBar("🔔 ProMinder") {
-            TextButton(onClick = onOpenTasks) { Text("☑ Tasks" + if (state.openCount > 0) " ${state.openCount}" else "", color = Palette.Text) }
+        TopBar(stringResource(R.string.app_title)) {
+            val tasks = if (state.openCount > 0) stringResource(R.string.home_tasks_count, state.openCount) else stringResource(R.string.home_tasks)
+            TextButton(onClick = onOpenTasks) { Text(tasks, color = Palette.Text) }
             TextButton(onClick = onOpenSettings) { Text("⚙", color = Palette.Text, fontSize = 18.sp) }
             Box {
                 TextButton(onClick = { menu = true }) { Text("⋮", color = Palette.Text, fontSize = 18.sp) }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                    DropdownMenuItem(text = { Text("Phone setup (${state.setupDone}/${state.setupTotal})") }, onClick = { menu = false; onOpenChecklist() })
-                    DropdownMenuItem(text = { Text("Diagnostics") }, onClick = { menu = false; onOpenDiagnostics() })
-                    DropdownMenuItem(text = { Text("Log out") }, onClick = { menu = false; onLogout() })
+                    DropdownMenuItem(text = { Text(stringResource(R.string.menu_setup, state.setupDone, state.setupTotal)) }, onClick = { menu = false; onOpenChecklist() })
+                    DropdownMenuItem(text = { Text(stringResource(R.string.menu_diagnostics)) }, onClick = { menu = false; onOpenDiagnostics() })
+                    DropdownMenuItem(text = { Text(stringResource(R.string.log_out)) }, onClick = { menu = false; onLogout() })
                 }
             }
         }
@@ -169,7 +173,7 @@ fun HomeScreen(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text("! ", color = Palette.Accent, fontWeight = FontWeight.Bold)
-                    Text("Phone setup: ${state.setupDone} of ${state.setupTotal} done", modifier = Modifier.weight(1f), fontSize = 14.sp)
+                    Text(stringResource(R.string.setup_banner, state.setupDone, state.setupTotal), modifier = Modifier.weight(1f), fontSize = 14.sp)
                     Text("›", color = Palette.Muted)
                 }
                 Spacer(Modifier.height(8.dp))
@@ -188,7 +192,7 @@ fun HomeScreen(
             val chipsFor = last?.takeIf { it.role == Role.ASSISTANT && it.chips.isNotEmpty() && chat.sending == null }?.id
             val modelFor = state.messages.lastOrNull { it.role == Role.ASSISTANT }?.id
             if (state.messages.isEmpty() && chat.sending == null) {
-                Muted("No messages yet. Write anything: a task, a question, how it's going.", Modifier.align(Alignment.Center).padding(24.dp))
+                Muted(stringResource(R.string.chat_empty), Modifier.align(Alignment.Center).padding(24.dp))
             } else {
                 // Newest at the bottom, opening at the bottom.
                 LazyColumn(Modifier.fillMaxSize().padding(horizontal = 12.dp), reverseLayout = true) {
@@ -199,7 +203,7 @@ fun HomeScreen(
                                 Text(it, color = Palette.Muted, fontSize = 12.sp, textAlign = TextAlign.Center,
                                     modifier = Modifier.fillMaxWidth().padding(top = 14.dp, bottom = 6.dp))
                             }
-                            ChatLine(m, delivery = if (m.id == chat.sentId) "✓ Sent" else null, model = m.model.takeIf { m.id == modelFor })
+                            ChatLine(m, delivery = if (m.id == chat.sentId) stringResource(R.string.chat_sent) else null, model = m.model.takeIf { m.id == modelFor })
                             if (m.id == chipsFor) ChipRow(m.chips, onChip)
                         }
                     }
@@ -239,14 +243,14 @@ private fun Composer(
             value = text,
             onValueChange = onDraft,
             modifier = Modifier.weight(1f).focusRequester(focus),
-            placeholder = { Text("Message", color = Palette.Muted) },
+            placeholder = { Text(stringResource(R.string.chat_placeholder), color = Palette.Muted) },
             maxLines = 5,
         )
         if (canDictate) {
             TextButton(onClick = onMic, modifier = Modifier.size(44.dp)) { Text("🎤", fontSize = 18.sp) }
         }
         val canSend = text.isNotBlank() && idle
-        Button(onClick = onSend, enabled = canSend, modifier = Modifier.padding(start = 4.dp)) { Text("Send") }
+        Button(onClick = onSend, enabled = canSend, modifier = Modifier.padding(start = 4.dp)) { Text(stringResource(R.string.chat_send)) }
     }
 }
 
@@ -255,7 +259,7 @@ private fun Composer(
 private fun ChatStatus(chat: ChatUi, showSending: Boolean, onRetry: () -> Unit) {
     Column(Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
         if (showSending && chat.sending != null) {
-            ChatLine(ChatItem(-1, "user", "chat", chat.sending, ""), delivery = "Sending…", model = null)
+            ChatLine(ChatItem(-1, "user", "chat", chat.sending, ""), delivery = stringResource(R.string.chat_sending), model = null)
         }
         chat.steps.forEachIndexed { i, step ->
             val running = i == chat.steps.lastIndex && !chat.typing
@@ -265,7 +269,7 @@ private fun ChatStatus(chat: ChatUi, showSending: Boolean, onRetry: () -> Unit) 
         chat.error?.let {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
                 Text(it, color = Palette.Danger, fontSize = 13.sp, modifier = Modifier.weight(1f))
-                if (chat.canRetry) TextButton(onClick = onRetry) { Text("Try again") }
+                if (chat.canRetry) TextButton(onClick = onRetry) { Text(stringResource(R.string.chat_retry)) }
             }
         }
     }
@@ -305,15 +309,14 @@ private fun ChipRow(chips: List<ChipJson>, onChip: (ChipJson) -> Unit) {
  */
 @Composable
 private fun Breadcrumb(b: BreadcrumbUi, draft: String, canDictate: Boolean, onDraft: (String) -> Unit, onDone: (String?) -> Unit, onMic: () -> Unit) {
-    val he = b.lang == "he"
     Column(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp)) {
-        Text(if (he) "איפה עצרת ב„${b.title}”? (לא חובה)" else "Where did you stop on “${b.title}”? (optional)", color = Palette.Muted, fontSize = 13.sp)
+        Text(stringResource(R.string.breadcrumb_question, b.title), color = Palette.Muted, fontSize = 13.sp)
         Row(verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(value = draft, onValueChange = onDraft, modifier = Modifier.weight(1f), singleLine = true,
-                placeholder = { Text(if (he) "למשל: עמוד 3" else "e.g. page 3", color = Palette.Muted) })
+                placeholder = { Text(stringResource(R.string.breadcrumb_hint), color = Palette.Muted) })
             if (canDictate) TextButton(onClick = onMic, modifier = Modifier.size(44.dp)) { Text("🎤", fontSize = 18.sp) }
-            TextButton(onClick = { onDone(draft.trim().ifEmpty { null }) }) { Text(if (he) "שמירה" else "Save") }
-            TextButton(onClick = { onDone(null) }) { Text(if (he) "דילוג" else "Skip", color = Palette.Muted) }
+            TextButton(onClick = { onDone(draft.trim().ifEmpty { null }) }) { Text(stringResource(R.string.save)) }
+            TextButton(onClick = { onDone(null) }) { Text(stringResource(R.string.skip), color = Palette.Muted) }
         }
     }
 }
@@ -322,15 +325,17 @@ private fun Breadcrumb(b: BreadcrumbUi, draft: String, canDictate: Boolean, onDr
 private fun FocusCard(items: List<FocusItem>, sessions: Int, onOpen: (Long) -> Unit, onDone: (Long) -> Unit, onPick: () -> Unit, onStart: (Long) -> Unit) {
     AppCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("TODAY'S 3", color = Palette.Muted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            Text(stringResource(R.string.todays_3).uppercase(), color = Palette.Muted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
             // The day's wins: no streaks, no zeros.
-            val wins = listOfNotNull(if (items.isNotEmpty()) "${items.count { it.done }}/${items.size} done" else null,
-                if (sessions > 0) "⏱ $sessions session${if (sessions == 1) "" else "s"}" else null)
+            val wins = listOfNotNull(
+                if (items.isNotEmpty()) stringResource(R.string.focus_done_count, items.count { it.done }, items.size) else null,
+                if (sessions > 0) pluralStringResource(R.plurals.focus_sessions, sessions, sessions) else null,
+            )
             if (wins.isNotEmpty()) Text(wins.joinToString(" · "), color = Palette.Muted, fontSize = 12.sp)
-            TextButton(onClick = onPick) { Text(if (items.isEmpty()) "Pick" else "Change") }
+            TextButton(onClick = onPick) { Text(stringResource(if (items.isEmpty()) R.string.focus_pick else R.string.focus_change)) }
         }
         if (items.isEmpty()) {
-            Muted("Nothing picked for today. Pick up to three, or tap ☆ on a task.")
+            Muted(stringResource(R.string.focus_empty))
         }
         items.forEachIndexed { i, item ->
             Row(Modifier.fillMaxWidth().clickable { onOpen(item.id) }.padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -387,10 +392,10 @@ fun FocusPickerDialog(candidates: List<Pair<Long, String>>, selected: List<Long>
     val picked = remember { mutableStateListOf<Long>().apply { addAll(selected) } }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Today's 3") },
+        title = { Text(stringResource(R.string.todays_3)) },
         text = {
             if (candidates.isEmpty()) {
-                Muted("No open tasks to pick from. Add one with ＋ New task.")
+                Muted(stringResource(R.string.focus_picker_empty))
             } else {
                 LazyColumn(Modifier.heightIn(max = 420.dp)) {
                     items(candidates, key = { it.first }) { (id, title) ->
@@ -409,7 +414,7 @@ fun FocusPickerDialog(candidates: List<Pair<Long, String>>, selected: List<Long>
                 }
             }
         },
-        confirmButton = { TextButton(onClick = { onSave(picked.toList()) }) { Text("Save") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        confirmButton = { TextButton(onClick = { onSave(picked.toList()) }) { Text(stringResource(R.string.save)) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
 }

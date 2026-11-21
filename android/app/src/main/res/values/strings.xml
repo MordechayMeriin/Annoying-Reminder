@@ -1,6 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="app_name">ProMinder</string>
+<!--
+  The app's own words, in English (the default). The Hebrew ones are in values-iw/strings.xml (Android's folder name
+  for Hebrew); every string here needs one there too (lint checks). What the assistant writes, and the reply buttons
+  under its messages, aren't here: they follow the language you write in (logic/Texts.kt, logic/ChipRules.kt).
+  The Diagnostics screen and its tests stay in English, like the log they show.
+-->
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <string name="app_name" translatable="false">ProMinder</string>
+    <string name="app_title" translatable="false">🔔 ProMinder</string>
+
+    <!-- Notification channels (Android's notification settings show these) -->
     <string name="channel_normal">Normal</string>
     <string name="channel_normal_desc">Check-ins and everyday reminders.</string>
     <string name="channel_urgent">Urgent</string>
@@ -9,4 +18,331 @@
     <string name="channel_alarm_desc">The full-screen alarm that rings again every few minutes until you answer.</string>
     <string name="channel_session">Focus timer</string>
     <string name="channel_session_desc">The time left in a focus session. Silent; the session\'s end comes as an urgent message.</string>
+
+    <!-- The app icon's long-press shortcut, and sharing to the app -->
+    <string name="shortcut_new_task">New task</string>
+    <string name="shortcut_new_task_long">New task: type or dictate</string>
+    <string name="share_label">Add to ProMinder</string>
+
+    <!-- Shared -->
+    <string name="back">‹ Back</string>
+    <string name="save">Save</string>
+    <string name="cancel">Cancel</string>
+    <string name="ok">OK</string>
+    <string name="add">Add</string>
+    <string name="loading">Loading…</string>
+    <string name="log_out">Log out</string>
+    <string name="done">Done</string>
+    <string name="later">Later</string>
+    <string name="skip">Skip</string>
+    <string name="undo">Undo</string>
+    <string name="clear">Clear</string>
+    <string name="action_done">✓ Done</string>
+    <string name="action_later">Later</string>
+    <string name="action_start">▶ Start</string>
+    <string name="action_start5">▶ Start 5 min</string>
+    <string name="action_another">▶ Another round</string>
+    <string name="action_stop">Stop</string>
+    <string name="action_open">Open</string>
+    <string name="action_dismiss">Dismiss</string>
+    <string name="action_reply">Reply</string>
+
+    <!-- Login -->
+    <string name="login_unconfigured">This build has no login settings, so it can\'t log in. Set GOOGLE_WEB_CLIENT_ID for the build (see android/README.md).</string>
+    <string name="login_google">Sign in with Google</string>
+    <string name="login_signing_in">Signing in…</string>
+
+    <!-- The handover: the phone gets your data -->
+    <string name="handover_restore_title">Restore your data</string>
+    <string name="handover_move_title">Move your data to this phone</string>
+    <string name="handover_restore_body">Your tasks and chat live on your phone and are backed up. This downloads the backup onto this phone.</string>
+    <string name="handover_restore_body_dated">Your tasks and chat live on your phone and are backed up (last backup: %1$s). This downloads the backup onto this phone.</string>
+    <string name="handover_move_body">Your tasks, Today\'s 3, the chat history and your settings are downloaded once. From then on this phone keeps them, works without internet, and backs them up to the server once a day (and when you leave the app on Wi-Fi).</string>
+    <string name="handover_downloading">Downloading…</string>
+    <string name="handover_downloading_data">Downloading your data…</string>
+    <string name="handover_restore_button">Restore my data</string>
+    <string name="handover_move_button">Move my data to this phone</string>
+
+    <!-- Home: Today's 3 and the chat -->
+    <string name="home_tasks">☑ Tasks</string>
+    <string name="home_tasks_count">☑ Tasks %1$d</string>
+    <string name="menu_setup" tools:ignore="PluralsCandidate">Phone setup (%1$d/%2$d)</string>
+    <string name="menu_diagnostics">Diagnostics</string>
+    <string name="setup_banner" tools:ignore="PluralsCandidate">Phone setup: %1$d of %2$d done</string>
+    <string name="chat_empty">No messages yet. Write anything: a task, a question, how it\'s going.</string>
+    <string name="chat_sent">✓ Sent</string>
+    <string name="chat_sending">Sending…</string>
+    <string name="chat_placeholder">Message</string>
+    <string name="chat_send">Send</string>
+    <string name="chat_retry">Try again</string>
+    <string name="breadcrumb_question">Where did you stop on “%1$s”? (optional)</string>
+    <string name="breadcrumb_hint">e.g. page 3</string>
+    <string name="todays_3">Today\'s 3</string>
+    <string name="focus_done_count" tools:ignore="PluralsCandidate">%1$d/%2$d done</string>
+    <plurals name="focus_sessions">
+        <item quantity="one">⏱ %d session</item>
+        <item quantity="other">⏱ %d sessions</item>
+    </plurals>
+    <string name="focus_pick">Pick</string>
+    <string name="focus_change">Change</string>
+    <string name="focus_empty">Nothing picked for today. Pick up to three, or tap ☆ on a task.</string>
+    <string name="focus_picker_empty">No open tasks to pick from. Add one with ＋ New task.</string>
+
+    <!-- The chat while the assistant works: one line per step -->
+    <string name="step_new_meeting">📅 Saving a new meeting</string>
+    <string name="step_new_task">📝 Writing a new task</string>
+    <string name="step_setting">⚙️ Changing a setting</string>
+    <string name="step_preference">🧠 Remembering that</string>
+    <string name="step_list">🔎 Checking your tasks</string>
+    <string name="step_update">✏️ Updating task</string>
+    <string name="step_complete">✅ Marking as done</string>
+    <string name="step_cancel">🗑 Cancelling task</string>
+    <string name="step_followup">⏰ Scheduling a follow-up</string>
+    <string name="step_subtask">➕ Adding a step</string>
+    <string name="step_note">🗒 Making a note</string>
+    <string name="step_blocked">⛔ Marking as blocked</string>
+    <string name="step_focus">🎯 Setting Today\'s 3</string>
+    <string name="step_working">⚙️ Working</string>
+    <string name="step_with_subject">%1$s: %2$s</string>
+
+    <!-- Short answers to a tap, under the chat -->
+    <string name="notice_done">Done ✓</string>
+    <string name="notice_done_task">Done ✓: %1$s</string>
+    <string name="notice_cancelled_task">Cancelled: %1$s</string>
+    <string name="notice_later">Later: next check-in %1$s</string>
+    <string name="notice_no_dictation">Dictation isn\'t available on this phone.</string>
+    <string name="notice_not_open">That task isn\'t open any more.</string>
+    <string name="notice_saved_note">Saved for next time</string>
+    <string name="notice_one_at_a_time">One message at a time: wait for the reply.</string>
+    <string name="notice_stopped">Stopped</string>
+    <string name="notice_parked">Parked for a week</string>
+    <string name="notice_nothing_overdue">Nothing overdue</string>
+    <string name="notice_moved">Moved to next week</string>
+    <string name="notice_dropped">Dropped</string>
+    <string name="notice_kept">Kept</string>
+    <string name="notice_session_ended">That session has already ended.</string>
+    <string name="notice_focus_full">Today\'s 3 is full. Take one out first.</string>
+
+    <!-- Times and the grey line under a task -->
+    <string name="time_today">Today %1$s</string>
+    <string name="time_tomorrow">Tomorrow %1$s</string>
+    <string name="time_yesterday">Yesterday %1$s</string>
+    <string name="time_on_day">%1$s %2$s</string>
+    <string name="day_today">Today</string>
+    <string name="day_yesterday">Yesterday</string>
+    <string name="kind_task">Task</string>
+    <string name="kind_meeting">Meeting</string>
+    <string name="kind_fence">Hard stop</string>
+    <string name="priority_normal">Normal</string>
+    <string name="priority_important">Important</string>
+    <string name="priority_critical">Critical</string>
+    <string name="recurrence_daily">Every day</string>
+    <string name="recurrence_weekdays">Sun–Thu</string>
+    <string name="recurrence_weekly">Every week</string>
+    <string name="recurrence_monthly">Every month</string>
+    <string name="meta_meeting">📅 Meeting</string>
+    <string name="meta_fence">⛔ Hard stop</string>
+    <string name="meta_estimate">~%1$d min</string>
+    <string name="task_step_of">Step of: %1$s</string>
+    <string name="task_a_step">A step</string>
+
+    <!-- A task's history -->
+    <string name="event_postponed">Postponed</string>
+    <string name="event_committed">Committed</string>
+    <string name="event_progress">Progress</string>
+    <string name="event_stuck">Stuck</string>
+    <string name="event_blocked">Blocked</string>
+    <string name="event_unblocked">Unblocked</string>
+    <string name="event_ignored">No answer</string>
+    <string name="event_done">Done</string>
+    <string name="event_description_changed">Description changed (old text)</string>
+    <string name="event_session_started">▶ Session started</string>
+    <string name="event_session_ended">Session ended</string>
+    <string name="event_paused">Paused</string>
+    <string name="event_parked">Not now</string>
+    <string name="event_avoided">Avoided</string>
+
+    <!-- The task lists -->
+    <string name="tasks_title">Tasks</string>
+    <string name="tasks_new">＋ New</string>
+    <string name="tasks_tab_today">Today</string>
+    <string name="tasks_tab_all">All open (%1$d)</string>
+    <string name="tasks_overdue_today">Overdue &amp; today</string>
+    <string name="tasks_nothing_today">Nothing due today.</string>
+    <string name="tasks_coming_up">Coming up</string>
+    <string name="tasks_nothing_soon">Nothing in the next 7 days.</string>
+    <string name="tasks_none_open">No open tasks.</string>
+
+    <!-- One task -->
+    <string name="task_title">Task</string>
+    <string name="task_edit">Edit</string>
+    <string name="task_status_done">✓ Done</string>
+    <string name="task_status_cancelled">Cancelled</string>
+    <string name="task_next_step">Next step</string>
+    <string name="task_where_stopped">Where you stopped</string>
+    <string name="task_waiting">Waiting</string>
+    <string name="task_later">⏰ Later</string>
+    <string name="task_in_focus">★ In Today\'s 3</string>
+    <string name="task_add_focus">☆ Today\'s 3</string>
+    <string name="task_cancel">Cancel task</string>
+    <string name="task_description">Description</string>
+    <string name="task_description_hint">Details, links, who it\'s for…</string>
+    <string name="task_steps">Steps</string>
+    <string name="task_add_step">Add a step</string>
+    <string name="task_no_steps">No steps.</string>
+    <string name="task_history">History</string>
+    <string name="task_cancel_confirm">Cancel this task?</string>
+    <string name="task_cancel_what">“%1$s”</string>
+    <string name="task_cancel_what_steps">“%1$s” and its open steps</string>
+    <string name="task_keep">Keep it</string>
+
+    <!-- Adding or editing a task -->
+    <string name="form_edit_task">Edit task</string>
+    <string name="form_new_step">New step</string>
+    <string name="form_new_task">New task</string>
+    <string name="form_needs_title">Give it a title.</string>
+    <string name="form_meeting_needs_date">A meeting needs a date and time.</string>
+    <string name="form_fence_needs_date">A hard stop needs a date and time.</string>
+    <string name="form_estimate_range">The estimate is minutes, 1 to 10000.</string>
+    <string name="form_title">Title</string>
+    <string name="form_kind">Kind</string>
+    <string name="form_when">When</string>
+    <string name="form_pick_date">Pick a date</string>
+    <string name="form_no_date">No date: it stays quiet until it\'s in Today\'s 3 or you tap ⏰ Later.</string>
+    <string name="form_meeting_hint">You\'re reminded before it starts (⚙ Settings → Meetings).</string>
+    <string name="form_repeat">Repeat</string>
+    <string name="form_repeat_no">No</string>
+    <string name="form_importance">How important</string>
+    <string name="form_details">Details (optional)</string>
+    <string name="form_next_step">Next step: the first small action</string>
+    <string name="form_estimate">Takes about (minutes)</string>
+
+    <!-- The focus timer -->
+    <string name="session_times_up">Time\'s up</string>
+    <string name="session_stopped_at">You stopped at: %1$s</string>
+
+    <!-- The alarm screen and notifications -->
+    <string name="alarm_title">Alarm</string>
+    <plurals name="alarm_rang">
+        <item quantity="one">Rang %d time</item>
+        <item quantity="other">Rang %d times</item>
+    </plurals>
+    <string name="notif_until">Until %1$s</string>
+    <string name="notif_title_until">%1$s · until %2$s</string>
+    <string name="notif_no_reply">No reply: the assistant is unavailable. Your message is saved in the chat.</string>
+    <string name="notif_sent">Sent: %1$s</string>
+
+    <!-- Phone setup -->
+    <string name="setup_title">Setup</string>
+    <string name="setup_intro" tools:ignore="PluralsCandidate">Reminders only work if the phone lets them through. %1$d of %2$d done. Each button opens the right settings screen; come back here when you\'re done.</string>
+    <string name="setup_allow">Allow</string>
+    <string name="setup_open_settings">Open settings</string>
+    <string name="check_notifications">Notifications</string>
+    <string name="check_notifications_why">Every reminder is a notification.</string>
+    <string name="check_exact_alarms">Alarms &amp; reminders</string>
+    <string name="check_exact_alarms_why">Lets reminders arrive on the minute, even when the phone is asleep. Without it they can be minutes late.</string>
+    <string name="check_full_screen">Full-screen alarms</string>
+    <string name="check_full_screen_why">Lets the alarm fill the screen over the lock screen, like the clock app.</string>
+    <string name="check_battery">Battery: unrestricted</string>
+    <string name="check_battery_why">Find ProMinder in the list and choose \"Don\'t optimize\" (or \"Unrestricted\"), so Android doesn\'t delay it to save battery.</string>
+    <string name="check_samsung">Samsung: never sleeping</string>
+    <string name="check_samsung_why">Samsung puts apps to sleep on its own. In Battery, open App power management → Apps that won\'t be put to sleep (newer phones: Background usage limits → Never sleeping apps) and add ProMinder. Then come back and tick it here.</string>
+    <string name="check_dnd">Through Do Not Disturb</string>
+    <string name="check_dnd_why">Urgent reminders and alarms should get through Do Not Disturb. Turn on \"Override Do Not Disturb\" (\"Ignore Do Not Disturb\" on Samsung) for the %1$s category.</string>
+
+    <!-- Settings -->
+    <string name="settings_title">Settings</string>
+    <string name="settings_intro">They shape when reminders come, how loud they are, and the assistant\'s messages. A change applies from the next reminder check. You can also just say it in the chat.</string>
+    <string name="settings_asked">What you asked of the assistant</string>
+    <string name="settings_asked_empty">Nothing yet. Say it in the chat (\"shorter messages\").</string>
+    <string name="settings_off">Off</string>
+    <string name="settings_none">None</string>
+    <string name="settings_default_is">Default: %1$s</string>
+    <string name="settings_default">Default</string>
+    <string name="settings_hint_time">HH:MM, e.g. 07:30</string>
+    <string name="settings_hint_times">Times separated by commas, e.g. 13:00, 17:00</string>
+    <string name="settings_hint_time_off">HH:MM, or off</string>
+    <string name="settings_hint_timezone">e.g. Asia/Jerusalem</string>
+    <string name="settings_language">Language</string>
+    <string name="settings_language_help">The app\'s screens, buttons and notifications. The assistant answers in the language you write in.</string>
+    <string name="language_system">Phone\'s language</string>
+    <!-- Each language in its own words, as language pickers show them -->
+    <string name="language_en" translatable="false">English</string>
+    <string name="language_he" translatable="false">עברית</string>
+
+    <string name="settings_group_day">Daily messages</string>
+    <string name="settings_group_quiet">Quiet hours</string>
+    <string name="settings_group_shabbat">Shabbat &amp; holidays</string>
+    <string name="settings_group_meetings">Meetings</string>
+    <string name="settings_group_nag">Check-ins &amp; limits</string>
+    <string name="settings_group_loud">How loud</string>
+    <string name="settings_group_app">App</string>
+
+    <string name="setting_timezone">Time zone</string>
+    <string name="setting_morning_time">Morning plan</string>
+    <string name="setting_checkin_times">Mid-day check-ins</string>
+    <string name="setting_checkin_times_help">Comma-separated times. Empty = none.</string>
+    <string name="setting_evening_time">Evening review</string>
+    <string name="setting_day_reset_time">New chat day starts at</string>
+    <string name="setting_day_reset_time_help">The assistant only sees today\'s chat, from this time.</string>
+    <string name="setting_quiet_start">Quiet from</string>
+    <string name="setting_quiet_start_help">No messages at all in between.</string>
+    <string name="setting_quiet_end">Quiet until</string>
+    <string name="setting_shabbat_mode">Don\'t disturb on Shabbat &amp; holidays</string>
+    <string name="setting_shabbat_mode_help">Nothing is sent from candle lighting to havdalah (plus the margins below). Shabbat and yom tov only.</string>
+    <string name="setting_latitude">Latitude</string>
+    <string name="setting_latitude_help">Your location, for sunset times.</string>
+    <string name="setting_longitude">Longitude</string>
+    <string name="setting_longitude_help">Defaults are Rosh HaAyin.</string>
+    <string name="setting_altitude">Altitude (m)</string>
+    <string name="setting_diaspora">Outside Israel (two-day holidays)</string>
+    <string name="setting_candle_lighting_min">Candle lighting (min before sunset)</string>
+    <string name="setting_havdalah_min">Havdalah (min after sunset)</string>
+    <string name="setting_havdalah_min_help">0 = nightfall (three stars). 72 = Rabbeinu Tam.</string>
+    <string name="setting_shabbat_before_min">Quiet starts before candle lighting (min)</string>
+    <string name="setting_shabbat_after_min">Quiet continues after havdalah (min)</string>
+    <string name="setting_meeting_lead_min">Reminder before a meeting (min)</string>
+    <string name="setting_meeting_lead_min_help">Plus one at the start time.</string>
+    <string name="setting_week_start_day">First day of the week</string>
+    <string name="setting_week_meetings_time">This week\'s meetings at</string>
+    <string name="setting_week_meetings_time_help">On the first day of the week. Off = don\'t send.</string>
+    <string name="setting_meetings_eve_time">Tomorrow\'s meetings at</string>
+    <string name="setting_meetings_eve_time_help">Every evening. Off = don\'t send.</string>
+    <string name="setting_nag_interval_min">Follow-up interval (min)</string>
+    <string name="setting_nag_interval_min_help">Default time between check-ins; faster for important tasks.</string>
+    <string name="setting_max_nags">Stop after this many check-ins</string>
+    <string name="setting_min_gap_min">Minimum gap between messages (min)</string>
+    <string name="setting_min_gap_min_help">Meetings are exempt.</string>
+    <string name="setting_max_proactive_per_day">Messages per day (max)</string>
+    <string name="setting_max_per_task_per_day">Check-ins per task per day (max)</string>
+    <string name="setting_max_per_task_per_day_help">Reminders you asked for don\'t count.</string>
+    <string name="setting_followup_min_min">Earliest follow-up the assistant may pick (min)</string>
+    <string name="setting_followup_max_days">Latest follow-up the assistant may pick (days)</string>
+    <string name="setting_reply_link_hours">A reply refers to the last check-in for (hours)</string>
+    <string name="setting_urgent_after">Urgent after this many ignored check-ins</string>
+    <string name="setting_urgent_after_help">Check-ins about a task you keep ignoring get louder. Only reminders you asked for and near deadlines.</string>
+    <string name="setting_alarm_for">Alarm for</string>
+    <string name="setting_alarm_for_help">An alarm rings on the alarm volume, full screen, and repeats until you answer it: ✓ Done, Later, Open, or anything you write or tap in the app.</string>
+    <string name="setting_alarm_for_critical">Critical tasks only</string>
+    <string name="setting_alarm_for_important">Important and critical tasks</string>
+    <string name="setting_alarm_for_all">Any task</string>
+    <string name="setting_alarm_for_off">Never (urgent at most)</string>
+    <string name="setting_alarm_after">Alarm after this many ignored check-ins</string>
+    <string name="setting_alarm_after_help">If check-ins stop sooner, the last one is the alarm.</string>
+    <string name="setting_alarm_retry_min">Alarm repeats every (min)</string>
+    <string name="setting_alarm_retry_min_help">It rings for up to a minute each time, until you answer it, for up to an hour, and never into quiet hours or Shabbat.</string>
+    <string name="setting_show_model">Show which AI model replied</string>
+    <string name="setting_show_model_help">A small grey line under the title, for the latest message only. Empty when code wrote it.</string>
+
+    <!-- What's wrong with a setting's value -->
+    <string name="setting_error_weekday">Use sun, mon, tue, wed, thu, fri or sat.</string>
+    <string name="setting_error_bool">Use true or false.</string>
+    <string name="setting_error_choice">Choose one of: %1$s.</string>
+    <string name="setting_error_timezone">Unknown time zone (e.g. Asia/Jerusalem).</string>
+    <string name="setting_error_whole">Must be a whole number.</string>
+    <string name="setting_error_number">Must be a number.</string>
+    <string name="setting_error_min">Must be at least %1$s.</string>
+    <string name="setting_error_max">Must be at most %1$s.</string>
+    <string name="setting_error_time">Use HH:MM, e.g. 07:30.</string>
+    <string name="setting_error_unknown">Unknown setting.</string>
 </resources>

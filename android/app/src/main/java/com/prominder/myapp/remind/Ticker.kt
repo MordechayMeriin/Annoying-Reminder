@@ -61,8 +61,6 @@ data class Notice(
     val alarmSeconds: Long = 0,
     /** The task the buttons act on (a check-in about exactly one task, or a session's end). */
     val taskId: Long? = null,
-    /** The buttons' language (en | he), as the chips'. */
-    val lang: String = "en",
     /**
      * The notification's buttons, as chip actions: a check-in gets start + done (▶ Start 5 min · ✓ Done), a session's
      * end done + another (✓ Done · ▶ Another round). An alarm always gets ✓ Done and Later (its screen adds Open).
@@ -260,7 +258,7 @@ class Ticker(private val store: Store, llm: Llm? = null, prompts: Prompts? = nul
             val lastReply = lastUserReplyAt()
             val (level, alarmS) = if (p.avoided) NORMAL to 0L else messageLevel(group, lastReply)
             notices += Notice(msg.id, Templates.pushTitle(group), w.text, level, alarmS,
-                if (Templates.hasTaskButtons(group)) group[0].id else null, w.lang, alarmEveryMin = s.alarmRepeatMin)
+                if (Templates.hasTaskButtons(group)) group[0].id else null, alarmEveryMin = s.alarmRepeatMin)
             log("Sent message #${msg.id} (${w.kind}, ${LEVELS[level]}) about " + group.joinToString { "#${it.id} \"${it.title}\"" } +
                 (if (p.avoided) " (avoided: the reason message)" else "") + (w.model?.let { ", written by $it" } ?: ""))
             for (t in group) afterContact(t, alarmed = level == ALARM, lastReply = lastReply, avoided = p.avoided, followup = w.followups[t.id])
@@ -570,7 +568,7 @@ class Ticker(private val store: Store, llm: Llm? = null, prompts: Prompts? = nul
                 val text = Texts.sessionText("session_end", task, sess.plannedMin, lang)
                 val chips = ChipRules.chipsJson(ChipRules.chipsFor("session_end", null), lang, task.id)
                 val msg = store.addMessage("assistant", text, "session", listOf(task.id), Templates.encodeChips(chips))
-                notices += Notice(msg.id, "⏱ ${task.title}", text, URGENT, taskId = task.id, lang = lang, actions = Notice.SESSION_END_ACTIONS)
+                notices += Notice(msg.id, "⏱ ${task.title}", text, URGENT, taskId = task.id, actions = Notice.SESSION_END_ACTIONS)
                 log("Sent the end of focus session #${sess.id} (${sess.plannedMin} min) on #${task.id} \"${task.title}\" (message #${msg.id}, urgent)")
             }
         }

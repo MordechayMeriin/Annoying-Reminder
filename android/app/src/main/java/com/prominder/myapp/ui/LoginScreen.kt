@@ -1,5 +1,7 @@
 package com.prominder.myapp.ui
 
+import com.prominder.myapp.R
+import androidx.compose.ui.res.stringResource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -36,18 +38,14 @@ fun LoginScreen(
         verticalArrangement = Arrangement.Center,
     ) {
         AppCard {
-            Text("🔔 ProMinder", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Text(stringResource(R.string.app_title), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(16.dp))
             if (!state.configured) {
-                Text(
-                    "This build has no login settings, so it can't log in. " +
-                        "Set GOOGLE_WEB_CLIENT_ID for the build (see android/README.md).",
-                    color = Palette.Danger,
-                )
+                Text(stringResource(R.string.login_unconfigured), color = Palette.Danger)
                 return@AppCard
             }
             Button(onClick = onSignIn, enabled = !state.busy, modifier = Modifier.fillMaxWidth()) {
-                Text("Sign in with Google")
+                Text(stringResource(R.string.login_google))
             }
             if (state.busy) {
                 Spacer(Modifier.height(12.dp))

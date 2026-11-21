@@ -1,10 +1,11 @@
 package com.prominder.myapp.alarm
 
+import com.prominder.myapp.R
 import android.app.KeyguardManager
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
-import androidx.activity.ComponentActivity
+import androidx.appcompat.app.AppCompatActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.mutableStateOf
@@ -12,7 +13,6 @@ import androidx.lifecycle.lifecycleScope
 import com.prominder.myapp.MainActivity
 import com.prominder.myapp.ReminderApp
 import com.prominder.myapp.diag.Diag
-import com.prominder.myapp.logic.ChipRules
 import com.prominder.myapp.notify.Notifier
 import com.prominder.myapp.ui.AlarmScreen
 import com.prominder.myapp.ui.AlarmUi
@@ -26,8 +26,8 @@ import kotlinx.coroutines.launch
  * and Dismiss; each stops the repeats. The test alarm has Dismiss only. A ring that comes while the screen is open
  * updates it; the screen closes itself when the alarm is answered some other way (the notification, the chat).
  */
-class AlarmActivity : ComponentActivity() {
-    private val ui = mutableStateOf(AlarmUi("Alarm", "", System.currentTimeMillis()))
+class AlarmActivity : AppCompatActivity() {
+    private val ui = mutableStateOf(AlarmUi("", "", System.currentTimeMillis()))
     private var taskId: Long? = null
     private var isTest = true
 
@@ -73,13 +73,12 @@ class AlarmActivity : ComponentActivity() {
     private fun read(intent: Intent) {
         isTest = intent.getBooleanExtra(EXTRA_TEST, true)
         taskId = intent.getLongExtra(EXTRA_TASK_ID, -1).takeIf { it >= 0 }
-        val lang = intent.getStringExtra(EXTRA_LANG) ?: "en"
         ui.value = AlarmUi(
-            title = intent.getStringExtra(EXTRA_TITLE) ?: "Alarm",
+            title = intent.getStringExtra(EXTRA_TITLE) ?: getString(R.string.alarm_title),
             text = intent.getStringExtra(EXTRA_TEXT).orEmpty(),
             scheduledAt = intent.getLongExtra(EXTRA_SCHEDULED_AT, System.currentTimeMillis()),
-            doneLabel = taskId?.let { ChipRules.chipLabel("done", lang) },
-            laterLabel = taskId?.let { ChipRules.chipLabel("later", lang) },
+            doneLabel = taskId?.let { getString(R.string.action_done) },
+            laterLabel = taskId?.let { getString(R.string.action_later) },
             canOpen = !isTest,
             rings = intent.getIntExtra(EXTRA_RINGS, 1),
         )
@@ -98,7 +97,6 @@ class AlarmActivity : ComponentActivity() {
         private const val EXTRA_TEXT = "text"
         private const val EXTRA_SCHEDULED_AT = "scheduled_at"
         private const val EXTRA_TASK_ID = "task_id"
-        private const val EXTRA_LANG = "lang"
         private const val EXTRA_TEST = "test"
         private const val EXTRA_RINGS = "rings"
 
@@ -110,7 +108,7 @@ class AlarmActivity : ComponentActivity() {
         /** A message's alarm: its words, the task its buttons act on (if one), when it first rang. */
         fun forMessage(context: Context, r: AlarmRings.Ringing): Intent =
             base(context).putExtra(EXTRA_TITLE, r.title).putExtra(EXTRA_TEXT, r.text).putExtra(EXTRA_SCHEDULED_AT, r.startedAt)
-                .putExtra(EXTRA_TASK_ID, r.taskId ?: -1).putExtra(EXTRA_LANG, r.lang).putExtra(EXTRA_TEST, false)
+                .putExtra(EXTRA_TASK_ID, r.taskId ?: -1).putExtra(EXTRA_TEST, false)
                 .putExtra(EXTRA_RINGS, r.rings)
 
         private fun base(context: Context) = Intent(context, AlarmActivity::class.java)

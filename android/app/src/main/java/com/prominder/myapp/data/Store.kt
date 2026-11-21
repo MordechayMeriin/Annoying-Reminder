@@ -1,5 +1,6 @@
 package com.prominder.myapp.data
 
+import com.prominder.myapp.R
 import com.prominder.myapp.logic.FocusSessions
 import androidx.room.withTransaction
 import java.security.SecureRandom
@@ -195,7 +196,7 @@ class Store(
 
     /** Save a setting (null: back to the default). Throws [SettingException] when the value isn't valid. */
     suspend fun saveSetting(key: String, raw: String?) {
-        val spec = SettingSpecs.BY_KEY[key] ?: throw SettingException("unknown setting")
+        val spec = SettingSpecs.BY_KEY[key] ?: throw SettingException("unknown setting", R.string.setting_error_unknown)
         val value = raw?.let { SettingSpecs.canonical(spec, it) }
         write {
             if (value == null || value == SettingSpecs.canonical(spec, spec.default)) {

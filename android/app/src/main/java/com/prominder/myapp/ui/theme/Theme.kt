@@ -1,12 +1,14 @@
 package com.prominder.myapp.ui.theme
 
+import androidx.compose.ui.text.style.TextDirection
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.material3.Typography
+import androidx.compose.material3.ProvideTextStyle
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalLayoutDirection
-import androidx.compose.ui.unit.LayoutDirection
 
 /** The app's palette: dark, with an amber accent. */
 object Palette {
@@ -40,13 +42,25 @@ private val Colors = darkColorScheme(
 )
 
 /**
- * The app's words are English, so its layout stays left-to-right even when the phone is set to Hebrew (otherwise
- * Android mirrors it and moves English sentences' periods to the wrong end). Hebrew text, like chat messages,
- * still reads right-to-left: each paragraph takes its direction from its own first letters.
+ * The layout follows the app's language (i18n/AppLanguage.kt): right-to-left in Hebrew, left-to-right in English.
+ * Text inside it, like chat messages, takes its direction from its own first letters, so an English message reads
+ * left-to-right in the Hebrew layout and the other way round.
  */
 @Composable
 fun ReminderTheme(content: @Composable () -> Unit) {
-    CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
-        MaterialTheme(colorScheme = Colors, content = content)
+    MaterialTheme(colorScheme = Colors, typography = Type) {
+        ProvideTextStyle(LocalTextStyle.current.copy(textDirection = TextDirection.Content), content)
     }
+}
+
+/** Material's type scale, each style taking its direction from the text itself (see above). */
+private val Type: Typography = Typography().run {
+    fun TextStyle.byContent() = copy(textDirection = TextDirection.Content)
+    Typography(
+        displayLarge.byContent(), displayMedium.byContent(), displaySmall.byContent(),
+        headlineLarge.byContent(), headlineMedium.byContent(), headlineSmall.byContent(),
+        titleLarge.byContent(), titleMedium.byContent(), titleSmall.byContent(),
+        bodyLarge.byContent(), bodyMedium.byContent(), bodySmall.byContent(),
+        labelLarge.byContent(), labelMedium.byContent(), labelSmall.byContent(),
+    )
 }

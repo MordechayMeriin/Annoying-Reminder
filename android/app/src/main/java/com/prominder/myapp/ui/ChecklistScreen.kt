@@ -1,5 +1,7 @@
 package com.prominder.myapp.ui
 
+import com.prominder.myapp.R
+import androidx.compose.ui.res.stringResource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -38,19 +40,15 @@ fun ChecklistScreen(
 ) {
     val done = items.count { it.done }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp)) {
-        TopBar("Setup", onBack = onBack)
-        Muted(
-            "Reminders only work if the phone lets them through. $done of ${items.size} done. " +
-                "Each button opens the right settings screen; come back here when you're done.",
-            Modifier.padding(horizontal = 4.dp),
-        )
+        TopBar(stringResource(R.string.setup_title), onBack = onBack)
+        Muted(stringResource(R.string.setup_intro, done, items.size), Modifier.padding(horizontal = 4.dp))
         Spacer(Modifier.height(12.dp))
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             items.forEach { item -> ChecklistRow(item, onOpen, onConfirm) }
         }
         Spacer(Modifier.height(16.dp))
         Button(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
-            Text(if (done == items.size) "Done" else "Later")
+            Text(stringResource(if (done == items.size) R.string.done else R.string.later))
         }
         Spacer(Modifier.height(24.dp))
     }
@@ -63,14 +61,14 @@ private fun ChecklistRow(item: CheckItem, onOpen: (CheckId) -> Unit, onConfirm: 
             StatusDot(item.done)
             Spacer(Modifier.width(4.dp))
             Column(Modifier.weight(1f)) {
-                Text(item.title, fontWeight = FontWeight.SemiBold)
+                Text(stringResource(item.title), fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(2.dp))
-                Muted(item.why)
+                Muted(item.whyArg?.let { stringResource(item.why, stringResource(it)) } ?: stringResource(item.why))
                 if (!item.done || item.confirmedByUser) {
                     Spacer(Modifier.height(8.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         if (!item.done) {
-                            OutlinedButton(onClick = { onOpen(item.id) }) { Text(item.action) }
+                            OutlinedButton(onClick = { onOpen(item.id) }) { Text(stringResource(item.action)) }
                         }
                         if (item.confirmedByUser) {
                             Spacer(Modifier.width(8.dp))
@@ -79,7 +77,7 @@ private fun ChecklistRow(item: CheckItem, onOpen: (CheckId) -> Unit, onConfirm: 
                                 onCheckedChange = { onConfirm(item.id, it) },
                                 colors = CheckboxDefaults.colors(checkedColor = Palette.Ok),
                             )
-                            Text("Done")
+                            Text(stringResource(R.string.done))
                         }
                     }
                 }

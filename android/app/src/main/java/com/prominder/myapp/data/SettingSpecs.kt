@@ -1,5 +1,7 @@
 package com.prominder.myapp.data
 
+import com.prominder.myapp.R
+import androidx.annotation.StringRes
 import java.time.DayOfWeek
 import java.time.LocalTime
 import java.time.ZoneId
@@ -11,6 +13,8 @@ import java.time.ZoneId
  */
 data class SettingSpec(
     val key: String,
+    // label, help and the options' labels are English, for the assistant (the update_setting tool). The settings
+    // screen shows them in the app's language (ui/SettingTexts.kt), and groups them by [group]'s id.
     /** time | times | time_off | int | float | bool | weekday | timezone | choice */
     val kind: String,
     val default: String,
@@ -23,16 +27,17 @@ data class SettingSpec(
     val options: List<Pair<String, String>> = emptyList(),
 )
 
-class SettingException(message: String) : IllegalArgumentException(message)
+/** What's wrong with a value: [message] in English (for the assistant and the log), [reason] for the screen. */
+class SettingException(message: String, @StringRes val reason: Int, val args: List<String> = emptyList()) : IllegalArgumentException(message)
 
 object SettingSpecs {
-    private const val DAY = "Daily messages"
-    private const val QUIET = "Quiet hours"
-    private const val SHABBAT = "Shabbat & holidays"
-    private const val MEET = "Meetings"
-    private const val NAG = "Check-ins & limits"
-    private const val LOUD = "How loud"
-    private const val APP = "App"
+    const val DAY = "day"
+    const val QUIET = "quiet"
+    const val SHABBAT = "shabbat"
+    const val MEET = "meetings"
+    const val NAG = "nag"
+    const val LOUD = "loud"
+    const val APP = "app"
 
     val ALL: List<SettingSpec> = listOf(
         SettingSpec("timezone", "timezone", "Asia/Jerusalem", "Time zone", DAY),
@@ -103,40 +108,40 @@ object SettingSpecs {
             "times" -> text.split(",").filter { it.isNotBlank() }.map(::time).sorted().joinToString(", ") { fmt(it) }
             "time_off" -> if (text.lowercase() in setOf("off", "none", "no", "false", "0", "")) "off" else fmt(time(text))
             "weekday" -> text.lowercase().take(3).takeIf { it in WEEKDAYS }
-                ?: throw SettingException("use sun, mon, tue, wed, thu, fri or sat")
+                ?: throw SettingException("use sun, mon, tue, wed, thu, fri or sat", R.string.setting_error_weekday)
             "bool" -> when (text.lowercase()) {
                 "1", "true", "yes", "on" -> "true"
                 "0", "false", "no", "off" -> "false"
-                else -> throw SettingException("use true or false")
+                else -> throw SettingException("use true or false", R.string.setting_error_bool)
             }
             "choice" -> text.lowercase().takeIf { v -> spec.options.any { it.first == v } }
-                ?: throw SettingException("choose one of: " + spec.options.joinToString(", ") { it.first })
+                ?: spec.options.joinToString(", ") { it.first }.let { throw SettingException("choose one of: $it", R.string.setting_error_choice, listOf(it)) }
             "timezone" -> runCatching { ZoneId.of(text).id }.getOrNull()?.takeIf { "/" in it || it == "UTC" }
-                ?: throw SettingException("unknown time zone (e.g. Asia/Jerusalem)")
+                ?: throw SettingException("unknown time zone (e.g. Asia/Jerusalem)", R.string.setting_error_timezone)
             "int" -> {
-                val v = text.toLongOrNull() ?: throw SettingException("must be a whole number")
+                val v = text.toLongOrNull() ?: throw SettingException("must be a whole number", R.string.setting_error_whole)
                 range(spec, v.toDouble())
                 v.toString()
             }
             "float" -> {
-                val v = text.toDoubleOrNull()?.takeIf { it.isFinite() } ?: throw SettingException("must be a number")
+                val v = text.toDoubleOrNull()?.takeIf { it.isFinite() } ?: throw SettingException("must be a number", R.string.setting_error_number)
                 range(spec, v)
                 general(v)
             }
-            else -> throw SettingException("unknown kind ${spec.kind}")
+            else -> error("unknown kind ${spec.kind}")
         }
     }
 
     private fun range(spec: SettingSpec, v: Double) {
-        spec.min?.let { if (v < it) throw SettingException("must be at least ${general(it)}") }
-        spec.max?.let { if (v > it) throw SettingException("must be at most ${general(it)}") }
+        spec.min?.let { if (v < it) throw SettingException("must be at least ${general(it)}", R.string.setting_error_min, listOf(general(it))) }
+        spec.max?.let { if (v > it) throw SettingException("must be at most ${general(it)}", R.string.setting_error_max, listOf(general(it))) }
     }
 
     private fun time(text: String): LocalTime {
         val parts = text.trim().split(":")
         val h = parts.getOrNull(0)?.trim()?.toIntOrNull()
         val m = parts.getOrNull(1)?.trim()?.toIntOrNull()
-        if (parts.size != 2 || h == null || m == null || h !in 0..23 || m !in 0..59) throw SettingException("use HH:MM, e.g. 07:30")
+        if (parts.size != 2 || h == null || m == null || h !in 0..23 || m !in 0..59) throw SettingException("use HH:MM, e.g. 07:30", R.string.setting_error_time)
         return LocalTime.of(h, m)
     }
 

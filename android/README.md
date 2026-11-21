@@ -85,12 +85,27 @@ android/app/src/main/java/com/prominder/myapp/
   alarm/                the test alarm: exact alarm → receiver → full-screen alarm; set again after a restart
   setup/                the first-run checklist: what to allow, and the settings screen for each
   diag/                 the Diagnostics log
+  i18n/                 the app's language: the phone's, or English / עברית picked in ⚙ Settings
   ui/                   the screens (Compose): login, handover, home, tasks, task, form, settings, checklist,
                         diagnostics, alarm
+android/app/src/main/res/values/strings.xml      the app's words in English (values-iw/: in Hebrew)
 android/app/schemas/    each database version's schema (Room), for future migrations
 android/app/src/test/   tests, including the screenshot tests (ui/ScreenshotTest.kt)
 android/store/          Play Store texts, icon and feature graphic
 ```
+
+### Languages
+
+The app's own words (screens, buttons, notifications, the checklist, settings) are string resources: English in
+`res/values/strings.xml`, Hebrew in `res/values-iw/strings.xml` (Android's folder name for Hebrew). In Hebrew the layout
+is right-to-left. The language is the phone's unless you pick one in ⚙ Settings → Language (on Android 13+ also in
+the phone's Settings → Apps → ProMinder → Language); `i18n/AppLanguage.kt` applies it through AppCompat's per-app
+language, back to Android 10. What the assistant writes, and the reply buttons under its messages, follow the language
+you write in, as before. The Diagnostics screen stays English, like its log. The app's name is "ProMinder" in every
+language.
+
+To add a language: a `res/values-xx/strings.xml` with every string (lint fails on a missing one), and its tag in
+`AppLanguage.SUPPORTED`. The build lists it for Android's language setting by itself (`generateLocaleConfig`).
 
 ## One-time setup
 

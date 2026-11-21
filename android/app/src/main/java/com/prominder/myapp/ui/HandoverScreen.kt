@@ -1,5 +1,7 @@
 package com.prominder.myapp.ui
 
+import com.prominder.myapp.R
+import androidx.compose.ui.res.stringResource
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -35,27 +37,25 @@ data class HandoverState(
 fun HandoverScreen(state: HandoverState, onMove: () -> Unit, onLogout: () -> Unit) {
     val restore = state.alreadyHandedOver == true
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp)) {
-        TopBar("🔔 ProMinder") { TextButton(onClick = onLogout) { Text("Log out", color = Palette.Muted) } }
+        TopBar(stringResource(R.string.app_title)) { TextButton(onClick = onLogout) { Text(stringResource(R.string.log_out), color = Palette.Muted) } }
         AppCard {
-            Text(if (restore) "Restore your data" else "Move your data to this phone", style = MaterialTheme.typography.titleMedium,
+            Text(stringResource(if (restore) R.string.handover_restore_title else R.string.handover_move_title), style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(8.dp))
             if (restore) {
-                Muted("Your tasks and chat live on your phone and are backed up" +
-                    (state.lastBackup?.let { " (last backup: $it)" } ?: "") + ". This downloads the backup onto this phone.")
+                Muted(state.lastBackup?.let { stringResource(R.string.handover_restore_body_dated, it) }
+                    ?: stringResource(R.string.handover_restore_body))
             } else {
-                Muted("Your tasks, Today's 3, the chat history and your settings are downloaded once. From then on this phone " +
-                    "keeps them, works without internet, and backs them up to the server once a day (and when you leave " +
-                    "the app on Wi-Fi).")
+                Muted(stringResource(R.string.handover_move_body))
             }
         }
         Spacer(Modifier.height(16.dp))
         Button(onClick = onMove, enabled = !state.busy, modifier = Modifier.fillMaxWidth()) {
-            Text(when {
-                state.busy -> "Downloading…"
-                restore -> "Restore my data"
-                else -> "Move my data to this phone"
-            })
+            Text(stringResource(when {
+                state.busy -> R.string.handover_downloading
+                restore -> R.string.handover_restore_button
+                else -> R.string.handover_move_button
+            }))
         }
         state.message?.let {
             Spacer(Modifier.height(12.dp))
