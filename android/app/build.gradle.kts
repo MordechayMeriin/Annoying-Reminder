@@ -172,6 +172,8 @@ dependencies {
     implementation(libs.compose.ui)
     implementation(libs.compose.ui.tooling.preview)
     implementation(libs.compose.material3)
+    // The standard icons (⚙ settings, ⋮ menu, ▶, ✕, send…), drawn as vectors with labels for TalkBack.
+    implementation(libs.compose.material.icons.core)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.okhttp)

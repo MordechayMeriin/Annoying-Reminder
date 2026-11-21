@@ -73,6 +73,19 @@ import kotlinx.coroutines.launch
  * the tick writes.
  */
 
+/**
+ * A tap on one task that Undo can take back: the task (and its steps) as they were before [act], then [text] from its
+ * result for the snackbar, with Undo putting the rows back. Null [text]: nothing to say (and nothing to undo).
+ */
+internal suspend fun <T> undoable(store: Store, id: Long, act: suspend () -> T, text: (T) -> String?): Notice? {
+    val before = store.snapshot(id)
+    val result = act()
+    val t = text(result) ?: return null
+    return Notice(t, undo = { store.restore(before) })
+}
+
+private fun String?.notice(): Notice? = this?.let { Notice(it) }
+
 @Composable
 private fun settingsOf(store: Store): AppSettings =
     remember(store) { store.watchSettings() }.collectAsStateWithLifecycle(AppSettings.DEFAULTS).value
@@ -102,8 +115,9 @@ fun HomeRoute(
     chat: Chat,
     setupDone: Int,
     setupTotal: Int,
-    notice: String?,
-    onNotice: (String?) -> Unit,
+    /** Notifications are off (a banner on the home screen, not only the dot on ⋮). */
+    setupUrgent: Boolean,
+    onNotice: (Notice?) -> Unit,
     go: (Route) -> Unit,
     onOpenChecklist: () -> Unit,
     onLogout: () -> Unit,
@@ -158,7 +172,7 @@ fun HomeRoute(
             openCount = open.count { it.parentId == null },
             setupDone = setupDone,
             setupTotal = setupTotal,
-            notice = notice,
+            setupUrgent = setupUrgent,
             chat = ChatUi(turn.sending, turn.sentId, turn.steps.map { ToolSteps.label(res, it) }, turn.typing, turn.error, canRetry = turn.failedId != null),
             canDictate = canDictate,
             session = running?.let { SessionBarUi(sessionTask?.title.orEmpty(), FocusSessions.sessionEndAt(it).toEpochMilli()) },
@@ -168,7 +182,7 @@ fun HomeRoute(
         ),
         onOpenTasks = { go(Route.Tasks) },
         onOpenTask = { go(Route.Task(it)) },
-        onDone = { id -> scope.launch { store.complete(id); onNotice(res.getString(R.string.notice_done)) } },
+        onDone = { id -> scope.launch { onNotice(undoable(store, id, { store.complete(id) }) { t -> res.getString(R.string.notice_done_task, t?.title.orEmpty()) }) } },
         onPickFocus = { picking = true },
         onNewTask = { go(Route.NewTask()) },
         onOpenSettings = { go(Route.Settings) },
@@ -187,14 +201,14 @@ fun HomeRoute(
                     .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                     .putExtra(RecognizerIntent.EXTRA_LANGUAGE, if (lang == "he") "he-IL" else "en-US"))
             } catch (e: ActivityNotFoundException) {
-                onNotice(res.getString(R.string.notice_no_dictation))
+                onNotice(res.getString(R.string.notice_no_dictation).notice())
             }
         },
         onRetry = { chat.retry() },
         focusInput = focusInput,
         onStart = { id ->
             scope.launch {
-                if (store.startSession(id, FocusSessions.START_MIN_APP) != null) openTimer() else onNotice(res.getString(R.string.notice_not_open))
+                if (store.startSession(id, FocusSessions.START_MIN_APP) != null) openTimer() else onNotice(res.getString(R.string.notice_not_open).notice())
             }
         },
         onOpenSession = ::openTimer,
@@ -204,7 +218,7 @@ fun HomeRoute(
             note = ""
             if (id != null) scope.launch {
                 store.saveBreadcrumb(id, text)
-                if (text != null) onNotice(res.getString(R.string.notice_saved_note))
+                if (text != null) onNotice(res.getString(R.string.notice_saved_note).notice())
             }
         },
         onBreadcrumbMic = {
@@ -214,7 +228,7 @@ fun HomeRoute(
                     .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                     .putExtra(RecognizerIntent.EXTRA_LANGUAGE, if (lang == "he") "he-IL" else "en-US"))
             } catch (e: ActivityNotFoundException) {
-                onNotice(res.getString(R.string.notice_no_dictation))
+                onNotice(res.getString(R.string.notice_no_dictation).notice())
             }
         },
     )
@@ -243,24 +257,24 @@ internal fun chatItems(res: Resources, rows: List<MessageRow>, zone: ZoneId, now
 }
 
 /**
- * A reply button: an action on the phone's data (no LLM), or a reply in your words. Returns a short answer to show.
- * ▶ Start and ▶ Another round open the timer ([onSession]).
+ * A reply button: an action on the phone's data (no LLM), or a reply in your words. Returns a short answer to show;
+ * ✓ Done, Later and Not now come with Undo. ▶ Start and ▶ Another round open the timer ([onSession]).
  */
 internal suspend fun chipAction(
     res: Resources, store: Store, chat: Chat, c: ChipRules.ChipJson, zone: ZoneId, onSession: () -> Unit = {},
-): String? = when (c.action) {
-    null -> if (chat.send(c.label)) null else res.getString(R.string.notice_one_at_a_time)
+): Notice? = when (c.action) {
+    null -> if (chat.send(c.label)) null else res.getString(R.string.notice_one_at_a_time).notice()
     "start", "another" -> c.taskId?.let { id ->
         val started = if (c.action == ChipAction.ANOTHER) store.startSession(id, another = true) else store.startSession(id, c.minutes)
-        if (started != null) null.also { onSession() } else res.getString(R.string.notice_not_open)
+        if (started != null) null.also { onSession() } else res.getString(R.string.notice_not_open).notice()
     }
-    "stop" -> c.taskId?.let { store.stopSession(it); res.getString(R.string.notice_stopped) }
-    "done" -> c.taskId?.let { store.complete(it); res.getString(R.string.notice_done) }
-    "later" -> c.taskId?.let { id -> store.later(id)?.let { laterNotice(res, it, zone, store.now()) } }
-    "not_now" -> c.taskId?.let { store.notNow(it); res.getString(R.string.notice_parked) }
-    "move_overdue" -> store.moveOverdue().let { res.getString(if (it.isEmpty()) R.string.notice_nothing_overdue else R.string.notice_moved) }
-    "drop" -> store.drop(c.taskIds.orEmpty()).let { res.getString(R.string.notice_dropped) }
-    "keep" -> store.keep(c.taskIds.orEmpty()).let { res.getString(R.string.notice_kept) }
+    "stop" -> c.taskId?.let { store.stopSession(it); res.getString(R.string.notice_stopped).notice() }
+    "done" -> c.taskId?.let { id -> undoable(store, id, { store.complete(id) }) { res.getString(R.string.notice_done) } }
+    "later" -> c.taskId?.let { id -> undoable(store, id, { store.later(id) }) { at -> at?.let { laterNotice(res, it, zone, store.now()) } } }
+    "not_now" -> c.taskId?.let { id -> undoable(store, id, { store.notNow(id) }) { res.getString(R.string.notice_parked) } }
+    "move_overdue" -> store.moveOverdue().let { res.getString(if (it.isEmpty()) R.string.notice_nothing_overdue else R.string.notice_moved).notice() }
+    "drop" -> store.drop(c.taskIds.orEmpty()).let { res.getString(R.string.notice_dropped).notice() }
+    "keep" -> store.keep(c.taskIds.orEmpty()).let { res.getString(R.string.notice_kept).notice() }
     "what_now" -> store.whatNow(c.lowEnergy == true, c.exclude.orEmpty(), c.id).let { null }
     else -> null
 }
@@ -276,7 +290,7 @@ private data class Loaded(val session: SessionRow?)
  * (✓ Done, Stop, or from a notification). ▶ Another round keeps it open on the new round.
  */
 @Composable
-fun SessionRoute(store: Store, onNotice: (String?) -> Unit, onBack: () -> Unit) {
+fun SessionRoute(store: Store, onNotice: (Notice?) -> Unit, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val loaded by remember { store.dao.watchLatestSession().map { Loaded(it) } }.collectAsStateWithLifecycle(null)
     val latest = loaded?.session
@@ -301,10 +315,10 @@ fun SessionRoute(store: Store, onNotice: (String?) -> Unit, onBack: () -> Unit) 
             Times.parse(s.startedAt).toEpochMilli(), FocusSessions.sessionEndAt(s).toEpochMilli()),
         now = now,
         busy = busy,
-        onDone = { act { store.endSession(s.id, "done"); onNotice(res.getString(R.string.notice_done)) } },
+        onDone = { act { store.endSession(s.id, "done"); onNotice(res.getString(R.string.notice_done).notice()) } },
         onStop = { act { store.endSession(s.id, "stopped") } },
         onAnother = { act { store.endSession(s.id, "another") } },
-        onLength = { m -> act { if (store.setSessionLength(s.id, m) == null) onNotice(res.getString(R.string.notice_session_ended)) } },
+        onLength = { m -> act { if (store.setSessionLength(s.id, m) == null) onNotice(res.getString(R.string.notice_session_ended).notice()) } },
         onClose = onBack,
     )
 }
@@ -313,7 +327,7 @@ private fun dictationAvailable(context: android.content.Context): Boolean =
     Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).resolveActivity(context.packageManager) != null
 
 @Composable
-fun TasksRoute(store: Store, go: (Route) -> Unit, onBack: () -> Unit) {
+fun TasksRoute(store: Store, onNotice: (Notice?) -> Unit, go: (Route) -> Unit, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val settings = settingsOf(store)
     val zone = settings.zone
@@ -334,7 +348,7 @@ fun TasksRoute(store: Store, go: (Route) -> Unit, onBack: () -> Unit) {
         ),
         onTab = { tab = it },
         onOpen = { go(Route.Task(it)) },
-        onDone = { id -> scope.launch { store.complete(id) } },
+        onDone = { id -> scope.launch { onNotice(undoable(store, id, { store.complete(id) }) { t -> res.getString(R.string.notice_done_task, t?.title.orEmpty()) }) } },
         onNew = { go(Route.NewTask()) },
         onBack = onBack,
     )
@@ -351,7 +365,7 @@ internal fun taskItem(res: Resources, t: TaskRow, zone: ZoneId, now: Instant, fo
 )
 
 @Composable
-fun TaskDetailRoute(store: Store, id: Long, onNotice: (String?) -> Unit, go: (Route) -> Unit, onBack: () -> Unit) {
+fun TaskDetailRoute(store: Store, id: Long, onNotice: (Notice?) -> Unit, go: (Route) -> Unit, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val settings = settingsOf(store)
     val zone = settings.zone
@@ -384,29 +398,28 @@ fun TaskDetailRoute(store: Store, id: Long, onNotice: (String?) -> Unit, go: (Ro
             history = events.map { historyItem(res, it, zone, now) },
         ),
         onSaveDescription = { text -> scope.launch { store.setDescription(id, text) } },
-        onDone = { scope.launch { store.complete(id); onNotice(res.getString(R.string.notice_done_task, t.title)); onBack() } },
+        onDone = { scope.launch { onNotice(undoable(store, id, { store.complete(id) }) { res.getString(R.string.notice_done_task, t.title) }); onBack() } },
         onLater = {
             scope.launch {
-                val at = store.later(id)
-                onNotice(at?.let { laterNotice(res, it, zone, store.now()) })
+                onNotice(undoable(store, id, { store.later(id) }) { at -> at?.let { laterNotice(res, it, zone, store.now()) } })
                 onBack()
             }
         },
         onToggleFocus = {
             scope.launch {
-                if (!store.toggleFocus(id)) onNotice(res.getString(R.string.notice_focus_full))
+                if (!store.toggleFocus(id)) onNotice(res.getString(R.string.notice_focus_full).notice())
             }
         },
         onStart = {
             scope.launch {
-                if (store.startSession(id, FocusSessions.START_MIN_APP) != null) go(Route.Session) else onNotice(res.getString(R.string.notice_not_open))
+                if (store.startSession(id, FocusSessions.START_MIN_APP) != null) go(Route.Session) else onNotice(res.getString(R.string.notice_not_open).notice())
             }
         },
         onEdit = { go(Route.EditTask(id)) },
-        onCancelTask = { scope.launch { store.cancel(id); onNotice(res.getString(R.string.notice_cancelled_task, t.title)); onBack() } },
+        onCancelTask = { scope.launch { onNotice(undoable(store, id, { store.cancel(id) }) { res.getString(R.string.notice_cancelled_task, t.title) }); onBack() } },
         onAddStep = { title -> scope.launch { store.create(TaskForm(title.trim()), parentId = id) } },
         onOpenStep = { go(Route.Task(it)) },
-        onDoneStep = { sid -> scope.launch { store.complete(sid) } },
+        onDoneStep = { sid -> scope.launch { onNotice(undoable(store, sid, { store.complete(sid) }) { s -> res.getString(R.string.notice_done_task, s?.title.orEmpty()) }) } },
         onBack = onBack,
     )
 }

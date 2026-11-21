@@ -172,6 +172,22 @@ class Store(
         new
     }
 
+    /** The task and its steps as they are now: what Undo puts back after ✓ Done, ⏰ Later, Not now or Cancel. */
+    suspend fun snapshot(id: Long): List<TaskRow> = listOfNotNull(dao.task(id)) + dao.children(id)
+
+    /**
+     * Undo: the rows exactly as [snapshot] saw them, and "[Undone: …]" in the chat so the assistant knows (it read the
+     * "[Marked done: …]"). The history keeps its line, like any change, and a session the tap ended stays ended.
+     * Nothing changed since the snapshot (the task wasn't open): nothing to do.
+     */
+    suspend fun restore(rows: List<TaskRow>): Unit = write {
+        val first = rows.firstOrNull() ?: return@write
+        val changed = rows.filter { dao.task(it.id)?.copy(seq = it.seq) != it }
+        if (changed.isEmpty()) return@write
+        changed.forEach { putTask(it) }
+        addChatEvent("[Undone: ${first.title}]", listOf(first.id))
+    }
+
     // ------------------------------------------------------------ Today's 3
 
     /** These (at most 3, open, not meetings) become Today's 3, in this order. */

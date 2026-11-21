@@ -13,7 +13,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -37,7 +36,7 @@ data class HandoverState(
 fun HandoverScreen(state: HandoverState, onMove: () -> Unit, onLogout: () -> Unit) {
     val restore = state.alreadyHandedOver == true
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp)) {
-        TopBar(stringResource(R.string.app_title)) { TextButton(onClick = onLogout) { Text(stringResource(R.string.log_out), color = Palette.Muted) } }
+        TopBar(stringResource(R.string.app_title)) { LinkButton(stringResource(R.string.log_out), onLogout, color = Palette.Muted) }
         AppCard {
             Text(stringResource(if (restore) R.string.handover_restore_title else R.string.handover_move_title), style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold)
@@ -59,7 +58,7 @@ fun HandoverScreen(state: HandoverState, onMove: () -> Unit, onLogout: () -> Uni
         }
         state.message?.let {
             Spacer(Modifier.height(12.dp))
-            Text(it, color = if (state.busy) Palette.Muted else Palette.Accent)
+            Text(it, color = if (state.busy) Palette.Muted else Palette.Text)
         }
     }
 }

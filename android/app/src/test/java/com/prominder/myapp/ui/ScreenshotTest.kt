@@ -3,6 +3,8 @@ package com.prominder.myapp.ui
 import androidx.compose.ui.platform.LocalResources
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.ui.unit.dp
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
@@ -153,7 +155,55 @@ class ScreenshotTest {
 
     @Test
     fun home_empty() = shot("4b_home_empty") {
-        HomeScreen(HomeState(setupDone = 4, setupTotal = 4, notice = "Later: next check-in Today 12:00"), {}, {}, {}, {}, {}, {}, {}, {}, {})
+        HomeScreen(HomeState(setupDone = 4, setupTotal = 4), {}, {}, {}, {}, {}, {}, {}, {}, {})
+    }
+
+    /** Today's 3 unfolded (a tap on the strip): each task with its ring, time and ▶; notifications off: the banner. */
+    @Test
+    fun home_focus_open() = shot("4h_home_focus_open") {
+        HomeScreen(
+            HomeState(
+                focus = listOf(
+                    FocusItem(1, "Write the quarterly report", "Today 15:00 · Important · ~25 min", done = false),
+                    FocusItem(2, "Call the plumber", "", done = true),
+                    FocusItem(3, "Book flights", "Tomorrow 09:00", done = false),
+                ),
+                messages = listOf(
+                    ChatItem(1, "assistant", "morning", "Good morning! Today's 3: the report, the plumber and the flights. " +
+                        "Start with the report's outline?", "07:30", day = "Today"),
+                    ChatItem(2, "user", "chat", "yes, after coffee", "07:41"),
+                ),
+                openCount = 12, setupDone = 2, setupTotal = 4, setupUrgent = true, sessionsToday = 1, focusExpanded = true,
+            ),
+            {}, {}, {}, {}, {}, {}, {}, {}, {},
+        )
+    }
+
+    /** All three done: the strip says so in green. */
+    @Test
+    fun home_all_done() = shot("4i_home_all_done") {
+        HomeScreen(
+            HomeState(
+                focus = listOf(
+                    FocusItem(1, "Write the quarterly report", "", done = true),
+                    FocusItem(2, "Call the plumber", "", done = true),
+                    FocusItem(3, "Book flights", "", done = true),
+                ),
+                messages = listOf(ChatItem(1, "user", "event", "[Marked done: Book flights]", "16:02", day = "Today")),
+                openCount = 9, setupDone = 4, setupTotal = 4,
+            ),
+            {}, {}, {}, {}, {}, {}, {}, {}, {},
+        )
+    }
+
+    /** The answer to a tap, with Undo (✓ Done, Later and Cancel offer it). */
+    @Test
+    fun notice_undo() = shot("4j_notice_undo") {
+        androidx.compose.foundation.layout.Box(Modifier.fillMaxSize()) {
+            TasksScreen(TasksState(0, tasks.drop(1).take(3), emptyList(), tasks), {}, {}, {}, {}, {})
+            NoticeBar(Notice("Done ✓: Pay the electricity bill", undo = {}), {},
+                Modifier.align(androidx.compose.ui.Alignment.BottomCenter).padding(bottom = 16.dp))
+        }
     }
 
     /** In Hebrew (the phone's language, or picked in ⚙ Settings): the app's words in Hebrew, laid out right-to-left. */

@@ -10,7 +10,13 @@ import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -149,7 +155,8 @@ private fun MainRoutes(app: ReminderApp, auth: AuthRepository, session: Session)
     fun go(r: Route) { stack = stack + r.key }
     fun back() { if (stack.size > 1) stack = stack.dropLast(1) }
     var facts by remember { mutableStateOf(DeviceSetup.facts(context)) }
-    var notice by remember { mutableStateOf<String?>(null) }
+    // The short answer to a tap, as a snackbar over every screen (with Undo when it can be taken back).
+    var notice by remember { mutableStateOf<Notice?>(null) }
     var testNotice by remember { mutableStateOf<String?>(null) }
     // The "New task" shortcut (long-press on the app icon): the chat, ready to type or dictate.
     val focusInput by app.newTask.collectAsStateWithLifecycle()
@@ -174,10 +181,9 @@ private fun MainRoutes(app: ReminderApp, auth: AuthRepository, session: Session)
         }
     }
     LaunchedEffect(notice) {
-        if (notice != null) {
-            delay(5000)
-            notice = null
-        }
+        val n = notice ?: return@LaunchedEffect
+        delay(if (n.undo != null) 7000 else 4000)
+        notice = null
     }
     // Coming back from a settings screen: check again.
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { facts = DeviceSetup.facts(context) }
@@ -192,6 +198,7 @@ private fun MainRoutes(app: ReminderApp, auth: AuthRepository, session: Session)
     BackHandler(enabled = stack.size > 1) { back() }
 
     val items = Checklist.build(facts)
+    Box(Modifier.fillMaxSize()) {
     when (route) {
         Route.Home -> HomeRoute(
             store = app.store,
@@ -199,13 +206,13 @@ private fun MainRoutes(app: ReminderApp, auth: AuthRepository, session: Session)
             focusInput = focusInput,
             setupDone = Checklist.doneCount(items),
             setupTotal = items.size,
-            notice = notice,
+            setupUrgent = !facts.notificationsOn,
             onNotice = { notice = it },
             go = ::go,
             onOpenChecklist = { go(Route.Checklist) },
             onLogout = { logout(context, auth) },
         )
-        Route.Tasks -> TasksRoute(app.store, ::go, ::back)
+        Route.Tasks -> TasksRoute(app.store, onNotice = { notice = it }, go = ::go, onBack = ::back)
         is Route.Task -> TaskDetailRoute(app.store, route.id, onNotice = { notice = it }, go = ::go, onBack = ::back)
         is Route.NewTask -> TaskFormRoute(app.store, null, route.parentId,
             onSaved = { id -> stack = stack.dropLast(1) + if (route.parentId == null) listOf(Route.Task(id).key) else emptyList() },
@@ -268,6 +275,18 @@ private fun MainRoutes(app: ReminderApp, auth: AuthRepository, session: Session)
                 ),
             )
         }
+    }
+    notice?.let { n ->
+        NoticeBar(
+            n,
+            onUndo = {
+                notice = null
+                n.undo?.let { undo -> scope.launch { undo() } }
+            },
+            // Above the message field on the home screen; at the bottom elsewhere.
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = if (route == Route.Home) 76.dp else 16.dp),
+        )
+    }
     }
 }
 

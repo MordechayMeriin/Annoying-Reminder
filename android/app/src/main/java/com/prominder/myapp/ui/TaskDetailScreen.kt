@@ -26,6 +26,12 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.foundation.layout.Box
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -74,28 +80,68 @@ fun TaskDetailScreen(
     onStart: () -> Unit = {},
 ) {
     var confirmCancel by rememberSaveable { mutableStateOf(false) }
+    var menu by remember { mutableStateOf(false) }
     val open = state.status == OPEN
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
-        TopBar(stringResource(R.string.task_title), onBack = onBack) { if (open) TextButton(onClick = onEdit) { Text(stringResource(R.string.task_edit)) } }
+        TopBar(stringResource(R.string.task_title), onBack = onBack) {
+            if (open) {
+                LinkButton(stringResource(R.string.task_edit), onEdit)
+                // Cancel is destructive and rare: in the menu, away from ✓ Done.
+                Box {
+                    AppIconButton(Icons.Filled.MoreVert, stringResource(R.string.cd_more), { menu = true })
+                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        DropdownMenuItem(text = { Text(stringResource(R.string.task_cancel), color = Palette.Danger) },
+                            onClick = { menu = false; confirmCancel = true })
+                    }
+                }
+            }
+        }
         Text(state.title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
         val status = when (state.status) { "done" -> stringResource(R.string.task_status_done); "cancelled" -> stringResource(R.string.task_status_cancelled); else -> null }
         val meta = listOfNotNull(status, state.parent, state.meta.takeIf { it.isNotEmpty() }).joinToString(" · ")
         if (meta.isNotEmpty()) Muted(meta, Modifier.padding(top = 4.dp))
 
-        state.nextAction?.let { Callout(stringResource(R.string.task_next_step), it) }
-        state.resumeNote?.let { Callout(stringResource(R.string.task_where_stopped), it) }
-        state.blocked?.let { Callout(stringResource(R.string.task_waiting), it, Palette.Danger) }
+        // The next step is what matters; where you stopped is a quieter line under it.
+        if (state.nextAction != null || state.resumeNote != null) {
+            Spacer(Modifier.height(12.dp))
+            AppCard {
+                state.nextAction?.let {
+                    CalloutLabel(stringResource(R.string.task_next_step))
+                    Text(it, style = MaterialTheme.typography.titleMedium)
+                }
+                state.resumeNote?.let {
+                    if (state.nextAction != null) Spacer(Modifier.height(8.dp))
+                    Text(stringResource(R.string.task_where_stopped) + ": " + it, color = Palette.Muted, style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+        }
+        state.blocked?.let {
+            Spacer(Modifier.height(12.dp))
+            AppCard {
+                CalloutLabel(stringResource(R.string.task_waiting))
+                Text(it)
+            }
+        }
 
         if (open) {
             Spacer(Modifier.height(16.dp))
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (state.kind != TaskKind.FENCE) {
-                    Button(onClick = onDone, colors = ButtonDefaults.buttonColors(containerColor = Palette.Ok)) { Text(stringResource(R.string.action_done)) }
-                    OutlinedButton(onClick = onLater) { Text(stringResource(R.string.task_later)) }
+                    Button(onClick = onDone, colors = ButtonDefaults.buttonColors(containerColor = Palette.Ok, contentColor = Palette.OnAccent)) {
+                        Text(stringResource(R.string.action_done))
+                    }
                 }
-                if (state.kind == TaskKind.TASK) OutlinedButton(onClick = onStart) { Text(stringResource(R.string.action_start)) }
-                if (state.kind == TaskKind.TASK) OutlinedButton(onClick = onToggleFocus) { Text(stringResource(if (state.inFocus) R.string.task_in_focus else R.string.task_add_focus)) }
-                TextButton(onClick = { confirmCancel = true }) { Text(stringResource(R.string.task_cancel), color = Palette.Muted) }
+                if (state.kind == TaskKind.TASK) OutlinedButton(onClick = onStart) { Text(stringResource(R.string.action_start), color = Palette.Text) }
+                if (state.kind != TaskKind.FENCE) OutlinedButton(onClick = onLater) { Text(stringResource(R.string.task_later), color = Palette.Text) }
+                if (state.kind == TaskKind.TASK) {
+                    OutlinedButton(onClick = onToggleFocus) {
+                        Text(stringResource(if (state.inFocus) R.string.task_in_focus else R.string.task_add_focus), color = Palette.Text)
+                    }
+                }
+                // A hard stop has nothing else to do but be cancelled, so there it stays in sight.
+                if (state.kind == TaskKind.FENCE) {
+                    OutlinedButton(onClick = { confirmCancel = true }) { Text(stringResource(R.string.task_cancel), color = Palette.Danger) }
+                }
             }
         }
 
@@ -107,7 +153,7 @@ fun TaskDetailScreen(
         )
         if (text != state.description) {
             Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.End) {
-                TextButton(onClick = { text = state.description }) { Text(stringResource(R.string.undo), color = Palette.Muted) }
+                LinkButton(stringResource(R.string.undo), { text = state.description }, color = Palette.Muted)
                 Button(onClick = { onSaveDescription(text) }) { Text(stringResource(R.string.save)) }
             }
         }
@@ -124,7 +170,7 @@ fun TaskDetailScreen(
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                         keyboardActions = KeyboardActions(onDone = { if (step.isNotBlank()) { onAddStep(step); step = "" } }),
                     )
-                    TextButton(onClick = { onAddStep(step); step = "" }, enabled = step.isNotBlank()) { Text(stringResource(R.string.add)) }
+                    LinkButton(stringResource(R.string.add), { onAddStep(step); step = "" }, enabled = step.isNotBlank())
                 }
             } else if (state.steps.isEmpty()) {
                 Muted(stringResource(R.string.task_no_steps))
@@ -136,10 +182,10 @@ fun TaskDetailScreen(
             state.history.forEach { h ->
                 Column(Modifier.padding(vertical = 4.dp)) {
                     Row {
-                        Text(h.label, fontSize = 14.sp, modifier = Modifier.weight(1f))
-                        Text(h.time, fontSize = 12.sp, color = Palette.Muted)
+                        Text(h.label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                        Text(h.time, style = MaterialTheme.typography.bodySmall, color = Palette.Muted)
                     }
-                    h.note?.let { Text(it, fontSize = 13.sp, color = Palette.Muted) }
+                    h.note?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = Palette.Muted) }
                 }
             }
         }
@@ -158,10 +204,7 @@ fun TaskDetailScreen(
 }
 
 @Composable
-private fun Callout(label: String, text: String, color: androidx.compose.ui.graphics.Color = Palette.Accent) {
-    Spacer(Modifier.height(12.dp))
-    AppCard {
-        Text(label.uppercase(), color = color, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-        Text(text)
-    }
+private fun CalloutLabel(label: String) {
+    Text(label.uppercase(), color = Palette.Muted, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold, letterSpacing = 0.6.sp)
+    Spacer(Modifier.height(2.dp))
 }
