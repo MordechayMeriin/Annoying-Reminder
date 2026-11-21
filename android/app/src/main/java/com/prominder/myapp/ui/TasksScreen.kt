@@ -1,5 +1,7 @@
 package com.prominder.myapp.ui
 
+import com.prominder.myapp.R
+import androidx.compose.ui.res.stringResource
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -51,22 +53,22 @@ fun TasksScreen(
     onBack: () -> Unit,
 ) {
     Column(Modifier.fillMaxSize()) {
-        TopBar("Tasks", onBack = onBack) { TextButton(onClick = onNew) { Text("＋ New") } }
+        TopBar(stringResource(R.string.tasks_title), onBack = onBack) { TextButton(onClick = onNew) { Text(stringResource(R.string.tasks_new)) } }
         TabRow(selectedTabIndex = state.tab, containerColor = Palette.Bg, contentColor = Palette.Text) {
-            Tab(selected = state.tab == 0, onClick = { onTab(0) }, text = { Text("Today") })
-            Tab(selected = state.tab == 1, onClick = { onTab(1) }, text = { Text("All open (${state.all.size})") })
+            Tab(selected = state.tab == 0, onClick = { onTab(0) }, text = { Text(stringResource(R.string.tasks_tab_today)) })
+            Tab(selected = state.tab == 1, onClick = { onTab(1) }, text = { Text(stringResource(R.string.tasks_tab_all, state.all.size)) })
         }
         LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
             if (state.tab == 0) {
-                item { SectionTitle("Overdue & today") }
-                if (state.today.isEmpty()) item { Muted("Nothing due today.", Modifier.padding(start = 4.dp)) }
+                item { SectionTitle(stringResource(R.string.tasks_overdue_today)) }
+                if (state.today.isEmpty()) item { Muted(stringResource(R.string.tasks_nothing_today), Modifier.padding(start = 4.dp)) }
                 items(state.today, key = { "t${it.id}" }) { TaskLine(it, onOpen, onDone) }
-                item { SectionTitle("Coming up") }
-                if (state.upcoming.isEmpty()) item { Muted("Nothing in the next 7 days.", Modifier.padding(start = 4.dp)) }
+                item { SectionTitle(stringResource(R.string.tasks_coming_up)) }
+                if (state.upcoming.isEmpty()) item { Muted(stringResource(R.string.tasks_nothing_soon), Modifier.padding(start = 4.dp)) }
                 items(state.upcoming, key = { "u${it.id}" }) { TaskLine(it, onOpen, onDone) }
             } else {
                 item { Spacer(Modifier.height(8.dp)) }
-                if (state.all.isEmpty()) item { Muted("No open tasks.", Modifier.padding(start = 4.dp)) }
+                if (state.all.isEmpty()) item { Muted(stringResource(R.string.tasks_none_open), Modifier.padding(start = 4.dp)) }
                 items(state.all, key = { "a${it.id}" }) { TaskLine(it, onOpen, onDone) }
             }
             item { Spacer(Modifier.height(24.dp)) }

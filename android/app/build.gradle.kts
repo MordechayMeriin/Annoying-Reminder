@@ -81,6 +81,20 @@ android {
         buildConfig = true
     }
 
+    // The app's languages (res/values = English, res/values-iw = Hebrew) for Android 13+'s per-app language setting:
+    // listed from the values-* folders, so a new language needs only its folder (and AppLanguage.SUPPORTED).
+    androidResources {
+        generateLocaleConfig = true
+    }
+
+    // The language can be picked in the app (⚙ Settings), not only by the phone's language: Play must install every
+    // language's words, not only the phone's (it splits them by language otherwise).
+    bundle {
+        language {
+            enableSplit = false
+        }
+    }
+
     testOptions {
         unitTests {
             isIncludeAndroidResources = true // Robolectric (screenshot tests) needs the resources
@@ -150,6 +164,8 @@ kotlin {
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
+    // The in-app language choice (AppCompatDelegate.setApplicationLocales), back to Android 10.
+    implementation(libs.androidx.appcompat)
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(platform(libs.compose.bom))

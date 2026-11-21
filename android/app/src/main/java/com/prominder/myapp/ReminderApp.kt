@@ -2,6 +2,7 @@ package com.prominder.myapp
 
 import android.app.Application
 import android.content.Intent
+import android.content.res.Configuration
 import androidx.core.content.pm.ShortcutInfoCompat
 import androidx.core.content.pm.ShortcutManagerCompat
 import androidx.core.graphics.drawable.IconCompat
@@ -13,6 +14,7 @@ import com.prominder.myapp.auth.PrefsSessionStore
 import com.prominder.myapp.data.AppDatabase
 import com.prominder.myapp.data.Store
 import com.prominder.myapp.diag.Diag
+import com.prominder.myapp.i18n.AppLanguage
 import com.prominder.myapp.llm.Agent
 import com.prominder.myapp.llm.BackendLlm
 import com.prominder.myapp.llm.Chat
@@ -82,6 +84,7 @@ class ReminderApp : Application() {
         super.onCreate()
         Diag.init(this)
         logCrashes()
+        AppLanguage.restore(this)
         Channels.ensure(this)
         // A request may take up to 90 seconds in all (a slow model call, a throttled backup), and the server may be
         // silent for most of that while it works: OkHttp's default 10-second read timeout would cut it off.
@@ -97,12 +100,25 @@ class ReminderApp : Application() {
         addNewTaskShortcut()
     }
 
+    /** The language changed (in the app, or Android 13+'s settings): the words Android shows outside the app too. */
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        languageChanged()
+    }
+
+    /** Notification channels and the shortcut are shown by Android, in the words they were last given. */
+    fun languageChanged(tag: String = AppLanguage.current(this)) {
+        Channels.ensure(this, tag)
+        addNewTaskShortcut(tag)
+    }
+
     /** "New task" when you long-press the app icon: opens the chat, ready to type or dictate. */
-    private fun addNewTaskShortcut() {
+    private fun addNewTaskShortcut(tag: String = AppLanguage.current(this)) {
         runCatching {
+            val words = AppLanguage.localized(this, tag)
             val shortcut = ShortcutInfoCompat.Builder(this, "new_task")
-                .setShortLabel("New task")
-                .setLongLabel("New task: type or dictate")
+                .setShortLabel(words.getString(R.string.shortcut_new_task))
+                .setLongLabel(words.getString(R.string.shortcut_new_task_long))
                 .setIcon(IconCompat.createWithResource(this, R.mipmap.ic_launcher))
                 .setIntent(Intent(this, MainActivity::class.java).setAction(MainActivity.ACTION_NEW_TASK))
                 .build()

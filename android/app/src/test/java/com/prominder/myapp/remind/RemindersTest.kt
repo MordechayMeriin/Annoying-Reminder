@@ -1,5 +1,6 @@
 package com.prominder.myapp.remind
 
+import com.prominder.myapp.i18n.AppLanguage
 import com.prominder.myapp.logic.FocusSessions
 import com.prominder.myapp.logic.Loudness
 import android.app.AlarmManager
@@ -124,12 +125,12 @@ class RemindersTest {
     }
 
     @Test fun `the last ring of an alarm is cut short at the end of its window`() {
-        val r = AlarmRings.Ringing(1, "t", "x", null, "en", 0, until = 150_000, everyMs = 120_000)
+        val r = AlarmRings.Ringing(1, "t", "x", null, 0, until = 150_000, everyMs = 120_000)
         assertEquals(60_000L, r.ringMs(0))
         assertEquals(120_000L, r.nextRingAt(0))
         assertEquals(30_000L, r.ringMs(120_000))
         assertNull(r.nextRingAt(120_000))
-        assertEquals(30_000L, AlarmRings.Ringing(1, "t", "x", null, "en", 0, until = 3_600_000, everyMs = 30_000).ringMs(0))
+        assertEquals(30_000L, AlarmRings.Ringing(1, "t", "x", null, 0, until = 3_600_000, everyMs = 30_000).ringMs(0))
     }
 
     @Test fun `anything you write or tap stops a ringing alarm, Dismiss too`() = runBlocking {
@@ -182,13 +183,29 @@ class RemindersTest {
         assertEquals(com.prominder.myapp.MainActivity.ACTION_ANOTHER_ROUND, shadowOf(n.actions[1].actionIntent).savedIntent.action)
     }
 
-    @Test fun `Hebrew buttons for a Hebrew check-in, only Reply for a group`() {
-        Notifier.showNotice(app, Notice(6, "לשלם ארנונה", "x", Loudness.NORMAL, taskId = 3, lang = "he"))
+    @Test fun `the buttons are in the app's language, not the message's, and a group gets only Reply`() {
+        Notifier.showNotice(app, Notice(6, "לשלם ארנונה", "x", Loudness.NORMAL, taskId = 3))
         Notifier.showNotice(app, Notice(7, "A (+1)", "y", Loudness.NORMAL))
         val byTitle = posted().associateBy { it.extras.getString(Notification.EXTRA_TITLE) }
-        assertEquals(listOf("▶ להתחיל 5 דק׳", "✓ בוצע", "לענות"), byTitle.getValue("לשלם ארנונה").actions.map { it.title.toString() })
+        assertEquals(listOf("▶ Start 5 min", "✓ Done", "Reply"), byTitle.getValue("לשלם ארנונה").actions.map { it.title.toString() })
         assertEquals(listOf("Reply"), byTitle.getValue("A (+1)").actions.map { it.title.toString() })
         assertEquals(Channels.NORMAL, byTitle.getValue("A (+1)").channelId)
+    }
+
+    /** Android 10: no system per-app language, so a notification from the background reads the app's own choice. */
+    @Test fun `Hebrew picked in the app gives Hebrew buttons and channel names, even without a screen`() {
+        try {
+            AppLanguage.set(app, "he")
+            assertEquals("he", AppLanguage.current(app))
+            Channels.ensure(app)
+            Notifier.showNotice(app, Notice(8, "Pay the bill", "x", Loudness.NORMAL, taskId = 3))
+            val n = posted().single { it.extras.getString(Notification.EXTRA_TITLE) == "Pay the bill" }
+            assertEquals(listOf("▶ להתחיל 5 דק׳", "✓ בוצע", "לענות"), n.actions.map { it.title.toString() })
+            assertEquals("דחוף", notifications.getNotificationChannel(Channels.URGENT).name.toString())
+        } finally {
+            AppLanguage.set(app, AppLanguage.SYSTEM)
+        }
+        assertEquals("Urgent", AppLanguage.localized(app).getString(com.prominder.myapp.R.string.channel_urgent))
     }
 
     @Test fun `Done on the notification marks the task done and clears it`() {

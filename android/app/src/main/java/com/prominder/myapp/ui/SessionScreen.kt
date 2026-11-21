@@ -1,5 +1,7 @@
 package com.prominder.myapp.ui
 
+import com.prominder.myapp.R
+import androidx.compose.ui.res.stringResource
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -37,7 +39,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.prominder.myapp.logic.ChipRules
 import com.prominder.myapp.logic.FocusSessions
 import com.prominder.myapp.ui.theme.Palette
 import kotlinx.coroutines.delay
@@ -52,23 +53,19 @@ data class SessionUi(
     val plannedMin: Int,
     val startedAt: Long,
     val endsAt: Long,
-    /** en | he: the buttons' language, as the chips'. */
-    val lang: String = "en",
 )
 
 /** A focus session that's running while its screen is closed: "⏱ 12:34 · Taxes" above the chat. */
-data class SessionBarUi(val title: String, val endsAt: Long, val lang: String = "en")
+data class SessionBarUi(val title: String, val endsAt: Long)
 
 /** "Where did you stop?" after a stopped or unanswered session: optional, never in the way. */
-data class BreadcrumbUi(val sessionId: Long, val title: String, val lang: String = "en")
+data class BreadcrumbUi(val sessionId: Long, val title: String)
 
 /** 12:34, or 0:00 at the end. Seconds rounded up, so the last second shows 0:01 and never a premature 0:00. */
 internal fun clockText(ms: Long): String {
     val sec = maxOf(0L, (ms + 999) / 1000)
     return "${sec / 60}:${(sec % 60).toString().padStart(2, '0')}"
 }
-
-internal fun timesUp(lang: String) = if (lang == "he") "הזמן נגמר" else "Time's up"
 
 /** The clock, once a second while shown. Screenshot tests pass a fixed [fixed] instead. */
 @Composable
@@ -104,7 +101,6 @@ fun SessionScreen(
     val left = ui.endsAt - now
     val over = left <= 0
     val total = ui.plannedMin * 60_000L
-    val he = ui.lang == "he"
     Column(Modifier.fillMaxSize().background(Palette.Bg).padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(ui.title, color = Palette.Muted, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
@@ -121,14 +117,14 @@ fun SessionScreen(
                 drawArc(if (over) Palette.Ok else Palette.Accent, -90f, 360f * fraction, false, topLeft, arcSize,
                     style = Stroke(stroke, cap = StrokeCap.Round))
             }
-            Text(if (over) timesUp(ui.lang) else clockText(left), fontSize = if (over) 34.sp else 60.sp, fontWeight = FontWeight.Bold,
+            Text(if (over) stringResource(R.string.session_times_up) else clockText(left), fontSize = if (over) 34.sp else 60.sp, fontWeight = FontWeight.Bold,
                 color = if (over) Palette.Ok else Palette.Text)
         }
         Spacer(Modifier.height(20.dp))
         Text("▶ ${ui.step}", fontSize = 22.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
         ui.resumeNote?.let {
             Spacer(Modifier.height(8.dp))
-            Text((if (he) "עצרת ב: " else "You stopped at: ") + it, color = Palette.Muted, fontSize = 15.sp, textAlign = TextAlign.Center)
+            Text(stringResource(R.string.session_stopped_at, it), color = Palette.Muted, fontSize = 15.sp, textAlign = TextAlign.Center)
         }
         Spacer(Modifier.height(20.dp))
         if (!over) {
@@ -151,8 +147,8 @@ fun SessionScreen(
             }
         }
         Spacer(Modifier.weight(1f))
-        val done = ChipRules.chipLabel("done", ui.lang)
-        val stop = ChipRules.chipLabel("stop", ui.lang)
+        val done = stringResource(R.string.action_done)
+        val stop = stringResource(R.string.action_stop)
         Button(onClick = onDone, enabled = !busy, modifier = Modifier.fillMaxWidth().height(56.dp),
             colors = ButtonDefaults.buttonColors(containerColor = Palette.Ok, contentColor = Palette.Bg)) {
             Text(done, fontSize = 18.sp, fontWeight = FontWeight.Bold)
@@ -161,7 +157,7 @@ fun SessionScreen(
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             if (over) {
                 Button(onClick = onAnother, enabled = !busy, modifier = Modifier.weight(1f).height(52.dp)) {
-                    Text(ChipRules.chipLabel("another", ui.lang), fontSize = 16.sp)
+                    Text(stringResource(R.string.action_another), fontSize = 16.sp)
                 }
             } else {
                 OutlinedButton(onClick = { onLength(minOf(ui.plannedMin + 5, FocusSessions.SESSION_MAX_MIN)) }, enabled = !busy && ui.plannedMin < FocusSessions.SESSION_MAX_MIN,
@@ -181,7 +177,7 @@ fun SessionBar(bar: SessionBarUi, now: Long, onOpen: () -> Unit) {
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text("⏱ " + (if (left > 0) clockText(left) else timesUp(bar.lang)), color = if (left > 0) Palette.Accent else Palette.Ok,
+        Text("⏱ " + (if (left > 0) clockText(left) else stringResource(R.string.session_times_up)), color = if (left > 0) Palette.Accent else Palette.Ok,
             fontWeight = FontWeight.Bold)
         Text(" · ${bar.title}", maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
         Text("›", color = Palette.Muted)

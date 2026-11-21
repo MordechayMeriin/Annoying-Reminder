@@ -1,5 +1,7 @@
 package com.prominder.myapp.setup
 
+import com.prominder.myapp.R
+
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -46,10 +48,10 @@ class ChecklistTest {
     fun `Do Not Disturb needs both channels and points at the missing one`() {
         val none = Checklist.build(s9).first { it.id == CheckId.DND }
         assertFalse(none.done)
-        assertTrue("Urgent" in none.why)
+        assertEquals(R.string.channel_urgent, none.whyArg)
         val urgentOnly = Checklist.build(s9.copy(urgentBypassesDnd = true)).first { it.id == CheckId.DND }
         assertFalse(urgentOnly.done)
-        assertTrue("Alarm category" in urgentOnly.why)
+        assertEquals(R.string.channel_alarm, urgentOnly.whyArg)
         assertTrue(Checklist.build(s9.copy(urgentBypassesDnd = true, alarmBypassesDnd = true)).first { it.id == CheckId.DND }.done)
     }
 

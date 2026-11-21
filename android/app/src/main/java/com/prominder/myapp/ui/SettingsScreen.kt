@@ -1,5 +1,15 @@
 package com.prominder.myapp.ui
 
+import androidx.compose.ui.text.style.TextDirection
+import androidx.compose.material3.LocalTextStyle
+import java.util.Locale
+import java.time.format.TextStyle
+import com.prominder.myapp.i18n.AppLanguage
+import com.prominder.myapp.data.SettingSpecs
+import android.content.res.Resources
+import androidx.compose.ui.platform.LocalResources
+import com.prominder.myapp.R
+import androidx.compose.ui.res.stringResource
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -31,10 +41,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.prominder.myapp.ui.theme.Palette
 
+/** A setting as the screen shows it: its words already in the app's language (DataRoutes.settingItems). */
 data class SettingItem(
     val key: String,
     val label: String,
     val help: String,
+    /** The section's title. */
     val group: String,
     val kind: String,
     /** The current value, as stored text ("07:30", "true", "sun"). */
@@ -45,8 +57,11 @@ data class SettingItem(
     val options: List<Pair<String, String>> = emptyList(),
 )
 
-private val WEEKDAY_LABELS = linkedMapOf("sun" to "Sunday", "mon" to "Monday", "tue" to "Tuesday", "wed" to "Wednesday",
-    "thu" to "Thursday", "fri" to "Friday", "sat" to "Saturday")
+/** The weekdays as stored ("sun"), with their names in the app's language, Sunday first. */
+private fun weekdayLabels(locale: Locale): Map<String, String> =
+    listOf("sun", "mon", "tue", "wed", "thu", "fri", "sat").associateWith {
+        SettingSpecs.weekday(it).getDisplayName(TextStyle.FULL, locale)
+    }
 
 /**
  * ⚙ Settings: every setting the app keeps (backed up with your data), minus Pushover's account and sounds and
@@ -61,13 +76,30 @@ fun SettingsScreen(
     onSave: (String, String?) -> String?,
     onDeletePreference: (Long) -> Unit,
     onBack: () -> Unit,
+    /** The app's language: AppLanguage.SYSTEM ("") or one of AppLanguage.SUPPORTED. */
+    language: String = AppLanguage.SYSTEM,
+    onLanguage: (String) -> Unit = {},
 ) {
     var editing by rememberSaveable { mutableStateOf<String?>(null) }
+    var pickingLanguage by rememberSaveable { mutableStateOf(false) }
+    val res = LocalResources.current
+    val weekdays = remember(res.configuration) { weekdayLabels(Format.locale(res)) }
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
-        item { TopBar("Settings", onBack = onBack) }
+        item { TopBar(stringResource(R.string.settings_title), onBack = onBack) }
+        item { Muted(stringResource(R.string.settings_intro)) }
+        // On this phone only (like Android's own per-app language), so not backed up with the settings below.
+        item { SectionTitle(stringResource(R.string.settings_language)) }
         item {
-            Muted("They shape when reminders come, how loud they are, and the assistant's messages. A change applies " +
-                "from the next reminder check. You can also just say it in the chat.")
+            AppCard {
+                Row(Modifier.fillMaxWidth().clickable { pickingLanguage = true }.padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(stringResource(R.string.settings_language), fontSize = 15.sp)
+                        Text(stringResource(R.string.settings_language_help), fontSize = 12.sp, color = Palette.Muted)
+                    }
+                    Text(languageName(language), color = if (language == AppLanguage.SYSTEM) Palette.Muted else Palette.Accent,
+                        fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 12.dp))
+                }
+            }
         }
         items.groupBy { it.group }.forEach { (group, rows) ->
             item(key = "g$group") { SectionTitle(group) }
@@ -75,15 +107,15 @@ fun SettingsScreen(
                 AppCard {
                     rows.forEachIndexed { i, s ->
                         if (i > 0) Spacer(Modifier.height(4.dp))
-                        SettingLine(s, onToggle = { onSave(s.key, if (s.value == "true") "false" else "true") }, onEdit = { editing = s.key })
+                        SettingLine(s, weekdays, onToggle = { onSave(s.key, if (s.value == "true") "false" else "true") }, onEdit = { editing = s.key })
                     }
                 }
             }
         }
-        item { SectionTitle("What you asked of the assistant") }
+        item { SectionTitle(stringResource(R.string.settings_asked)) }
         item {
             AppCard {
-                if (preferences.isEmpty()) Muted("Nothing yet. Say it in the chat (\"shorter messages\") once the assistant is back.")
+                if (preferences.isEmpty()) Muted(stringResource(R.string.settings_asked_empty))
                 preferences.forEach { (id, text) ->
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(text, modifier = Modifier.weight(1f))
@@ -96,12 +128,43 @@ fun SettingsScreen(
     }
 
     items.firstOrNull { it.key == editing }?.let { s ->
-        EditSettingDialog(s, onSave = { raw -> onSave(s.key, raw).also { if (it == null) editing = null } }, onDismiss = { editing = null })
+        EditSettingDialog(s, weekdays, onSave = { raw -> onSave(s.key, raw).also { if (it == null) editing = null } }, onDismiss = { editing = null })
+    }
+    if (pickingLanguage) {
+        LanguageDialog(language, onPick = { pickingLanguage = false; if (it != language) onLanguage(it) }, onDismiss = { pickingLanguage = false })
     }
 }
 
+/** A language's name: in its own words (as language pickers show them), or "Phone's language". */
 @Composable
-private fun SettingLine(s: SettingItem, onToggle: () -> Unit, onEdit: () -> Unit) {
+private fun languageName(tag: String): String = when (tag) {
+    "en" -> stringResource(R.string.language_en)
+    "he" -> stringResource(R.string.language_he)
+    else -> stringResource(R.string.language_system)
+}
+
+@Composable
+private fun LanguageDialog(current: String, onPick: (String) -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.settings_language)) },
+        text = {
+            Column {
+                (listOf(AppLanguage.SYSTEM) + AppLanguage.SUPPORTED).forEach { tag ->
+                    Row(Modifier.fillMaxWidth().clickable { onPick(tag) }, verticalAlignment = Alignment.CenterVertically) {
+                        RadioButton(selected = tag == current, onClick = { onPick(tag) })
+                        Text(languageName(tag))
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
+    )
+}
+
+@Composable
+private fun SettingLine(s: SettingItem, weekdays: Map<String, String>, onToggle: () -> Unit, onEdit: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().clickable(onClick = if (s.kind == "bool") onToggle else onEdit).padding(vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -113,28 +176,31 @@ private fun SettingLine(s: SettingItem, onToggle: () -> Unit, onEdit: () -> Unit
         if (s.kind == "bool") {
             Switch(checked = s.value == "true", onCheckedChange = { onToggle() })
         } else {
-            Text(display(s), color = if (s.isDefault) Palette.Muted else Palette.Accent, fontWeight = FontWeight.SemiBold,
+            // Times and numbers read left-to-right in Hebrew too ("13:00, 17:00", not "17:00 ,13:00").
+            val dataValue = s.kind != "weekday" && s.kind != "choice" && !(s.kind == "time_off" && s.value == "off") && s.value.isNotEmpty()
+            Text(display(s, weekdays, LocalResources.current), color = if (s.isDefault) Palette.Muted else Palette.Accent, fontWeight = FontWeight.SemiBold,
+                style = LocalTextStyle.current.copy(textDirection = if (dataValue) TextDirection.Ltr else TextDirection.Content),
                 modifier = Modifier.padding(start = 12.dp))
         }
     }
 }
 
 /** The fixed answers a setting picks from (a radio list instead of typing), or null. */
-private fun choices(s: SettingItem): Map<String, String>? = when (s.kind) {
-    "weekday" -> WEEKDAY_LABELS
+private fun choices(s: SettingItem, weekdays: Map<String, String>): Map<String, String>? = when (s.kind) {
+    "weekday" -> weekdays
     "choice" -> s.options.toMap()
     else -> null
 }
 
-private fun display(s: SettingItem): String = when (s.kind) {
-    "weekday", "choice" -> choices(s)?.get(s.value) ?: s.value
-    "time_off" -> if (s.value == "off") "Off" else s.value
-    "times" -> s.value.ifEmpty { "None" }
+private fun display(s: SettingItem, weekdays: Map<String, String>, res: Resources): String = when (s.kind) {
+    "weekday", "choice" -> choices(s, weekdays)?.get(s.value) ?: s.value
+    "time_off" -> if (s.value == "off") res.getString(R.string.settings_off) else s.value
+    "times" -> s.value.ifEmpty { res.getString(R.string.settings_none) }
     else -> s.value
 }
 
 @Composable
-private fun EditSettingDialog(s: SettingItem, onSave: (String?) -> String?, onDismiss: () -> Unit) {
+private fun EditSettingDialog(s: SettingItem, weekdays: Map<String, String>, onSave: (String?) -> String?, onDismiss: () -> Unit) {
     var text by remember { mutableStateOf(s.value) }
     var error by remember { mutableStateOf<String?>(null) }
     AlertDialog(
@@ -144,7 +210,7 @@ private fun EditSettingDialog(s: SettingItem, onSave: (String?) -> String?, onDi
             Column {
                 if (s.help.isNotEmpty()) Muted(s.help)
                 Spacer(Modifier.height(8.dp))
-                val options = choices(s)
+                val options = choices(s, weekdays)
                 if (options != null) {
                     options.forEach { (value, label) ->
                         Row(Modifier.fillMaxWidth().clickable { text = value }, verticalAlignment = Alignment.CenterVertically) {
@@ -155,30 +221,30 @@ private fun EditSettingDialog(s: SettingItem, onSave: (String?) -> String?, onDi
                 } else {
                     OutlinedTextField(
                         value = text, onValueChange = { text = it; error = null }, singleLine = true, isError = error != null,
-                        supportingText = { Text(error ?: hint(s.kind)) },
+                        supportingText = { Text(error ?: hint(s.kind)?.let { stringResource(it) }.orEmpty()) },
                         keyboardOptions = KeyboardOptions(keyboardType = keyboard(s.kind)),
                     )
                 }
                 if (options != null) error?.let { Text(it, color = Palette.Danger) }
-                Muted("Default: ${display(s.copy(value = s.default))}")
+                Muted(stringResource(R.string.settings_default_is, display(s.copy(value = s.default), weekdays, LocalResources.current)))
             }
         },
-        confirmButton = { TextButton(onClick = { error = onSave(text) }) { Text("Save") } },
+        confirmButton = { TextButton(onClick = { error = onSave(text) }) { Text(stringResource(R.string.save)) } },
         dismissButton = {
             Row {
-                if (!s.isDefault) TextButton(onClick = { error = onSave(null) }) { Text("Default", color = Palette.Muted) }
-                TextButton(onClick = onDismiss) { Text("Cancel") }
+                if (!s.isDefault) TextButton(onClick = { error = onSave(null) }) { Text(stringResource(R.string.settings_default), color = Palette.Muted) }
+                TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) }
             }
         },
     )
 }
 
-private fun hint(kind: String) = when (kind) {
-    "time" -> "HH:MM, e.g. 07:30"
-    "times" -> "Times separated by commas, e.g. 13:00, 17:00"
-    "time_off" -> "HH:MM, or off"
-    "timezone" -> "e.g. Asia/Jerusalem"
-    else -> ""
+private fun hint(kind: String): Int? = when (kind) {
+    "time" -> R.string.settings_hint_time
+    "times" -> R.string.settings_hint_times
+    "time_off" -> R.string.settings_hint_time_off
+    "timezone" -> R.string.settings_hint_timezone
+    else -> null
 }
 
 private fun keyboard(kind: String) = when (kind) {

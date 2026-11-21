@@ -1,5 +1,8 @@
 package com.prominder.myapp.ui
 
+import com.prominder.myapp.R
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -63,7 +66,7 @@ fun AlarmScreen(
         Text("🔔", fontSize = 64.sp)
         Spacer(Modifier.height(16.dp))
         Text(time, fontSize = 72.sp, fontWeight = FontWeight.Bold, color = Palette.Accent)
-        if (ui.rings > 1) Muted("Rang ${ui.rings} times")
+        if (ui.rings > 1) Muted(pluralStringResource(R.plurals.alarm_rang, ui.rings, ui.rings))
         Spacer(Modifier.height(8.dp))
         Text(ui.title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
         Spacer(Modifier.height(8.dp))
@@ -81,16 +84,16 @@ fun AlarmScreen(
                 OutlinedButton(onClick = onLater, modifier = Modifier.weight(1f).height(56.dp)) { Text("⏰ ${ui.laterLabel}", fontSize = 18.sp) }
             }
             if (ui.canOpen) {
-                OutlinedButton(onClick = onOpen, modifier = Modifier.weight(1f).height(56.dp)) { Text("Open", fontSize = 18.sp) }
+                OutlinedButton(onClick = onOpen, modifier = Modifier.weight(1f).height(56.dp)) { Text(stringResource(R.string.action_open), fontSize = 18.sp) }
             }
         }
         if (ui.doneLabel == null && !ui.canOpen) {
             Button(onClick = onDismiss, modifier = Modifier.fillMaxWidth().height(64.dp)) {
-                Text("Dismiss", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Text(stringResource(R.string.action_dismiss), fontSize = 20.sp, fontWeight = FontWeight.Bold)
             }
         } else {
             Spacer(Modifier.height(8.dp))
-            TextButton(onClick = onDismiss) { Text("Dismiss", color = Palette.Muted, fontSize = 16.sp) }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.action_dismiss), color = Palette.Muted, fontSize = 16.sp) }
         }
     }
 }

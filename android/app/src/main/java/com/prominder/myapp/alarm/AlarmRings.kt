@@ -39,7 +39,6 @@ object AlarmRings {
         val title: String,
         val text: String,
         val taskId: Long?,
-        val lang: String,
         val startedAt: Long,
         val until: Long,
         val everyMs: Long,
@@ -60,7 +59,7 @@ object AlarmRings {
     /** An alarm-level message from the tick: the first ring, and the next one planned. */
     fun start(context: Context, notice: Notice, now: Long = System.currentTimeMillis()) {
         val everyMs = notice.alarmEveryMin.coerceIn(1, 30) * 60_000L
-        val r = Ringing(notice.messageId, notice.title, notice.text, notice.taskId, notice.lang, now,
+        val r = Ringing(notice.messageId, notice.title, notice.text, notice.taskId, now,
             now + notice.alarmSeconds * 1000, everyMs)
         save(context, r)
         ring(context, r, now)
@@ -109,7 +108,7 @@ object AlarmRings {
         val id = p.getLong("message_id", -1)
         if (id < 0) return null
         return Ringing(id, p.getString("title", "").orEmpty(), p.getString("text", "").orEmpty(),
-            p.getLong("task_id", -1).takeIf { it >= 0 }, p.getString("lang", "en") ?: "en",
+            p.getLong("task_id", -1).takeIf { it >= 0 },
             p.getLong("started_at", 0), p.getLong("until", 0), p.getLong("every_ms", 120_000), p.getInt("rings", 1))
     }
 
@@ -139,7 +138,7 @@ object AlarmRings {
 
     private fun save(context: Context, r: Ringing) = prefs(context).edit {
         putLong("message_id", r.messageId).putString("title", r.title).putString("text", r.text)
-            .putLong("task_id", r.taskId ?: -1).putString("lang", r.lang).putLong("started_at", r.startedAt)
+            .putLong("task_id", r.taskId ?: -1).putLong("started_at", r.startedAt)
             .putLong("until", r.until).putLong("every_ms", r.everyMs).putInt("rings", r.rings)
     }
 

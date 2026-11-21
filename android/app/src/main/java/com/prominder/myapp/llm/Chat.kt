@@ -1,6 +1,5 @@
 package com.prominder.myapp.llm
 
-import com.prominder.myapp.data.TaskKind
 import com.prominder.myapp.diag.Diag
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -18,8 +17,8 @@ data class ChatTurn(
     val sending: String? = null,
     /** Your saved message (✓ Sent), until the reply arrives. */
     val sentId: Long? = null,
-    /** The tool steps of this turn ("📝 Writing a new task: Dentist"). */
-    val steps: List<String> = emptyList(),
+    /** The tool steps of this turn; the chat shows them as "📝 Writing a new task: Dentist" (ui/ToolSteps.kt). */
+    val steps: List<ToolStatus> = emptyList(),
     /** The assistant is writing (the typing dots). */
     val typing: Boolean = false,
     /** Why there's no reply; [failedId] is the message it was for (Try again answers it). */
@@ -82,7 +81,7 @@ class Chat(private val scope: CoroutineScope, private val agent: () -> Agent) {
                         _turn.update { it.copy(sentId = p.userMessageId) }
                     }
                     ChatProgress.Thinking -> _turn.update { it.copy(typing = true) }
-                    is ChatProgress.Tool -> _turn.update { it.copy(typing = false, steps = it.steps + toolLabel(p.status)) }
+                    is ChatProgress.Tool -> _turn.update { it.copy(typing = false, steps = it.steps + p.status) }
                 }
             }
             _turn.value = ChatTurn()
@@ -101,27 +100,5 @@ class Chat(private val scope: CoroutineScope, private val agent: () -> Agent) {
     private fun failed(error: String, saved: Long?, text: String): ChatOutcome {
         _turn.value = ChatTurn(error = error, failedId = saved, failedText = text)
         return ChatOutcome(null, error)
-    }
-
-    companion object {
-        /** The status line for a tool call. */
-        fun toolLabel(t: ToolStatus): String {
-            val (what, which) = when (t.name) {
-                "add_task" -> (if (t.kind == TaskKind.MEETING) "📅 Saving a new meeting" else "📝 Writing a new task") to t.title
-                "update_setting" -> "⚙️ Changing a setting" to null
-                "remember_preference" -> "🧠 Remembering that" to null
-                "list_tasks" -> "🔎 Checking your tasks" to null
-                "update_task" -> "✏️ Updating task" to (t.taskTitle ?: t.title)
-                "complete_task" -> "✅ Marking as done" to t.taskTitle
-                "cancel_task" -> "🗑 Cancelling task" to t.taskTitle
-                "schedule_followup" -> "⏰ Scheduling a follow-up" to t.taskTitle
-                "add_subtask" -> "➕ Adding a step" to t.title
-                "log_interaction" -> "🗒 Making a note" to t.taskTitle
-                "mark_blocked" -> "⛔ Marking as blocked" to t.taskTitle
-                "set_focus" -> "🎯 Setting Today's 3" to null
-                else -> "⚙️ Working" to null
-            }
-            return if (which != null) "$what: $which" else what
-        }
     }
 }

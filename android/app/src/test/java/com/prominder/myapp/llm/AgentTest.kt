@@ -1,5 +1,7 @@
 package com.prominder.myapp.llm
 
+import com.prominder.myapp.R
+import com.prominder.myapp.ui.ToolSteps
 import androidx.test.core.app.ApplicationProvider
 import com.prominder.myapp.data.AppDatabase
 import com.prominder.myapp.data.Chips
@@ -194,8 +196,8 @@ class AgentTest {
         assertEquals(ChatProgress.Received(r.userMessageId), events[0])
         assertEquals(ChatProgress.Tool(ToolStatus("add_task", title = "Dentist", kind = "meeting")), events[2])
         assertEquals(ChatProgress.Tool(ToolStatus("complete_task", taskTitle = "Call the bank")), events[4])
-        assertEquals("📅 Saving a new meeting: Dentist", Chat.toolLabel((events[2] as ChatProgress.Tool).status))
-        assertEquals("✅ Marking as done: Call the bank", Chat.toolLabel((events[4] as ChatProgress.Tool).status))
+        assertEquals(R.string.step_new_meeting to "Dentist", ToolSteps.of((events[2] as ChatProgress.Tool).status))
+        assertEquals(R.string.step_complete to "Call the bank", ToolSteps.of((events[4] as ChatProgress.Tool).status))
     }
 
     @Test fun `a failing progress callback never breaks the turn`() {

@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Only the window behind Compose; the real theme is ui/theme/Theme.kt. -->
-    <style name="Theme.Reminder" parent="android:Theme.Material.NoActionBar">
+    <!-- Only the window behind Compose; the real theme is ui/theme/Theme.kt. AppCompat's, because the screens are
+         AppCompatActivity (the in-app language choice needs it before Android 13). -->
+    <style name="Theme.Reminder" parent="Theme.AppCompat.NoActionBar">
         <item name="android:windowBackground">@color/bg</item>
         <item name="android:statusBarColor">@color/bg</item>
         <item name="android:navigationBarColor">@color/bg</item>

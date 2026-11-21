@@ -2,7 +2,7 @@ package com.prominder.myapp
 
 import android.content.Intent
 import android.os.Bundle
-import androidx.activity.ComponentActivity
+import androidx.appcompat.app.AppCompatActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Box
@@ -23,7 +23,7 @@ import com.prominder.myapp.ui.theme.Palette
 import com.prominder.myapp.ui.theme.ReminderTheme
 
 
-class MainActivity : ComponentActivity() {
+class MainActivity : AppCompatActivity() {
     override fun onStart() {
         super.onStart()
         (application as ReminderApp).visible = true

@@ -1,5 +1,8 @@
 package com.prominder.myapp.ui
 
+import androidx.compose.ui.platform.LocalResources
+import com.prominder.myapp.R
+import androidx.compose.ui.res.stringResource
 import android.Manifest
 import android.content.Context
 import android.content.Intent
@@ -56,6 +59,7 @@ fun AppRoot(auth: AuthRepository) {
 @Composable
 private fun LoginRoute(auth: AuthRepository) {
     val context = LocalContext.current
+    val res = LocalResources.current
     val scope = rememberCoroutineScope()
     val configured = auth.isConfigured && BuildConfig.GOOGLE_WEB_CLIENT_ID.isNotBlank()
     var state by remember { mutableStateOf(LoginState(configured = configured)) }
@@ -69,7 +73,7 @@ private fun LoginRoute(auth: AuthRepository) {
                     // Null: you closed Google's sheet.
                     val idToken = GoogleSignIn.idToken(context, BuildConfig.GOOGLE_WEB_CLIENT_ID)
                     if (idToken != null) {
-                        state = state.copy(message = "Signing in…")
+                        state = state.copy(message = res.getString(R.string.login_signing_in))
                         auth.signIn(idToken)
                     }
                 } catch (e: AuthException) {
@@ -91,7 +95,7 @@ private fun SignedInRoute(auth: AuthRepository, session: Session) {
     var hasData by remember { mutableStateOf<Boolean?>(null) }
     LaunchedEffect(Unit) { hasData = app.store.hasData() }
     when (hasData) {
-        null -> Muted("Loading…")
+        null -> Muted(stringResource(R.string.loading))
         false -> HandoverRoute(app, onDone = { hasData = true }, onLogout = { logout(context, auth) })
         true -> MainRoutes(app, auth, session)
     }
@@ -100,13 +104,14 @@ private fun SignedInRoute(auth: AuthRepository, session: Session) {
 @Composable
 private fun HandoverRoute(app: ReminderApp, onDone: () -> Unit, onLogout: () -> Unit) {
     val scope = rememberCoroutineScope()
+    val res = LocalResources.current
     var state by remember { mutableStateOf(HandoverState()) }
     LaunchedEffect(Unit) {
         // Only to choose the wording (move or restore); the button works either way.
         state = try {
             val st = app.sync.status()
             state.copy(alreadyHandedOver = st.handedOverAt != null,
-                lastBackup = Times.parseOrNull(st.lastUploadAt)?.let { Format.time(it, java.time.ZoneId.systemDefault(), Instant.now()) })
+                lastBackup = Times.parseOrNull(st.lastUploadAt)?.let { Format.time(res, it, java.time.ZoneId.systemDefault(), Instant.now()) })
         } catch (e: SyncException) {
             state
         }
@@ -114,7 +119,7 @@ private fun HandoverRoute(app: ReminderApp, onDone: () -> Unit, onLogout: () -> 
     HandoverScreen(
         state = state,
         onMove = {
-            state = state.copy(busy = true, message = "Downloading your data…")
+            state = state.copy(busy = true, message = res.getString(R.string.handover_downloading_data))
             scope.launch {
                 try {
                     val r = app.sync.restore(handover = true)
