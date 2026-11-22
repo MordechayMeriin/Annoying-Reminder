@@ -104,6 +104,28 @@ class AgentTest {
         assertEquals(listOf(t.id), chat(ScriptedLlm(listOf(says("Great, enjoy!"))), "yes, going at 6").taskIds)
     }
 
+    @Test fun `once the assistant has answered, later messages aren't tied to the check-in`() {
+        val t = task("Gym")
+        said("assistant", "Gym today?", "nudge", listOf(t.id))
+        said("user", "what's the weather like?", "chat")
+        said("assistant", "I can't check the weather.", "chat")
+        advance(5)
+        val r = chat(ScriptedLlm(listOf(says("Sure, here's a short list."))), "give me ideas for dinner")
+        assertEquals(emptyList<Long>(), r.taskIds)
+        assertTrue(Chips.decode(messages().last().chips).isEmpty()) // no ▶ Start · ✓ Done for the gym
+    }
+
+    @Test fun `a message naming another task isn't tied to the check-in`() {
+        val gym = task("Gym")
+        val plumber = task("Call the plumber")
+        said("assistant", "Gym today?", "nudge", listOf(gym.id))
+        val llm = ScriptedLlm(listOf(says("Good luck with the plumber.")))
+        val r = chat(llm, "the plumber is coming at 5")
+        assertEquals(emptyList<Long>(), r.taskIds)
+        val system = llm.content(0, 0)
+        assertTrue(system.indexOf("Call the plumber") < system.indexOf("\"Gym\"")) // the named task is the first guess
+    }
+
     @Test fun `a reply to a grouped check-in without an action stays unlinked`() {
         val a = task("Gym")
         val b = task("Groceries")

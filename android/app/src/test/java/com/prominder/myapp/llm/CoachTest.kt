@@ -101,6 +101,17 @@ class CoachTest {
         assertTrue(r.lines.any { it.startsWith("Check-in rewritten: #1") })
     }
 
+    @Test fun `a check-in about two tasks has no action buttons (they'd always hit the first)`() {
+        add("Write the report", focus = true, remind = now, priority = 2)
+        add("Call the bank", focus = true, remind = now)
+        tick(ScriptedLlm(listOf(says("Report and bank: which one first?"))))
+        val m = sent().single()
+        assertEquals(listOf(1L, 2L), m.taskIds)
+        val chips = Chips.decode(m.chips)
+        assertEquals(listOf("stuck"), chips.map { it.id })
+        assertTrue(chips.all { it.taskId == null })
+    }
+
     @Test fun `messages that fall in one tick are written side by side`() {
         add("Write the report", focus = true, remind = local(9, 8, 0))
         now = local(9, 8, 0)   // the morning plan and a check-in together

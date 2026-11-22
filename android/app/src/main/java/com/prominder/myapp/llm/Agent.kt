@@ -2,6 +2,7 @@ package com.prominder.myapp.llm
 
 import com.prominder.myapp.data.Role
 import com.prominder.myapp.data.Chips
+import com.prominder.myapp.data.MessageKind
 import com.prominder.myapp.data.MessageRow
 import com.prominder.myapp.data.Store
 import com.prominder.myapp.data.TaskRow
@@ -126,7 +127,11 @@ class Agent(private val store: Store, private val llm: Llm, private val prompts:
         val linkHours = s.replyLinkHours
         val recent = last?.takeIf { lastAt != null && Duration.between(lastAt, now).seconds <= linkHours * 3600 }
         val open = store.listTasks("open")
-        var candidateIds = Coaching.selectCandidateTasks(text, now, lastAt, last?.taskIds.orEmpty(), recentTaskIds(start), open, linkHours)
+        // The assistant answered since the check-in: the chat has moved on, so this message isn't a reply to it.
+        val answered = recent != null && history.any { it.role == Role.ASSISTANT && it.kind == MessageKind.CHAT && it.id > recent.id }
+        val named = Coaching.namedTasks(text, open)
+        var candidateIds = Coaching.selectCandidateTasks(text, now, lastAt, if (answered) emptyList() else last?.taskIds.orEmpty(),
+            recentTaskIds(start), open, linkHours)
         val reason = avoidReasonTap(text, history, last)
         if (reason != null) {
             // A reason button: recorded here, and the task gets a fresh start (no more reason messages, no park).
@@ -155,7 +160,7 @@ class Agent(private val store: Store, private val llm: Llm, private val prompts:
                 "likely_topic" to likelyTopic(candidates, recent, local, facts, today),
             ),
         )
-        val checkinIds = if (reason != null) listOf(reason.second) else recent?.taskIds.orEmpty()
+        val checkinIds = if (reason != null) listOf(reason.second) else Coaching.checkinReplyIds(recent?.taskIds.orEmpty(), answered, named)
         return Turn(history, userMsg, checkinIds, system, byId.mapValues { it.value.title }, open.associate { it.id to it.kind })
     }
 

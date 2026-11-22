@@ -253,8 +253,13 @@ Only Shabbat and yom tov count, not chol hamoed or fast days.
 
 ### Replies
 When you reply, the agent gets the last check-in (if recent) and up to 3 candidate tasks with their
-context, marked as a *guess*. The model decides what your message is about and may ask one short
-question if it's ambiguous. The turn is linked to the tasks the model actually acted on.
+context, marked as a *guess*: first the tasks your message names (a word of their title), then the
+check-in's, then those of today's latest messages, so a task nagged all morning never crowds out the
+one you're talking about. The model decides what your message is about and may ask one short
+question if it's ambiguous. The turn is linked to the tasks the model actually acted on; if it acted on
+none, to the check-in's task only while your message answers it (nothing said since, and it doesn't
+name another task). A check-in about several tasks has no ▶ Start / ✓ Done / Later buttons, which
+would only ever reach the first.
 
 ### Tools (12, flat parameters for a mid-size model)
 `add_task` (with the inferred `next_action` and `estimate_min`), `list_tasks`, `update_task` (also
