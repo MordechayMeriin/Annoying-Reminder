@@ -165,20 +165,35 @@ class GuardrailsTest {
 
     private val OPEN = listOf(task(7, title = "Call the plumber"), task(8, title = "לשלם ארנונה"), task(9, title = "Gym"))
 
-    @Test fun candidatesRecentCheckinFirst() =
-        assertEquals(listOf(9L, 7L), Coaching.selectCandidateTasks("ugh, the plumber again", l(9, 10).i, l(9, 9).i, listOf(9), emptyList(), OPEN, 3.0))
+    @Test fun candidatesNamedTaskBeforeTheCheckin() =
+        assertEquals(listOf(7L, 9L), Coaching.selectCandidateTasks("ugh, the plumber again", l(9, 10).i, l(9, 9).i, listOf(9), emptyList(), OPEN, 3.0))
+
+    @Test fun candidatesRecentCheckinFirstWhenNothingIsNamed() =
+        assertEquals(listOf(9L, 7L), Coaching.selectCandidateTasks("ok, will do", l(9, 10).i, l(9, 9).i, listOf(9), listOf(7), OPEN, 3.0))
+
+    @Test fun candidatesANaggedTaskDoesNotCrowdOutTheNamedOne() =
+        // The check-in and every recent message are about #9 and #7: the task the user names still makes the cut.
+        assertEquals(listOf(8L, 9L, 7L), Coaching.selectCandidateTasks("שילמתי ארנונה", l(9, 10).i, l(9, 9).i, listOf(9), listOf(9, 7), OPEN, 3.0))
 
     @Test fun candidatesOldCheckinIgnoredHebrewMatch() =
         assertEquals(listOf(8L), Coaching.selectCandidateTasks("שילמתי ארנונה", l(9, 10).i, l(9, 5).i, listOf(9), emptyList(), OPEN, 3.0))
 
     @Test fun candidatesLimitAndDedupe() =
-        assertEquals(listOf(9L, 7L, 8L), Coaching.selectCandidateTasks("plumber", l(9, 10).i, l(9, 9).i, listOf(9, 7), listOf(7, 8), OPEN, 3.0, limit = 3))
+        assertEquals(listOf(7L, 9L, 8L), Coaching.selectCandidateTasks("plumber", l(9, 10).i, l(9, 9).i, listOf(9, 7), listOf(7, 8), OPEN, 3.0, limit = 3))
 
     @Test fun linkFollowsActionsThenUnambiguousCheckin() {
         assertEquals(listOf(5L, 6L), Coaching.linkTaskIds(listOf(5, 5, 6), listOf(9)))
         assertEquals(listOf(9L), Coaching.linkTaskIds(emptyList(), listOf(9)))
         assertEquals(emptyList<Long>(), Coaching.linkTaskIds(emptyList(), listOf(9, 7)))
         assertEquals(emptyList<Long>(), Coaching.linkTaskIds(emptyList(), emptyList()))
+    }
+
+    @Test fun aCheckinLinksOnlyTheMessagesThatAnswerIt() {
+        assertEquals(listOf(9L), Coaching.checkinReplyIds(listOf(9), answeredSince = false, named = emptyList()))
+        assertEquals(listOf(9L), Coaching.checkinReplyIds(listOf(9), answeredSince = false, named = listOf(9, 7)))
+        // The chat moved on since the check-in, or the message names another task: not a reply to it.
+        assertEquals(emptyList<Long>(), Coaching.checkinReplyIds(listOf(9), answeredSince = true, named = emptyList()))
+        assertEquals(emptyList<Long>(), Coaching.checkinReplyIds(listOf(9), answeredSince = false, named = listOf(7)))
     }
 
     @Test fun clip() {

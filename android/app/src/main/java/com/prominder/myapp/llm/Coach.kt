@@ -84,8 +84,11 @@ class Coach(private val store: Store, private val llm: Llm?, private val prompts
         val firstTask = group.firstOrNull { it.kind == TaskKind.TASK }
         val lang = ChipRules.chipLang(reads.lastUserText(), firstTask?.title)
         val stages = group.filter { it.kind == TaskKind.TASK }.associate { it.id to Coaching.taskStage(it, reads.eventCounts(it, 7), today) }
+        // Action buttons (Start, Done, Later) only when the message is about one task: with two, a tap would always hit
+        // the first (the most important), whichever the user meant. The text buttons stay.
+        val onlyTask = group.singleOrNull { it.kind == TaskKind.TASK }
         val chips = firstTask?.let {
-            ChipRules.chipsJson(ChipRules.chipsFor(if (avoided) "avoided" else "checkin", stages[it.id]), lang, it.id)
+            ChipRules.chipsJson(ChipRules.chipsFor(if (avoided) "avoided" else "checkin", stages[it.id]), lang, onlyTask?.id)
         }.orEmpty()
 
         var body = ""

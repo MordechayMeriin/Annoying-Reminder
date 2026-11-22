@@ -21,18 +21,38 @@ object Coaching {
 
     private fun words(text: String?): Set<String> = WORD.findAll(text ?: "").map { it.value.lowercase() }.toSet()
 
-    /** Up to [limit] task ids a reply is probably about, best first (only a hint for the LLM). */
+    /** Open tasks whose title shares a word with the message: the user named them. */
+    fun namedTasks(text: String, open: List<TaskRow>): List<Long> {
+        val w = words(text)
+        return if (w.isEmpty()) emptyList() else open.filter { (w intersect words(it.title)).isNotEmpty() }.map { it.id }
+    }
+
+    /**
+     * Up to [limit] task ids a reply is probably about, best first (only a hint for the LLM). The tasks the message names
+     * come first: a task nagged all morning fills the check-in and recent slots, and must not crowd out the one the user
+     * is talking about. Then the last check-in's tasks (while it's recent), then the tasks of today's latest messages.
+     */
     fun selectCandidateTasks(
         reply: String, now: Instant, lastProactiveAt: Instant?, lastProactiveTaskIds: List<Long>, recentTaskIds: List<Long>,
         open: List<TaskRow>, linkHours: Double, limit: Int = 3,
     ): List<Long> {
         val out = mutableListOf<Long>()
         fun add(ids: Iterable<Long>) = ids.forEach { if (it !in out) out += it }
+        add(namedTasks(reply, open))
         if (lastProactiveAt != null && Duration.between(lastProactiveAt, now).seconds <= linkHours * 3600) add(lastProactiveTaskIds)
         add(recentTaskIds)
-        val w = words(reply)
-        if (w.isNotEmpty()) add(open.filter { (w intersect words(it.title)).isNotEmpty() }.map { it.id })
         return out.take(limit)
+    }
+
+    /**
+     * The check-in a message answers, for linking a turn where the agent changed nothing: the last check-in's tasks, but
+     * only while the message is a reply to it. Not once the assistant has answered something since (the conversation
+     * moved on), and not when the message names other tasks and not the check-in's.
+     */
+    fun checkinReplyIds(checkinIds: List<Long>, answeredSince: Boolean, named: List<Long>): List<Long> = when {
+        answeredSince -> emptyList()
+        named.isNotEmpty() && checkinIds.none { it in named } -> emptyList()
+        else -> checkinIds
     }
 
     /** Which tasks a user turn is linked to: what the agent acted on, else an unambiguous check-in's task. */
